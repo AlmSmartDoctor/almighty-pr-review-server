@@ -1,7 +1,14 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from server.api import app, get_conn
 from server.db import connect, init_schema
+
+
+@pytest.fixture(autouse=True)
+def _clear_overrides():
+    yield
+    app.dependency_overrides.clear()
 
 
 def _client(tmp_path):
