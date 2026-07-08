@@ -111,7 +111,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
     WAL + busy_timeout으로 reader/writer 동시성 및 잠깐의 락 경합을 흡수.
     """
-    conn = sqlite3.connect(str(path), timeout=30)
+    conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
