@@ -48,11 +48,14 @@ def prescreen(
     """env를 넘기면 격리 config dir로 실행(build_deps가 하네스 env 주입)."""
     out = runner(["claude", "-p", PROMPT + diff, "--model", model], env=env)
     m = _FENCE.findall(out)
-    if not m:
-        return PreScreenResult("moderate", 0.5, "사전평가 파싱 실패→기본 리뷰")
-    d = json.loads(m[-1])
-    return PreScreenResult(
-        complexity=d.get("complexity", "moderate"),
-        score=float(d.get("score", 0.5)),
-        reason=str(d.get("reason", "")),
-    )
+    if m:
+        try:
+            d = json.loads(m[-1])
+            complexity = d.get("complexity", "moderate")
+            if complexity in _ORDER:
+                return PreScreenResult(
+                    complexity, float(d.get("score", 0.5)), str(d.get("reason", ""))
+                )
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    return PreScreenResult("moderate", 0.5, "사전평가 파싱 실패→기본 리뷰")

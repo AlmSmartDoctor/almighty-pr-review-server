@@ -23,3 +23,21 @@ def test_prescreen_gate_decision():
     assert res.decide(threshold="moderate") == "skip"
     res2 = PreScreenResult(complexity="complex", score=0.9, reason="x")
     assert res2.decide(threshold="moderate") == "review"
+
+
+def test_prescreen_falls_back_on_no_block():
+    res = prescreen(diff="x", model="m", runner=lambda *a, **k: "no json here")
+    assert res.complexity == "moderate"
+    assert res.decide(threshold="moderate") == "review"
+
+
+def test_prescreen_falls_back_on_malformed_json():
+    bad = '```json\n{"complexity":moderate,}\n```'  # unquoted value + trailing comma
+    res = prescreen(diff="x", model="m", runner=lambda *a, **k: bad)
+    assert res.decide(threshold="moderate") == "review"
+
+
+def test_prescreen_normalizes_unknown_complexity():
+    j = '```json\n{"complexity":"huge","score":0.9,"reason":"x"}\n```'
+    res = prescreen(diff="x", model="m", runner=lambda *a, **k: j)
+    assert res.decide(threshold="moderate") == "review"  # no KeyError at gate time
