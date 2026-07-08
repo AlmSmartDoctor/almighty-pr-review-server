@@ -61,6 +61,25 @@ def list_repos(conn=Depends(get_conn)):
     return [dict(r) for r in conn.execute("SELECT * FROM repo").fetchall()]
 
 
+@app.get("/api/overview")
+def overview(conn=Depends(get_conn)):
+    rows = conn.execute("""
+      SELECT p.id, p.number, p.title, r.full_name AS repo,
+             (SELECT complexity FROM pre_screen ps WHERE ps.pr_id=p.id
+                ORDER BY ps.id DESC LIMIT 1) AS prescreen,
+             (SELECT MIN(CASE f.severity WHEN 'critical' THEN 0 WHEN 'high'
+                THEN 1 WHEN 'medium' THEN 2 ELSE 3 END)
+                FROM finding f JOIN review_run rr ON rr.id=f.run_id
+                WHERE rr.pr_id=p.id) AS sev_rank,
+             (SELECT id FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_id
+      FROM pull_request p JOIN repo r ON r.id=p.repo_id
+      WHERE p.state='open' ORDER BY p.updated_at DESC
+    """).fetchall()
+    sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
+    return [{**dict(x), "severity": sev.get(x["sev_rank"], "low")} for x in rows]
+
+
 class RepoPatch(BaseModel):
     enabled: int | None = None
     trigger_mode: str | None = None
