@@ -33,3 +33,30 @@ def test_parse_rejects_bad_severity():
 def test_parse_no_json_raises():
     with pytest.raises(SchemaError):
         parse_findings("자유서술뿐, JSON 없음", vendor="claude")
+
+
+def test_parse_multiple_findings_not_truncated():
+    raw = (
+        '```json\n{"findings":['
+        '{"file":"a.py","line":1,"severity":"high","category":"bug",'
+        '"claim":"c1","rationale":"r1","confidence":0.7},'
+        '{"file":"b.py","line":2,"severity":"low","category":"style",'
+        '"claim":"c2","rationale":"r2","confidence":0.3}]}\n```'
+    )
+    fs = parse_findings(raw, vendor="claude")
+    assert len(fs) == 2
+    assert [f.file for f in fs] == ["a.py", "b.py"]
+
+
+def test_parse_empty_findings_returns_empty():
+    raw = '```json\n{"findings": []}\n```'
+    assert parse_findings(raw, vendor="codex") == []
+
+
+def test_parse_rejects_finding_missing_required_key():
+    raw = (
+        '```json\n{"findings":[{"line":1,"severity":"high",'
+        '"category":"bug","rationale":"r","confidence":0.5}]}\n```'
+    )  # no file/claim
+    with pytest.raises(SchemaError):
+        parse_findings(raw, vendor="claude")

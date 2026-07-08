@@ -27,6 +27,8 @@ def parse_findings(raw: str, *, vendor: str) -> list[Finding]:
         raise SchemaError("findings 배열 없음")
     out: list[Finding] = []
     for it in items:
+        if not isinstance(it, dict) or "file" not in it or "claim" not in it:
+            raise SchemaError(f"finding 형식 오류(누락/비객체): {it!r}"[:200])
         sev, cat = it.get("severity"), it.get("category")
         if sev not in SEVERITIES:
             raise SchemaError(f"잘못된 severity: {sev}")
