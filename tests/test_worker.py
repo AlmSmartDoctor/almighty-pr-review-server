@@ -87,3 +87,32 @@ def test_worker_records_failed_run_id_on_pipeline_error(db, monkeypatch):
     assert j["status"] == "queued"  # rate → retry 예약
     assert j["run_id"] is not None  # 실패 attempt run 기록
     assert review_repo.get_run(db, j["run_id"])["status"] == "failed"
+
+
+def test_worker_returns_false_when_queue_empty(db):
+    # 큐가 비면 claim_next→None → run_one_job이 아무 것도 처리하지 않고 False
+    claimed = asyncio.run(run_one_job(db, worker_id="w1"))
+    assert claimed is False
+
+
+def test_worker_marks_failed_no_retry_on_non_retryable(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=4,
+        title="t",
+        author="a",
+        head_sha="s4",
+        base_ref="main",
+        url="u",
+    )
+    job_repo.enqueue(db, pr_id=pid, head_sha="s4", trigger="auto")
+
+    async def boom(conn, *, pr_id, trigger, deps):
+        raise RuntimeError("permission denied")  # rate/timeout 아님 → 재시도 안 함
+
+    monkeypatch.setattr("server.worker.review_pr", boom)
+    asyncio.run(run_one_job(db, worker_id="w1"))
+    j = db.execute("SELECT * FROM review_job WHERE pr_id=?", (pid,)).fetchone()
+    assert j["status"] == "failed"  # 비재시도 오류 → 즉시 failed (retry 분기 else)
