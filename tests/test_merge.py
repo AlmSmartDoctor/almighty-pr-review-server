@@ -9,11 +9,7 @@ def _f(vendor, file, line):
 def test_merge_tags_consensus_when_close():
     fs = [_f("claude", "a.py", 10), _f("codex", "a.py", 11)]
     merged = deterministic_merge(fs)
-    assert (
-        all(m.consensus == "consensus" for m in merged)
-        if hasattr(merged[0], "consensus")
-        else True
-    )
+    assert all(m.consensus == "consensus" for m in merged)
     # consensus_group으로 묶였는지
     groups = {m.consensus_group_id for m in merged}
     assert len(groups) == 1
@@ -23,3 +19,22 @@ def test_merge_keeps_single_when_far():
     fs = [_f("claude", "a.py", 10), _f("codex", "b.py", 200)]
     merged = deterministic_merge(fs)
     assert len({m.consensus_group_id for m in merged}) == 2
+
+
+def test_merge_separates_different_category():
+    fs = [
+        Finding("claude", "a.py", 10, "high", "bug", "c", "r", 0.8),
+        Finding("codex", "a.py", 10, "high", "security", "c", "r", 0.8),
+    ]
+    merged = deterministic_merge(fs)
+    # same file+line but different category → must NOT be grouped
+    assert len({m.consensus_group_id for m in merged}) == 2
+
+
+def test_merge_same_vendor_stays_single():
+    fs = [_f("claude", "a.py", 10), _f("claude", "a.py", 11)]
+    merged = deterministic_merge(fs)
+    # grouped (same file/category, close lines) ...
+    assert len({m.consensus_group_id for m in merged}) == 1
+    # ... but a single distinct vendor must be "single", not "consensus"
+    assert all(m.consensus == "single" for m in merged)

@@ -20,4 +20,6 @@ def test_semaphore_limits_concurrency():
 
     results = asyncio.run(main())
     assert results == ["ok"] * 6
-    assert peak <= 2
+    assert (
+        peak == 2
+    )  # limit=2 → exactly two jobs overlap (proves the cap AND real parallelism)
