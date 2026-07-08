@@ -14,6 +14,7 @@ from server.repos import (
     review_repo,
     settings_repo,
 )
+from server.review.harness import HarnessProfile
 
 app = FastAPI(title="Almighty PR Review Server")
 
@@ -208,3 +209,28 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
                 finding_repo.set_status(conn, f["id"], "posted")
         posted.append({"vendor": vendor, "url": res["html_url"]})
     return {"posted": posted}
+
+
+@app.get("/api/harness/{name}")
+def get_harness(name: str):
+    hp = HarnessProfile.load(name)
+    return {
+        "name": hp.name,
+        "system_prompt": hp.system_prompt,
+        "claude_allowed_tools": hp.claude_allowed_tools,
+        "codex_sandbox": hp.codex_sandbox,
+        "model": hp.model,
+        "effort": hp.effort,
+    }
+
+
+class HarnessPut(BaseModel):
+    system_prompt: str | None = None
+
+
+@app.put("/api/harness/{name}")
+def put_harness(name: str, body: HarnessPut):
+    base = config.HARNESS_DIR / name
+    if body.system_prompt is not None:
+        (base / "review-system-prompt.md").write_text(body.system_prompt)
+    return get_harness(name)
