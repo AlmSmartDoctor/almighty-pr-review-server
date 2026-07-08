@@ -3,8 +3,13 @@ from pydantic import BaseModel
 
 from server import config
 from server.db import connect, init_schema
+from server.formatter import MARKER, build_comment
+from server.github.gh import GhClient
+from server.models import Finding
 from server.repos import (
     finding_repo,
+    posted_repo,
+    pr_repo,
     repo_repo,
     review_repo,
     settings_repo,
@@ -120,3 +125,67 @@ def patch_finding(fid: int, body: FindingPatch, conn=Depends(get_conn)):
     else:
         finding_repo.set_status(conn, fid, body.status, body.edited_text)
     return dict(finding_repo.get(conn, fid))
+
+
+_gh = None
+
+
+def get_gh():
+    global _gh
+    if _gh is None:
+        _gh = GhClient()
+    return _gh
+
+
+@app.post("/api/runs/{run_id}/post")
+def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
+    run = review_repo.get_run(conn, run_id)
+    pr = pr_repo.get(conn, run["pr_id"])
+    repo = repo_repo.get(conn, pr["repo_id"])
+    rows = [
+        f for f in finding_repo.list_for_run(conn, run_id) if f["status"] == "approved"
+    ]
+    posted = []
+    by_vendor: dict[str, list[Finding]] = {}
+    for f in rows:
+        by_vendor.setdefault(f["vendor"], []).append(
+            Finding(
+                f["vendor"],
+                f["file"],
+                f["line"],
+                f["severity"],
+                f["category"],
+                f["edited_text"] or f["claim"],
+                f["rationale"],
+                f["confidence"] or 0.0,
+            )
+        )
+    for vendor, findings in by_vendor.items():
+        body = build_comment(vendor=vendor, findings=findings)
+        # ★개정(codex 재검증 [MEDIUM]): 진짜 update-or-create.
+        # 같은 PR·벤더의 기존 비대체 코멘트가 있으면 GitHub상 in-place 수정,
+        # 없으면 새로 post. → GitHub 화면에도 중복이 남지 않음.
+        prev = posted_repo.latest_for_pr_vendor(conn, pr_id=pr["id"], vendor=vendor)
+        fids = [f["id"] for f in rows if f["vendor"] == vendor]
+        if prev is not None and prev["github_comment_id"]:
+            res = gh.edit_comment(repo["full_name"], prev["github_comment_id"], body)
+            posted_repo.supersede(conn, prev["id"])
+        else:
+            res = gh.post_comment(repo["full_name"], pr["number"], body)
+        # ★개정 (codex v3 [LOW]): API JSON의 .id를 그대로 저장(URL 파싱 제거).
+        posted_repo.add(
+            conn,
+            run_id=run_id,
+            vendor=vendor,
+            github_comment_id=str(res["id"]),
+            url=res["html_url"],
+            marker=MARKER.format(vendor=vendor),
+            body=body,
+            head_sha=run["head_sha"],
+            finding_ids=fids,
+        )
+        for f in rows:
+            if f["vendor"] == vendor:
+                finding_repo.set_status(conn, f["id"], "posted")
+        posted.append({"vendor": vendor, "url": res["html_url"]})
+    return {"posted": posted}
