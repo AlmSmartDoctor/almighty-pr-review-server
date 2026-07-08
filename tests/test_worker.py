@@ -1,6 +1,6 @@
 import asyncio
 
-from server.worker import run_one_job
+from server.worker import _is_retryable, run_one_job, worker_loop
 from server.repos import repo_repo, pr_repo, job_repo, review_repo
 
 
@@ -116,3 +116,54 @@ def test_worker_marks_failed_no_retry_on_non_retryable(db, monkeypatch):
     asyncio.run(run_one_job(db, worker_id="w1"))
     j = db.execute("SELECT * FROM review_job WHERE pr_id=?", (pid,)).fetchone()
     assert j["status"] == "failed"  # 비재시도 오류 → 즉시 failed (retry 분기 else)
+
+
+def test_is_retryable_classification():
+    assert _is_retryable("failed to generate output") is False  # "generate" 오탐 방지
+    assert _is_retryable("rate limit exceeded") is True
+    assert _is_retryable("HTTP 429") is True
+    assert _is_retryable("vendor timeout after 600s") is True
+    assert _is_retryable("overloaded") is True
+
+
+def test_run_one_job_marks_failed_when_pr_missing(db, monkeypatch):
+    # pr_repo.get가 None을 주면(레이스로 삭제 등) 예외로 죽지 않고 job을 failed로.
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=5,
+        title="t",
+        author="a",
+        head_sha="s5",
+        base_ref="main",
+        url="u",
+    )
+    job_repo.enqueue(db, pr_id=pid, head_sha="s5", trigger="auto")
+    monkeypatch.setattr("server.worker.pr_repo.get", lambda conn, pid: None)
+    claimed = asyncio.run(run_one_job(db, worker_id="w1"))
+    assert claimed is True  # 처리는 함(예외 미전파)
+    j = db.execute("SELECT * FROM review_job WHERE pr_id=?", (pid,)).fetchone()
+    assert j["status"] == "failed"  # stranded running 방지
+
+
+def test_worker_loop_survives_tick_error(tmp_path, monkeypatch):
+    from server.db import connect, init_schema
+
+    c = connect(tmp_path / "w.db")
+    init_schema(c)
+    c.close()
+
+    stop = asyncio.Event()
+    calls = []
+
+    async def fake_run_one_job(conn, *, worker_id):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("tick boom")  # 첫 틱은 폭발
+        stop.set()
+        return False
+
+    monkeypatch.setattr("server.worker.run_one_job", fake_run_one_job)
+    asyncio.run(worker_loop(tmp_path / "w.db", stop_event=stop, idle_sleep=0.01))
+    assert len(calls) >= 2  # 첫 에러 후에도 루프 생존

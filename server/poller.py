@@ -51,7 +51,12 @@ async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
                     conn, pr_id=pid, head_sha=pr["head_sha"], trigger="auto"
                 )
 
-            poll_once(conn, list_prs=client.list_open_prs, enqueue=enqueue)
+            try:
+                await asyncio.to_thread(
+                    poll_once, conn, list_prs=client.list_open_prs, enqueue=enqueue
+                )
+            except Exception as e:  # 한 틱의 실패가 폴러를 영구히 죽이지 않게
+                print(f"[poller] tick failed: {e!r}")
         finally:
             conn.close()
         # ★개정: interval 대기 중에도 stop_event에 즉시 반응(graceful shutdown)

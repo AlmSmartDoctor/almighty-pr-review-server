@@ -1,4 +1,6 @@
-from server.poller import poll_once
+import asyncio
+
+from server.poller import poll_loop, poll_once
 from server.repos import repo_repo, pr_repo
 from server.github.gh import PrInfo
 
@@ -92,3 +94,18 @@ def test_poll_once_skips_manual_trigger_mode(db):
     )
     assert enqueued == []  # manual 모드 → 레포 전체 skip
     assert pr_repo.get(db, 1) is None  # continue가 upsert 이전이라 PR도 미생성
+
+
+def test_poll_loop_survives_tick_error(tmp_path, monkeypatch):
+    stop = asyncio.Event()
+    calls = []
+
+    def fake_poll_once(conn, *, list_prs, enqueue):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("tick boom")  # 첫 틱은 폭발
+        stop.set()
+
+    monkeypatch.setattr("server.poller.poll_once", fake_poll_once)
+    asyncio.run(poll_loop(tmp_path / "p.db", interval_sec=0.01, stop_event=stop))
+    assert len(calls) >= 2  # 첫 에러 후에도 루프 생존
