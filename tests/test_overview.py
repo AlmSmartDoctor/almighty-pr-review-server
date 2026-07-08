@@ -53,3 +53,84 @@ def test_overview_lists_open_pr_with_top_severity(tmp_path):
     assert row["repo"] == "acme/api"
     assert row["run_id"] == run_id
     assert row["severity"] == "high"
+
+
+def test_overview_severity_is_worst_across_findings(tmp_path):
+    conn = connect(tmp_path / "api.db")
+    init_schema(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    client = TestClient(app)
+
+    from server.repos import finding_repo, pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="Add feature",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+    finding_repo.add(
+        conn,
+        run_id=run_id,
+        vendor="claude",
+        file="a",
+        line=1,
+        severity="high",
+        category="bug",
+        claim="c",
+        rationale="r",
+        confidence=0.8,
+    )
+    finding_repo.add(
+        conn,
+        run_id=run_id,
+        vendor="claude",
+        file="b",
+        line=2,
+        severity="critical",
+        category="bug",
+        claim="c",
+        rationale="r",
+        confidence=0.8,
+    )
+
+    rows = client.get("/api/overview").json()
+    assert len(rows) == 1
+    assert rows[0]["severity"] == "critical"
+
+
+def test_overview_no_findings_defaults_low(tmp_path):
+    conn = connect(tmp_path / "api.db")
+    init_schema(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    client = TestClient(app)
+
+    from server.repos import pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="Add feature",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+
+    rows = client.get("/api/overview").json()
+    assert len(rows) == 1
+    assert rows[0]["severity"] == "low"
+    assert rows[0]["run_id"] == run_id
