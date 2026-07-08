@@ -17,8 +17,8 @@ def prepared_worktree(repo: Path, sha: str):
     repo = Path(repo)
     tmp = Path(tempfile.mkdtemp(prefix="almighty-wt-"))
     wt = tmp / "wt"
-    _git(repo, "worktree", "add", "--detach", str(wt), sha)
     try:
+        _git(repo, "worktree", "add", "--detach", str(wt), sha)
         yield wt
     finally:
         subprocess.run(
