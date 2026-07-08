@@ -21,26 +21,6 @@ from server.repos import (
 from server.review.harness import HarnessProfile
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    from server import config
-    from server.poller import poll_loop
-    from server.worker import worker_loop
-
-    stop = asyncio.Event()
-    tasks = [
-        asyncio.create_task(poll_loop(config.DB_PATH, stop_event=stop)),
-        asyncio.create_task(worker_loop(config.DB_PATH, stop_event=stop)),
-    ]
-    try:
-        yield
-    finally:
-        stop.set()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-app = FastAPI(title="Almighty PR Review Server", lifespan=lifespan)
-
 _initialized = False
 
 
@@ -51,6 +31,30 @@ def _ensure_schema():
         init_schema(conn)
         conn.close()
         _initialized = True
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from server.poller import poll_loop
+    from server.worker import worker_loop
+
+    _ensure_schema()
+    stop = asyncio.Event()
+    tasks = [
+        asyncio.create_task(poll_loop(config.DB_PATH, stop_event=stop)),
+        asyncio.create_task(worker_loop(config.DB_PATH, stop_event=stop)),
+    ]
+    try:
+        yield
+    finally:
+        stop.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                print(f"[lifespan] background loop exited with error: {r!r}")
+
+
+app = FastAPI(title="Almighty PR Review Server", lifespan=lifespan)
 
 
 def get_conn():
