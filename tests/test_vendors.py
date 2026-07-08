@@ -1,7 +1,14 @@
 import asyncio
 
+import pytest
+
 from server.review.harness import HarnessProfile
-from server.review.vendors import ClaudeAdapter, CodexAdapter
+from server.review.vendors import (
+    ClaudeAdapter,
+    CodexAdapter,
+    VendorTimeout,
+    _default_runner,
+)
 
 
 def fake_runner(stdout):
@@ -39,6 +46,10 @@ def test_claude_adapter_parses_findings(tmp_path):
     # read-only 격리 env 주입 + 전역 env 미상속(os.environ 통째 아님)
     assert "CLAUDE_CONFIG_DIR" in runner.calls[0]["env"]
     assert runner.calls[0]["timeout"] is not None
+    args = runner.calls[0]["args"]
+    assert args[:2] == ["claude", "-p"]
+    assert "--allowedTools" in args
+    assert "--model" in args
 
 
 def test_codex_adapter_parses_findings(tmp_path):
@@ -55,3 +66,17 @@ def test_codex_adapter_parses_findings(tmp_path):
     )
     assert fs[0].vendor == "codex"
     assert "CODEX_HOME" in runner.calls[0]["env"]
+    args = runner.calls[0]["args"]
+    assert args[:2] == ["codex", "exec"]
+    assert "--skip-git-repo-check" in args
+    assert "--sandbox" in args
+
+
+def test_default_runner_timeout_raises_vendor_timeout():
+    with pytest.raises(VendorTimeout):
+        asyncio.run(_default_runner(["sleep", "5"], timeout=0.2))
+
+
+def test_default_runner_nonzero_rc_surfaces_stderr():
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(_default_runner(["sh", "-c", "echo boom >&2; exit 3"], timeout=5))
