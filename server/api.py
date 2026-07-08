@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from pydantic import BaseModel
 
@@ -17,7 +20,26 @@ from server.repos import (
 )
 from server.review.harness import HarnessProfile
 
-app = FastAPI(title="Almighty PR Review Server")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from server import config
+    from server.poller import poll_loop
+    from server.worker import worker_loop
+
+    stop = asyncio.Event()
+    tasks = [
+        asyncio.create_task(poll_loop(config.DB_PATH, stop_event=stop)),
+        asyncio.create_task(worker_loop(config.DB_PATH, stop_event=stop)),
+    ]
+    try:
+        yield
+    finally:
+        stop.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+app = FastAPI(title="Almighty PR Review Server", lifespan=lifespan)
 
 _initialized = False
 
