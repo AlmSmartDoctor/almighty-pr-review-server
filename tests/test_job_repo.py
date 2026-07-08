@@ -23,6 +23,35 @@ def test_enqueue_is_idempotent_per_sha(db):
     assert j1 == j2  # UNIQUE(pr_id, head_sha) → 같은 잡
 
 
+def test_enqueue_manual_inserts_when_absent(db):
+    pid = _seed(db)
+    jid = job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
+    row = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert row["status"] == "queued" and row["trigger"] == "manual"
+
+
+def test_enqueue_manual_reopens_terminal_job(db):
+    pid = _seed(db)
+    jid = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.claim_next(db, worker_id="w1")  # attempts→1, running
+    job_repo.mark_done(db, jid, run_id=None)  # 종료(done)
+    again = job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
+    assert again == jid  # 같은 잡을 재개
+    row = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert row["status"] == "queued"  # 재리뷰 실제 재실행되게 재개
+    assert row["attempts"] == 0  # attempts 리셋
+
+
+def test_enqueue_manual_leaves_running_job(db):
+    pid = _seed(db)
+    jid = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.claim_next(db, worker_id="w1")  # running
+    again = job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
+    assert again == jid
+    row = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert row["status"] == "running"  # 진행 중 잡은 안 건드림
+
+
 def test_claim_next_locks_one_job(db):
     pid = _seed(db)
     job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")

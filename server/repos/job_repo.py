@@ -1,3 +1,6 @@
+import sqlite3
+
+
 def enqueue(conn, *, pr_id, head_sha, trigger, priority=0) -> int:
     conn.execute(
         """INSERT INTO review_job (pr_id, head_sha, trigger, priority, created_at)
@@ -12,7 +15,35 @@ def enqueue(conn, *, pr_id, head_sha, trigger, priority=0) -> int:
     ).fetchone()["id"]
 
 
-import sqlite3
+def enqueue_manual(conn, *, pr_id, head_sha, priority=0) -> int:
+    """수동 트리거: 같은 (pr, sha)에 종료된(done/failed/canceled) 잡이 있으면
+    queued로 재개해 재리뷰가 실제로 재실행되게 한다. 진행 중(queued/running)이면
+    건드리지 않고 id만 반환. (auto 폴링의 enqueue는 DO NOTHING 멱등성 유지.)"""
+    row = conn.execute(
+        "SELECT id, status FROM review_job WHERE pr_id=? AND head_sha=?",
+        (pr_id, head_sha),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            """INSERT INTO review_job (pr_id, head_sha, trigger, priority, created_at)
+               VALUES (?,?, 'manual', ?, datetime('now'))""",
+            (pr_id, head_sha, priority),
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT id FROM review_job WHERE pr_id=? AND head_sha=?",
+            (pr_id, head_sha),
+        ).fetchone()["id"]
+    if row["status"] in ("done", "failed", "canceled"):
+        conn.execute(
+            """UPDATE review_job SET status='queued', trigger='manual',
+               locked_by=NULL, locked_at=NULL, next_run_at=NULL,
+               attempts=0, error=NULL WHERE id=?""",
+            (row["id"],),
+        )
+        conn.commit()
+    return row["id"]
+
 
 STALE_LOCK_MINUTES = 30
 
