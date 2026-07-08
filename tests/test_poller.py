@@ -56,3 +56,39 @@ def test_poll_once_no_vendor_upserts_pr_but_skips_enqueue(db):
         db, list_prs=lambda repo: prs, enqueue=lambda pr_id: enqueued.append(pr_id)
     )
     assert enqueued == [1]  # 재활성화 후 enqueue 성립
+
+
+def test_poll_once_reenqueues_on_changed_sha(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="sha1",
+        base_ref="main",
+        url="u",
+    )
+    pr_repo.mark_reviewed(db, pid, "sha1")
+    enqueued = []
+    poll_once(
+        db,
+        list_prs=lambda repo: [PrInfo(7, "t", "a", "sha2", "main", "u", "open")],
+        enqueue=lambda pr_id: enqueued.append(pr_id),
+    )
+    assert enqueued == [pid]  # head_sha 변경 → 재리뷰 enqueue
+    assert pr_repo.get(db, pid)["head_sha"] == "sha2"
+
+
+def test_poll_once_skips_manual_trigger_mode(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    repo_repo.update(db, rid, trigger_mode="manual")
+    enqueued = []
+    poll_once(
+        db,
+        list_prs=lambda repo: [PrInfo(7, "t", "a", "sha1", "main", "u", "open")],
+        enqueue=lambda pr_id: enqueued.append(pr_id),
+    )
+    assert enqueued == []  # manual 모드 → 레포 전체 skip
+    assert pr_repo.get(db, 1) is None  # continue가 upsert 이전이라 PR도 미생성
