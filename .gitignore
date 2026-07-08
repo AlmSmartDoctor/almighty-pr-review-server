@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+*.db
+web/node_modules/
+web/dist/
+harness/**/runtime/
