@@ -1,0 +1,3 @@
+{"claude_allowed_tools": ["Read", "Grep", "Glob"],
+ "codex_sandbox": "read-only",
+ "mcp": "none"}
