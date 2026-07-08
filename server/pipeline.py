@@ -15,6 +15,7 @@ from server.repos import (
 )
 from server.review.harness import HarnessProfile
 from server.review.merge import deterministic_merge
+from server.review.prescreen import PreScreenResult
 from server.review.runner import RunnerPool
 from server.seams import NoOpContextProvider
 
@@ -75,8 +76,6 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     complexity, score, reason = await asyncio.to_thread(
         deps.prescreen, diff, hp.prescreen_model
     )
-    from server.review.prescreen import PreScreenResult
-
     ps = PreScreenResult(complexity, score, reason)
     decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
     prescreen_repo.add(

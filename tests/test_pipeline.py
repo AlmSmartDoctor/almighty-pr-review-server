@@ -113,3 +113,44 @@ def test_pipeline_fails_run_when_all_vendors_fail(db):
         asyncio.run(review_pr(db, pr_id=pid, trigger="auto", deps=deps))
     assert review_repo.get_run(db, ei.value.run_id)["status"] == "failed"
     assert "rate limit" in str(ei.value)  # retry 판정 근거 문자열 보존
+
+
+def test_pipeline_partial_success_one_vendor_fails(db):
+    """부분 성공: 한 벤더 실패해도 다른 벤더 성공분은 run=done + 영속화."""
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=10,
+        title="t",
+        author="a",
+        head_sha="s10",
+        base_ref="main",
+        url="u",
+    )
+
+    class FailAdapter:
+        def __init__(self, vendor):
+            self.vendor = vendor
+
+        async def review(self, **kw):
+            raise RuntimeError("boom")
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FailAdapter("claude"),
+            FakeAdapter(
+                "codex", [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+            ),
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert review_repo.get_run(db, run_id)["status"] == "done"
+    fs = finding_repo.list_for_run(db, run_id)
+    assert {f["vendor"] for f in fs} == {"codex"}  # 성공 벤더 finding만 영속화
+    vr = {v["vendor"]: v["status"] for v in review_repo.list_vendor_results(db, run_id)}
+    assert vr == {"claude": "failed", "codex": "done"}
