@@ -8,6 +8,7 @@ from server.github.gh import GhClient
 from server.models import Finding
 from server.repos import (
     finding_repo,
+    job_repo,
     posted_repo,
     pr_repo,
     repo_repo,
@@ -209,6 +210,15 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
                 finding_repo.set_status(conn, f["id"], "posted")
         posted.append({"vendor": vendor, "url": res["html_url"]})
     return {"posted": posted}
+
+
+@app.post("/api/prs/{pid}/review", status_code=202)
+def trigger_review(pid: int, conn=Depends(get_conn)):
+    pr = pr_repo.get(conn, pid)
+    job_id = job_repo.enqueue(
+        conn, pr_id=pid, head_sha=pr["head_sha"], trigger="manual"
+    )
+    return {"job_id": job_id}
 
 
 @app.get("/api/harness/{name}")

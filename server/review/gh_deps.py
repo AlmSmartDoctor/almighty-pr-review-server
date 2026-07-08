@@ -1,6 +1,30 @@
-def build_deps(repo):
-    """Task 7.2에서 실제 PipelineDeps(gh/worktree/prescreen/adapters) 조립으로
-    대체되는 v1 스텁. worker_loop은 Milestone 7 lifespan에서만 기동되며 그 전에
-    7.2가 이 함수를 구현하므로, 프로덕션 경로에서 None이 review_pr로 흘러가지 않는다.
-    (worker 테스트는 review_pr를 monkeypatch해 deps를 사용하지 않는다.)"""
-    return None
+import tempfile
+
+from server.github.gh import GhClient
+from server.pipeline import PipelineDeps
+from server.review.harness import HarnessProfile
+from server.review.prescreen import prescreen
+from server.review.vendors import ClaudeAdapter, CodexAdapter
+from server.review.worktree import prepared_worktree
+
+
+def build_deps(repo) -> PipelineDeps:
+    if not repo["local_path"]:
+        raise ValueError(f"repo {repo['full_name']}에 local_path 미설정")
+    gh = GhClient()
+    hp = HarnessProfile.load(repo["harness_name"])
+
+    def _prescreen_tuple(diff, model):
+        # ★개정: prescreen도 격리 config dir + 인증 주입(전역 미상속 유지).
+        with tempfile.TemporaryDirectory(prefix="almighty-ps-") as rt:
+            hp.prepare_runtime(runtime_dir=rt)
+            r = prescreen(diff=diff, model=model, env=hp.isolated_env(runtime_dir=rt))
+        return (r.complexity, r.score, r.reason)
+
+    return PipelineDeps(
+        gh_diff=gh.diff,
+        worktree=prepared_worktree,
+        adapters=[ClaudeAdapter(), CodexAdapter()],
+        prescreen=_prescreen_tuple,
+        repo_local_path=repo["local_path"],
+    )
