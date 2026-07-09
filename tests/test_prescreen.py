@@ -18,6 +18,17 @@ def test_prescreen_parses(tmp_path):
     assert res.reason
 
 
+def test_prescreen_confines_runner_cwd():
+    captured = {}
+
+    def runner(args, env=None, cwd=None):
+        captured["cwd"] = cwd
+        return FAKE
+
+    prescreen(diff="diff...", model="haiku", runner=runner, cwd="/tmp/isolated-rt")
+    assert captured["cwd"] == "/tmp/isolated-rt"  # 격리 runtime dir로 가둠
+
+
 def test_prescreen_gate_decision():
     res = PreScreenResult(complexity="trivial", score=0.1, reason="오타")
     assert res.decide(threshold="moderate") == "skip"

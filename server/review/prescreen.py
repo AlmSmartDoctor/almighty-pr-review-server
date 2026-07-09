@@ -43,10 +43,11 @@ PROMPT = (
 
 
 def prescreen(
-    *, diff: str, model: str, runner=_default_runner, env=None
+    *, diff: str, model: str, runner=_default_runner, env=None, cwd=None
 ) -> PreScreenResult:
-    """env를 넘기면 격리 config dir로 실행(build_deps가 하네스 env 주입)."""
-    out = runner(["claude", "-p", PROMPT + diff, "--model", model], env=env)
+    """env/cwd를 넘기면 격리 runtime dir로 실행(build_deps가 하네스 env+격리 cwd 주입).
+    프롬프트에 diff가 인라인이라 파일 접근 불필요 → cwd를 빈 runtime dir로 가둔다."""
+    out = runner(["claude", "-p", PROMPT + diff, "--model", model], env=env, cwd=cwd)
     m = _FENCE.findall(out)
     if m:
         try:

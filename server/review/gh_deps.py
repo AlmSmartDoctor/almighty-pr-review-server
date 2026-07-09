@@ -18,7 +18,9 @@ def build_deps(repo) -> PipelineDeps:
         # ★개정: prescreen도 격리 config dir + 인증 주입(전역 미상속 유지).
         with tempfile.TemporaryDirectory(prefix="almighty-ps-") as rt:
             hp.prepare_runtime(runtime_dir=rt)
-            r = prescreen(diff=diff, model=model, env=hp.isolated_env(runtime_dir=rt))
+            r = prescreen(
+                diff=diff, model=model, env=hp.isolated_env(runtime_dir=rt), cwd=rt
+            )
         return (r.complexity, r.score, r.reason)
 
     return PipelineDeps(
