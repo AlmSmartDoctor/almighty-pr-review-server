@@ -72,8 +72,12 @@ function Detail({ pr, load, loadVendors, onBack }: {
   useEffect(() => { loadVR(pr.run_id).then(setVendors).catch(() => {}); }, [pr.run_id]);
   const failed = vendors.filter((v) => v.status === "failed");
   const set = (id: number, status: string) => {
-    api.patchFinding(id, { status });
-    setFindings((fs) => fs.map((f) => f.id === id ? { ...f, status } : f));
+    const prev = findings.find((f) => f.id === id)?.status;
+    setFindings((fs) => fs.map((f) => (f.id === id ? { ...f, status } : f)));
+    api.patchFinding(id, { status }).catch(() => {
+      setFindings((fs) =>
+        fs.map((f) => (f.id === id && prev !== undefined ? { ...f, status: prev } : f)));
+    });
   };
   return (
     <div>
@@ -102,7 +106,9 @@ function Detail({ pr, load, loadVendors, onBack }: {
           <span style={{ marginLeft: 8 }}>상태: {f.status}</span>
         </div>
       ))}
-      <button onClick={() => api.postRun(pr.run_id)}>승인분 포스팅</button>
+      <button onClick={() => { api.postRun(pr.run_id).then(() => load(pr.run_id).then(setFindings)).catch(() => {}); }}>
+        승인분 포스팅
+      </button>
     </div>
   );
 }

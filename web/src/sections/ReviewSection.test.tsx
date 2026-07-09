@@ -1,6 +1,7 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 import { ReviewSection } from "./ReviewSection";
+import { api } from "../api";
 
 vi.mock("../api", () => ({
   api: {
@@ -67,6 +68,22 @@ test("approving a finding optimistically updates its status", async () => {
   expect(await screen.findByText("상태: pending")).toBeInTheDocument();
   fireEvent.click(screen.getByText("승인"));
   expect(await screen.findByText(/상태: approved/)).toBeInTheDocument();
+});
+
+test("rolls back optimistic status when patch fails", async () => {
+  vi.spyOn(api, "patchFinding").mockRejectedValueOnce(new Error("boom"));
+  render(<ReviewSection loadPrs={async () => PRS}
+                        loadVendors={async () => []}
+                        loadFindings={async () => [
+                          { id: 5, file: "a.py", line: 3, severity: "high",
+                            claim: "널 역참조", status: "pending", vendor: "claude" },
+                        ]} />);
+  fireEvent.click(await screen.findByText("fix null"));
+  expect(await screen.findByText("상태: pending")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("승인"));
+  await waitFor(() =>
+    expect(screen.getByText("상태: pending")).toBeInTheDocument());
+  expect(screen.queryByText(/상태: approved/)).toBeNull();
 });
 
 test("repo tab filters the PR list", async () => {
