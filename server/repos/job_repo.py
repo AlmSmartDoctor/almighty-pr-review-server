@@ -80,16 +80,17 @@ def claim_next(conn, *, worker_id):
     return conn.execute("SELECT * FROM review_job WHERE id=?", (row["id"],)).fetchone()
 
 
-def recover_stale(conn) -> int:
+def recover_stale(conn, *, older_than_minutes: int = STALE_LOCK_MINUTES) -> int:
     """★개정: worker 크래시로 running/locked 고착된 잡을 queued로 복구.
-    worker 시작 시 1회 호출. 반환 = 복구 건수."""
+    worker 시작 시 1회 호출(단일 워커라 부팅 시점의 running은 전부 orphan
+    → older_than_minutes=0). 반환 = 복구 건수."""
     try:
         cur = conn.execute(
             """UPDATE review_job SET status='queued', locked_by=NULL,
                error='recovered from stale lock'
                WHERE status='running'
                  AND locked_at <= datetime('now', ?)""",
-            (f"-{STALE_LOCK_MINUTES} minutes",),
+            (f"-{older_than_minutes} minutes",),
         )
         conn.commit()
         return cur.rowcount

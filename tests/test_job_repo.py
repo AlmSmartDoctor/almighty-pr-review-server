@@ -175,6 +175,22 @@ def test_recover_stale_requeues_running(db):
     )
 
 
+def test_recover_stale_zero_recovers_fresh_lock(db):
+    # 단일 워커 부팅: 방금 잠긴(2분 전) running도 orphan → older_than_minutes=0로 복구.
+    pid = _seed(db)
+    jid = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    db.execute(
+        """UPDATE review_job SET status='running', locked_by='dead',
+                  locked_at=datetime('now','-2 minutes') WHERE id=?""",
+        (jid,),
+    )
+    db.commit()
+    assert job_repo.recover_stale(db, older_than_minutes=0) == 1
+    row = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert row["status"] == "queued"
+    assert row["locked_by"] is None
+
+
 def test_mark_failed_no_dangling_txn_on_lock_contention(tmp_path):
     import sqlite3
     import pytest

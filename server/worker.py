@@ -45,7 +45,7 @@ async def worker_loop(db_path, *, worker_id="w1", idle_sleep=2.0, stop_event=Non
     # ★개정: 시작 시 이전 크래시로 고착된 running 잡을 queued로 복구.
     boot = connect(db_path)
     try:
-        n = job_repo.recover_stale(boot)
+        n = job_repo.recover_stale(boot, older_than_minutes=0)
         if n:
             print(f"[worker] recovered {n} stale jobs")
     finally:
