@@ -6,10 +6,19 @@ import pytest
 from server.models import Finding
 from server.pipeline import review_pr, PipelineDeps, PipelineError
 from server.repos import repo_repo, pr_repo, finding_repo, review_repo
+from server.review.prescreen import MAX_INLINE_DIFF_CHARS
+
+
+@pytest.fixture(autouse=True)
+def _no_runtime_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "server.review.harness.HarnessProfile.prepare_runtime",
+        lambda self, runtime_dir: None,
+    )
 
 
 @contextmanager
-def fake_worktree(repo, sha):
+def fake_worktree(repo, sha, pr_number=None):
     yield "/tmp/fake-wt"
 
 
@@ -78,6 +87,45 @@ def test_pipeline_skips_on_trivial_prescreen(db):
     # skip → run 상태 canceled, finding 없음
     assert review_repo.get_run(db, run_id)["status"] == "canceled"
     assert finding_repo.list_for_run(db, run_id) == []
+
+
+def test_pipeline_cancels_too_large_diff_before_vendor_review(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=11,
+        title="big",
+        author="a",
+        head_sha="bigsha",
+        base_ref="main",
+        url="u",
+    )
+
+    @contextmanager
+    def blocked_worktree(repo, sha, pr_number=None):
+        raise AssertionError("worktree should not be prepared")
+        yield
+
+    class BlockedAdapter:
+        vendor = "claude"
+
+        async def review(self, **kw):
+            raise AssertionError("adapter should not be called")
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "x" * (MAX_INLINE_DIFF_CHARS + 1),
+        worktree=blocked_worktree,
+        adapters=[BlockedAdapter()],
+        prescreen=lambda diff, model: ("complex", 1.0, "diff too large"),
+        repo_local_path="/tmp/x",
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    run = review_repo.get_run(db, run_id)
+    assert run["status"] == "canceled"
+    assert "diff too large" in run["error"]
+    assert review_repo.list_vendor_results(db, run_id) == []
 
 
 def test_pipeline_fails_run_when_all_vendors_fail(db):

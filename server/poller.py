@@ -25,6 +25,7 @@ def poll_once(conn, *, list_prs, enqueue) -> None:
                 base_ref=pr.base_ref,
                 url=pr.url,
                 state=pr.state,
+                created_at=pr.created_at,
             )
             if has_vendor and pr_repo.needs_review(conn, pid):
                 enqueue(pid)

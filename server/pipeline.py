@@ -15,7 +15,11 @@ from server.repos import (
 )
 from server.review.harness import HarnessProfile
 from server.review.merge import deterministic_merge
-from server.review.prescreen import PreScreenResult
+from server.review.prescreen import (
+    MAX_INLINE_DIFF_CHARS,
+    PreScreenResult,
+    diff_too_large_reason,
+)
 from server.review.runner import RunnerPool
 from server.seams import NoOpContextProvider
 
@@ -31,7 +35,7 @@ class PipelineError(RuntimeError):
 @dataclass
 class PipelineDeps:
     gh_diff: Callable[[str, int], str]
-    worktree: Callable  # contextmanager(repo, sha) -> path
+    worktree: Callable  # contextmanager(repo, sha, pr_number) -> path
     adapters: list  # vendor adapters (.vendor, async .review())
     prescreen: Callable[
         [str, str], tuple
@@ -67,6 +71,10 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
 
 async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     hp = HarnessProfile.load(repo["harness_name"])
+    # ★ 설정에서 고른 벤더별 모델로 하네스 기본값 덮어씀
+    hp.model = settings["review_model"]  # Claude
+    hp.codex_model = settings["codex_model"]  # Codex ("" = codex 자체 기본)
+    prescreen_model = settings["prescreen_model"]
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
     # sync subprocess(gh/prescreen)를 to_thread로 오프로드 → 이벤트루프 비블록
@@ -74,7 +82,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
 
     # 2. Pre-screen
     complexity, score, reason = await asyncio.to_thread(
-        deps.prescreen, diff, hp.prescreen_model
+        deps.prescreen, diff, prescreen_model
     )
     ps = PreScreenResult(complexity, score, reason)
     decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
@@ -82,7 +90,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         conn,
         pr_id=pr["id"],
         head_sha=pr["head_sha"],
-        model=hp.prescreen_model,
+        model=prescreen_model,
         complexity=complexity,
         score=score,
         reason=reason,
@@ -92,6 +100,11 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     if decided == "skip" and repo["trigger_mode"] == "auto":
         review_repo.finish_run(conn, run_id, "canceled")
         pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
+        return
+    if len(diff) > MAX_INLINE_DIFF_CHARS:
+        review_repo.finish_run(
+            conn, run_id, "canceled", error=diff_too_large_reason(diff)
+        )
         return
 
     # ★개정 (codex v5 [LOW]): enabled 벤더가 0개면 리뷰할 게 없다 → worktree도
@@ -104,7 +117,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
 
     # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리
     prompt = _build_prompt(pr, diff, deps.context)
-    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"]) as wt:
+    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
             vr_ids = {

@@ -1,0 +1,120 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ------------------------------------------------------------------ *
+ * Design tokens — confirmed brand palette (docs §8) mapped to shadcn.
+ * Light-only app shell, Korean-first typography (Apple SD Gothic Neo),
+ * tuned for readability on FHD external displays.
+ * ------------------------------------------------------------------ */
+:root {
+  --radius: 0.75rem;
+
+  --background: #f5f6f8;
+  --foreground: #1a1f26;
+  --card: #ffffff;
+  --card-foreground: #1a1f26;
+  --popover: #ffffff;
+  --popover-foreground: #1a1f26;
+  --primary: #3b5bdb;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1f5;
+  --secondary-foreground: #2b3440;
+  --muted: #f1f3f6;
+  --muted-foreground: #6b7480;
+  --accent: #eef1f5;
+  --accent-foreground: #1a1f26;
+  --destructive: #c92a2a;
+  --destructive-foreground: #ffffff;
+  --border: #e3e6ea;
+  --input: #d8dce2;
+  --ring: #2242c7;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Pretendard", "Noto Sans KR", "Malgun Gothic", "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* Brand + status accents — generate bg / text / border utilities. */
+@theme {
+  --color-brand: #3b5bdb;
+  --color-brand-soft: #e7ecfd;
+  --color-brand-strong: #2242c7;
+
+  --color-claude: #6741d9;
+  --color-claude-soft: #efeafb;
+  --color-codex: #0b7285;
+  --color-codex-soft: #e2f2f4;
+
+  --color-ok: #237032;
+  --color-ok-soft: #e6f4ea;
+  --color-warn: #8a5a00;
+  --color-warn-soft: #fbf1cf;
+  --color-danger: #c92a2a;
+  --color-danger-soft: #fdecec;
+
+  --color-sev-critical: #c92a2a;
+  --color-sev-critical-soft: #fdecec;
+  --color-sev-high: #b8460a;
+  --color-sev-high-soft: #fdeee2;
+  --color-sev-medium: #8a6300;
+  --color-sev-medium-soft: #fbf1cf;
+  --color-sev-low: #5a6570;
+  --color-sev-low-soft: #eef0f2;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/60;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    margin: 0;
+    font-size: 14.5px;
+    line-height: 1.6;
+    font-weight: 400;
+    word-break: keep-all;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3, h4 {
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  /* Latin numerals/labels stay crisp; long code strings may break anywhere. */
+  code, pre, .font-mono {
+    word-break: break-all;
+  }
+}

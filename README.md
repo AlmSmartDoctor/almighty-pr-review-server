@@ -27,3 +27,4 @@ ALMIGHTY_E2E=1 ALMIGHTY_E2E_REPO=me/sandbox \
   ALMIGHTY_E2E_LOCAL=/path/to/local/clone \
   pytest tests/test_e2e_smoke.py -v
 ```
+특정 PR만 smoke하려면 작은 PR 기준으로 `ALMIGHTY_E2E_PR=2414`처럼 추가한다.

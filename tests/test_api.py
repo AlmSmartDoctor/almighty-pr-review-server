@@ -26,6 +26,24 @@ def test_add_and_list_repos(tmp_path):
     assert lst[0]["full_name"] == "acme/api"
 
 
+def test_patch_repo_updates_local_path_and_enabled(tmp_path):
+    client, _ = _client(tmp_path)
+    created = client.post(
+        "/api/repos",
+        json={"full_name": "acme/api", "local_path": "/tmp/acme-api"},
+    ).json()
+
+    r = client.patch(
+        f"/api/repos/{created['id']}",
+        json={"enabled": 0, "local_path": "/tmp/acme-api-renamed"},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] == 0
+    assert body["local_path"] == "/tmp/acme-api-renamed"
+
+
 def test_get_settings(tmp_path):
     client, _ = _client(tmp_path)
     s = client.get("/api/settings").json()

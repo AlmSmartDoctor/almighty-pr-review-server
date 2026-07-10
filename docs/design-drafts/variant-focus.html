@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Almighty PR Review — Focus (Calm Review Flow)</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --line:#e6e9ee; --line-2:#f0f2f5;
+    --ink:#1c2430; --ink-dim:#5b6675; --ink-faint:#9aa4b2;
+    --accent:#3b6fe0; --accent-soft:#eaf0fe;
+    --crit:#c0392b; --high:#c56a12; --med:#9a7d00; --low:#6b7684;
+    --claude:#7b52d4; --codex:#0f9d78; --consensus:#b07d10;
+    --ok:#0f9d78;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+    --shadow:0 1px 2px rgba(20,30,50,.04),0 8px 24px rgba(20,30,50,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:760px;margin:0 auto;padding:0 20px 80px}
+
+  header{display:flex;align-items:center;gap:12px;padding:20px 4px 8px}
+  header .logo{font-weight:600;letter-spacing:.2px}
+  header .logo b{color:var(--accent)}
+  header .who{font-size:13px;color:var(--ink-faint);margin-left:auto}
+
+  /* progress rail */
+  .rail{position:sticky;top:0;background:linear-gradient(var(--bg) 70%,transparent);padding:12px 4px 14px;z-index:5}
+  .rail .row{display:flex;align-items:center;gap:12px}
+  .rail .count{font-size:13px;color:var(--ink-dim)}
+  .rail .count b{color:var(--ink);font-variant-numeric:tabular-nums}
+  .rail .queuebadge{margin-left:auto;font-size:12px;color:var(--ink-faint)}
+  .prog{height:6px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:10px}
+  .prog>i{display:block;height:100%;background:var(--ok);transition:width .35s ease}
+
+  /* the one card */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:26px 28px;margin-top:6px}
+  .crumb{font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .crumb .repo{font-family:var(--mono);font-size:12px;background:var(--line-2);padding:2px 8px;border-radius:6px}
+  .crumb a{color:var(--accent);text-decoration:none}
+
+  .sevline{display:flex;align-items:center;gap:10px;margin:16px 0 6px}
+  .sev{font-size:12px;font-weight:700;letter-spacing:.4px;padding:3px 10px;border-radius:99px}
+  .sev.CRITICAL{background:#fdecea;color:var(--crit)}
+  .sev.HIGH{background:#fbefe0;color:var(--high)}
+  .sev.MEDIUM{background:#f7f3df;color:var(--med)}
+  .sev.LOW{background:#eef0f3;color:var(--low)}
+  .agree{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-dim)}
+  .pill{font-size:12px;font-weight:600;padding:2px 9px;border-radius:99px;border:1px solid var(--line)}
+  .pill.claude{color:var(--claude);background:#f4eeff;border-color:#e6d9ff}
+  .pill.codex{color:var(--codex);background:#e7f7f1;border-color:#cdeee2}
+  .pill.both{color:var(--consensus);background:#fbf3df;border-color:#f0e3bf}
+
+  h1.title{font-size:23px;line-height:1.3;margin:6px 0 2px;letter-spacing:-.01em}
+  .loc{font-family:var(--mono);font-size:13px;color:var(--ink-dim);margin-bottom:14px}
+  .prose{color:#39424f;font-size:15px;margin:0 0 18px}
+
+  .diff{background:#0f1420;border-radius:12px;padding:16px 18px;font-family:var(--mono);font-size:13px;line-height:1.7;color:#c9d3e0;overflow:auto}
+  .diff .del{color:#ff8a80} .diff .add{color:#7ee2b8}
+  .diff .del::before{content:"− "} .diff .add::before{content:"+ "}
+
+  /* actions */
+  .actions{display:flex;gap:12px;margin-top:22px}
+  .btn{flex:1;font-size:15px;font-weight:600;padding:14px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;transition:transform .06s ease,box-shadow .15s ease;display:flex;flex-direction:column;align-items:center;gap:2px}
+  .btn:hover{box-shadow:var(--shadow)} .btn:active{transform:translateY(1px)}
+  .btn small{font-size:11px;font-weight:500;color:var(--ink-faint)}
+  .btn.approve{background:var(--ok);border-color:var(--ok);color:#fff} .btn.approve small{color:rgba(255,255,255,.8)}
+  .btn.snooze{color:var(--ink-dim)}
+  .btn.dismiss{color:var(--crit);border-color:#f3d6d1}
+
+  .hint{text-align:center;font-size:12px;color:var(--ink-faint);margin-top:16px}
+  kbd{font-family:var(--mono);font-size:11px;background:var(--line-2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;color:var(--ink-dim)}
+
+  /* done state */
+  .done{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:56px 28px;text-align:center;margin-top:6px}
+  .done .big{font-size:46px}
+  .done h2{margin:10px 0 4px}
+  .done p{color:var(--ink-dim);margin:0}
+  .done button{margin-top:20px;font-size:14px;padding:10px 18px;border-radius:10px;border:1px solid var(--line);background:var(--card);cursor:pointer;color:var(--ink)}
+
+  .later{margin-top:26px}
+  .later h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink-faint);margin:0 0 8px}
+  .mini{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:6px;font-size:13px;cursor:pointer}
+  .mini:hover{border-color:var(--accent)}
+  .mini .s{width:8px;height:8px;border-radius:50%;flex:none}
+  .mini .s.approved{background:var(--ok)} .mini .s.dismissed{background:var(--crit)} .mini .s.snoozed{background:var(--high)}
+  .mini .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mini .tag{font-size:11px;color:var(--ink-faint);font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="logo"><b>◇</b> Almighty Review</span>
+    <span class="who">집중 트리아지 · @st42597</span>
+  </header>
+
+  <div class="rail">
+    <div class="row">
+      <span class="count"><b id="pos">1</b> / <b id="tot">1</b> · 남은 finding <b id="left">0</b></span>
+      <span class="queuebadge" id="qb"></span>
+    </div>
+    <div class="prog"><i id="prog" style="width:0%"></i></div>
+  </div>
+
+  <div id="stage"></div>
+
+  <div class="later">
+    <h3>방금 처리한 항목</h3>
+    <div id="recent"><div style="color:var(--ink-faint);font-size:13px;padding:4px 2px">아직 없음</div></div>
+  </div>
+</div>
+
+<script>
+const PRS={
+ 151:{repo:'smartdoctor-eks',title:'Fix rate-limit semaphore leak'},
+ 142:{repo:'dentii-web',title:'Add retry backoff to review queue'},
+ 138:{repo:'cashdoc-api',title:'Refactor worktree isolation'},
+ 97:{repo:'unite-session',title:'Introduce ContextProvider no-op seam'},
+};
+const F=[
+ {pr:151,sev:'CRITICAL',vend:'both',file:'runner_pool.py',line:88,title:'취소된 태스크가 세마포어를 반납하지 않아 풀이 고갈된다',detail:'acquire() 이후 예외·취소 경로에서 release() 가 호출되지 않습니다. 리뷰가 N번 취소되면 RunnerPool 이 영구적으로 잠겨 이후 모든 PR 리뷰가 멈춥니다. async with 컨텍스트로 감싸면 취소·예외와 무관하게 반납이 보장됩니다.',diff:['del|await sem.acquire()','del|await run(pr)','add|async with sem:','add|    await run(pr)']},
+ {pr:151,sev:'HIGH',vend:'claude',file:'runner_pool.py',line:104,title:'wait_for 가 CancelledError 를 삼켜 상위 취소가 끊긴다',detail:'광범위한 except Exception 이 취소 신호까지 잡아먹어, 서버 종료 시 러너가 깔끔히 멈추지 않습니다.',diff:['del|except Exception:','add|except asyncio.TimeoutError:']},
+ {pr:151,sev:'HIGH',vend:'both',file:'worktree.py',line:52,title:'리뷰 실패 시 worktree 가 정리되지 않아 디스크에 누적된다',detail:'예외가 나면 격리 worktree 가 남아 계속 쌓입니다. finally 에서 제거하세요.',diff:['nul|  try:','nul|      review(wt)','add|  finally:','add|      wt.remove()']},
+ {pr:151,sev:'MEDIUM',vend:'codex',file:'queue.py',line:31,title:'리트라이 상한 5 가 하드코딩되어 있다',detail:'레포별로 조정 가능해야 합니다. cfg.max_retries 로 빼세요.',diff:['del|if attempts > 5:','add|if attempts > cfg.max_retries:']},
+ {pr:151,sev:'LOW',vend:'claude',file:'runner_pool.py',line:12,title:'Docstring 이 옛 클래스명(WorkerPool)을 가리킨다',detail:'RunnerPool 로 이름이 바뀌었으니 docstring 도 갱신하세요.',diff:[]},
+ {pr:142,sev:'HIGH',vend:'both',file:'backoff.py',line:20,title:'백오프에 지터가 없어 thundering herd 가 발생한다',detail:'여러 레포가 동시에 rate-limit 을 맞으면 동일 간격으로 재시도해 폭주합니다. full-jitter 를 적용하세요.',diff:['del|delay = base * 2**n','add|delay = random.uniform(0, base * 2**n)']},
+ {pr:138,sev:'HIGH',vend:'claude',file:'worktree.py',line:77,title:'브랜치명이 경로로 직접 들어가 path traversal 이 가능하다',detail:'브랜치명에 ../ 가 있으면 worktree 가 의도치 않은 경로에 생성됩니다. 정규화하세요.',diff:['add|name = re.sub(r"[^\\\\w.-]","_",branch)']},
+ {pr:138,sev:'MEDIUM',vend:'both',file:'worktree.py',line:120,title:'SIGTERM 시 남은 worktree 정리 훅이 없다',detail:'서버가 종료될 때 정리 훅을 등록하세요.',diff:[]},
+ {pr:97,sev:'MEDIUM',vend:'claude',file:'context.py',line:18,title:'no-op provider 가 None 을 반환해 호출부가 터질 수 있다',detail:'seam 은 v1 에서 no-op 이지만 None 대신 빈 컨텍스트 객체를 반환해야 호출부가 안전합니다.',diff:['del|return None','add|return EmptyContext()']},
+];
+const SEVW={CRITICAL:0,HIGH:1,MEDIUM:2,LOW:3};
+const order=[...F.keys()].sort((a,b)=>SEVW[F[a].sev]-SEVW[F[b].sev]);
+let cur=0; const recent=[];
+const total=F.length;
+
+function esc(s){return s.replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function render(){
+  const done=recent.length;
+  document.getElementById('tot').textContent=total;
+  document.getElementById('pos').textContent=Math.min(done+1,total);
+  document.getElementById('left').textContent=total-done;
+  document.getElementById('prog').style.width=(done/total*100)+'%';
+  document.getElementById('qb').textContent=`smartdoctor-eks 러너 실행 중 · 큐 3`;
+  renderRecent();
+
+  const stage=document.getElementById('stage');
+  if(cur>=order.length){
+    stage.innerHTML=`<div class="done"><div class="big">✓</div>
+      <h2>큐를 비웠습니다</h2>
+      <p>${recent.filter(r=>r.state==='approved').length}건 승인·포스팅 대기 · ${recent.filter(r=>r.state==='dismissed').length}건 기각 · ${recent.filter(r=>r.state==='snoozed').length}건 나중에</p>
+      <button onclick="reset()">처음부터 다시 보기</button></div>`;
+    return;
+  }
+  const f=F[order[cur]];const pr=PRS[f.pr];
+  stage.innerHTML=`<div class="card">
+    <div class="crumb"><span class="repo">${pr.repo}</span>
+      <a href="#">#${f.pr}</a><span>·</span><span>${pr.title}</span></div>
+    <div class="sevline">
+      <span class="sev ${f.sev}">${f.sev}</span>
+      <span class="agree">${f.vend==='both'
+        ?`<span class="pill both">✓ 두 리뷰어 합의</span> Claude 와 Codex 가 동일하게 지적`
+        :`<span class="pill ${f.vend}">${f.vend}</span> 단일 리뷰어 지적`}</span>
+    </div>
+    <h1 class="title">${f.title}</h1>
+    <div class="loc">${f.file}:${f.line}</div>
+    <p class="prose">${f.detail}</p>
+    ${f.diff.length?`<div class="diff">${f.diff.map(l=>{
+      const [t,...r]=l.split('|');const txt=esc(r.join('|'));
+      return t==='add'?`<div class="add">${txt}</div>`:t==='del'?`<div class="del">${txt}</div>`:`<div>&nbsp;&nbsp;${txt}</div>`;
+    }).join('')}</div>`:''}
+    <div class="actions">
+      <button class="btn approve" onclick="act('approved')">승인 · 포스팅<small>A · GitHub 코멘트로 게시</small></button>
+      <button class="btn snooze" onclick="act('snoozed')">나중에<small>S · 큐 뒤로</small></button>
+      <button class="btn dismiss" onclick="act('dismissed')">기각<small>X · 게시 안 함</small></button>
+    </div>
+    <div class="hint"><kbd>A</kbd> 승인 · <kbd>S</kbd> 나중에 · <kbd>X</kbd> 기각 · <kbd>←</kbd> 이전</div>
+  </div>`;
+}
+function renderRecent(){
+  const el=document.getElementById('recent');
+  if(!recent.length){el.innerHTML=`<div style="color:var(--ink-faint);font-size:13px;padding:4px 2px">아직 없음</div>`;return;}
+  el.innerHTML=recent.slice(-4).reverse().map(r=>`<div class="mini" onclick="undo('${r.id}')">
+    <span class="s ${r.state}"></span><span class="t">${r.title}</span>
+    <span class="tag">${r.state} ↩</span></div>`).join('');
+}
+function act(state){
+  const f=F[order[cur]];
+  recent.push({id:f.file+f.line,title:f.title,state});
+  cur++;render();
+}
+function undo(id){
+  const i=recent.findIndex(r=>r.id===id);if(i<0)return;
+  recent.splice(i,1);cur=Math.max(0,cur-1);render();
+}
+function reset(){cur=0;recent.length=0;render();}
+document.addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();
+  if(k==='a')act('approved');else if(k==='s')act('snoozed');
+  else if(k==='x')act('dismissed');else if(e.key==='ArrowLeft'&&cur>0){cur--;recent.pop();render();}
+});
+render();
+</script>
+</body>
+</html>

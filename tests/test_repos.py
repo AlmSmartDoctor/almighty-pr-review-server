@@ -34,6 +34,35 @@ def test_upsert_pr_updates_head_sha(db):
     assert pr_repo.get(db, p1)["head_sha"] == "bbb"
 
 
+def test_upsert_pr_stores_and_updates_created_at(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="aaa",
+        base_ref="main",
+        url="u",
+        created_at="2026-07-07T11:22:33Z",
+    )
+    assert pr_repo.get(db, pid)["created_at"] == "2026-07-07T11:22:33Z"
+
+    pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="bbb",
+        base_ref="main",
+        url="u",
+        created_at="2026-07-08T11:22:33Z",
+    )
+    assert pr_repo.get(db, pid)["created_at"] == "2026-07-08T11:22:33Z"
+
+
 def test_finding_status_transition(db):
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(

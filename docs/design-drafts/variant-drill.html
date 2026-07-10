@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Almighty PR Review — Drill</title>
+<style>
+  :root{
+    --bg:#f5f6f8;
+    --surface:#ffffff;
+    --surface-2:#fafbfc;
+    --border:#e3e6ea;
+    --border-strong:#d0d5dc;
+    --ink:#1a1f26;
+    --ink-2:#4a5460;
+    --ink-3:#7b8592;
+    --accent:#3b5bdb;
+    --accent-soft:#e7ecfd;
+    --focus:#2242c7;
+
+    --sev-c:#c92a2a; --sev-c-bg:#fdecec;
+    --sev-h:#e8590c; --sev-h-bg:#fdeee2;
+    --sev-m:#b8860b; --sev-m-bg:#fbf3d9;
+    --sev-l:#5a6570; --sev-l-bg:#eef0f2;
+
+    --need-trivial:#6b7480; --need-trivial-bg:#eceef1;
+    --need-moderate:#a67c00; --need-moderate-bg:#fbf1cf;
+    --need-complex:#d9480f; --need-complex-bg:#fce4d6;
+
+    --claude:#6741d9; --claude-bg:#efeafb;
+    --codex:#0b7285; --codex-bg:#e2f2f4;
+
+    --ok:#2b8a3e; --ok-bg:#e6f4ea;
+    --wait:#c78500; --wait-bg:#fbf1cf;
+
+    --radius:12px;
+    --radius-sm:8px;
+    --shadow:0 1px 2px rgba(20,25,35,.04), 0 3px 10px rgba(20,25,35,.05);
+    --shadow-hi:0 2px 6px rgba(20,25,35,.07), 0 12px 30px rgba(20,25,35,.09);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--font);
+    background:var(--bg);
+    color:var(--ink);
+    font-size:14px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font-family:inherit;cursor:pointer}
+  :focus-visible{outline:2.5px solid var(--focus);outline-offset:2px;border-radius:6px}
+
+  /* ---------- App bar ---------- */
+  .appbar{
+    position:sticky;top:0;z-index:30;
+    background:rgba(255,255,255,.86);
+    backdrop-filter:saturate(160%) blur(10px);
+    border-bottom:1px solid var(--border);
+  }
+  .appbar-inner{
+    max-width:1240px;margin:0 auto;padding:12px 24px;
+    display:flex;align-items:center;gap:14px;
+  }
+  .logo{
+    display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;letter-spacing:-.2px;
+  }
+  .logo .mark{
+    width:28px;height:28px;border-radius:8px;
+    background:linear-gradient(135deg,#3b5bdb,#6741d9);
+    display:grid;place-items:center;color:#fff;flex:none;
+  }
+  .logo .sub{color:var(--ink-3);font-weight:500;font-size:12px}
+  .appbar-spacer{flex:1}
+  .appbar-meta{display:flex;align-items:center;gap:14px;color:var(--ink-3);font-size:12.5px}
+  .dot-live{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg);display:inline-block;margin-right:6px}
+  .kbd{font-family:var(--mono);font-size:11px;background:var(--surface-2);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 6px;color:var(--ink-2)}
+
+  /* ---------- Repo tabs ---------- */
+  .tabsbar{
+    position:sticky;top:53px;z-index:29;
+    background:rgba(245,246,248,.9);
+    backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);
+  }
+  .tabs{
+    max-width:1240px;margin:0 auto;padding:0 24px;
+    display:flex;gap:4px;overflow-x:auto;
+  }
+  .tab{
+    appearance:none;background:none;border:none;
+    padding:12px 14px 13px;
+    font-size:13.5px;font-weight:600;color:var(--ink-3);
+    border-bottom:2.5px solid transparent;white-space:nowrap;
+    display:flex;align-items:center;gap:8px;transition:color .12s;
+  }
+  .tab:hover{color:var(--ink-2)}
+  .tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+  .tab .count{
+    font-size:11px;font-weight:700;min-width:19px;height:19px;padding:0 5px;
+    display:inline-grid;place-items:center;border-radius:10px;
+    background:var(--surface-2);border:1px solid var(--border);color:var(--ink-2);
+  }
+  .tab[aria-selected="true"] .count{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+
+  main{max-width:1240px;margin:0 auto;padding:22px 24px 64px}
+
+  /* ---------- Overview ---------- */
+  .ov-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:4px 0 18px}
+  .ov-title{font-size:20px;font-weight:750;letter-spacing:-.4px;margin:0}
+  .ov-title .repo{color:var(--ink-3);font-weight:600;font-size:14px;margin-left:8px}
+  .ov-sub{color:var(--ink-3);font-size:13px;margin-top:3px}
+
+  .statstrip{display:flex;gap:10px;flex-wrap:wrap}
+  .stat{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);
+    padding:8px 13px;min-width:96px;
+  }
+  .stat .n{font-size:19px;font-weight:750;letter-spacing:-.5px;line-height:1.1}
+  .stat .l{font-size:11.5px;color:var(--ink-3);font-weight:600;margin-top:2px}
+  .stat.attn .n{color:var(--sev-c)}
+  .stat.wait .n{color:var(--wait)}
+
+  .cards{display:flex;flex-direction:column;gap:12px}
+  .card{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:16px 18px;box-shadow:var(--shadow);text-align:left;width:100%;
+    display:grid;grid-template-columns:1fr auto;gap:12px 20px;
+    transition:box-shadow .14s, border-color .14s, transform .06s;
+    position:relative;
+  }
+  .card{border-left:3px solid transparent}
+  .card:hover{box-shadow:var(--shadow-hi);border-color:var(--border-strong);border-left-color:var(--accent)}
+  .card:active{transform:translateY(1px)}
+
+  .card-main{min-width:0}
+  .card-row1{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:5px}
+  .pr-num{font-family:var(--mono);font-size:12.5px;color:var(--ink-3);font-weight:600}
+  .pr-title{font-size:15.5px;font-weight:700;letter-spacing:-.2px;color:var(--ink)}
+  .card-meta{display:flex;align-items:center;gap:14px;color:var(--ink-3);font-size:12.5px;flex-wrap:wrap}
+  .card-meta .who{display:flex;align-items:center;gap:6px}
+  .avatar{width:18px;height:18px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-size:10px;font-weight:800;display:grid;place-items:center}
+  .branch{font-family:var(--mono);font-size:11.5px;background:var(--surface-2);border:1px solid var(--border);padding:1px 6px;border-radius:5px;color:var(--ink-2)}
+
+  .need{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:3px 9px 3px 8px;border-radius:20px;font-size:11.5px;font-weight:700;letter-spacing:.1px;
+  }
+  .need .rz{font-weight:500;opacity:.85}
+  .need.trivial{background:var(--need-trivial-bg);color:var(--need-trivial)}
+  .need.moderate{background:var(--need-moderate-bg);color:var(--need-moderate)}
+  .need.complex{background:var(--need-complex-bg);color:var(--need-complex)}
+  .need .glyph{width:7px;height:7px;border-radius:2px;background:currentColor;flex:none}
+
+  .card-side{display:flex;flex-direction:column;align-items:flex-end;gap:9px;justify-content:space-between}
+  .status{
+    display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:650;
+    padding:4px 10px;border-radius:20px;border:1px solid var(--border);background:var(--surface-2);color:var(--ink-2);white-space:nowrap;
+  }
+  .status .sd{width:7px;height:7px;border-radius:50%;flex:none}
+  .status.s-review{color:#3b5bdb;background:#eef2fe;border-color:#d7e0fc}
+  .status.s-wait{color:var(--wait);background:var(--wait-bg);border-color:#f2e2ad}
+  .status.s-posted{color:var(--ok);background:var(--ok-bg);border-color:#c4e6cf}
+  .status.s-skip{color:var(--ink-3);background:var(--surface-2)}
+  .status.s-screen{color:#8a6d00;background:#fbf3d9;border-color:#f0e2b0}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .status .sd.anim{animation:pulse 1.3s ease-in-out infinite}
+
+  .vendors{display:flex;gap:5px}
+  .vpill{
+    display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;
+    padding:2px 8px;border-radius:20px;
+  }
+  .vpill.claude{background:var(--claude-bg);color:var(--claude)}
+  .vpill.codex{background:var(--codex-bg);color:var(--codex)}
+  .vpill .st{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .vpill.pending{opacity:.55}
+  .vpill.pending .st{animation:pulse 1.3s ease-in-out infinite}
+
+  .sevrow{display:flex;align-items:center;gap:5px}
+  .sevchip{
+    font-size:11.5px;font-weight:800;font-family:var(--mono);
+    padding:2px 7px;border-radius:6px;letter-spacing:.3px;
+  }
+  .sevchip.c{background:var(--sev-c-bg);color:var(--sev-c)}
+  .sevchip.h{background:var(--sev-h-bg);color:var(--sev-h)}
+  .sevchip.m{background:var(--sev-m-bg);color:var(--sev-m)}
+  .sevchip.l{background:var(--sev-l-bg);color:var(--sev-l)}
+  .sevchip.none{background:var(--ok-bg);color:var(--ok);font-family:var(--font);font-weight:700}
+  .consensus{font-size:11px;color:var(--ink-3);font-weight:600;margin-left:2px}
+
+  /* ---------- Detail ---------- */
+  .detail{display:none}
+  body.mode-detail .overview{display:none}
+  body.mode-detail .detail{display:block}
+
+  .back{
+    display:inline-flex;align-items:center;gap:8px;
+    background:var(--surface);border:1px solid var(--border);border-radius:20px;
+    padding:7px 14px 7px 11px;font-size:13px;font-weight:650;color:var(--ink-2);margin-bottom:16px;
+    box-shadow:var(--shadow);transition:border-color .12s,color .12s;
+  }
+  .back:hover{border-color:var(--border-strong);color:var(--ink)}
+
+  .dhead{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px 20px;box-shadow:var(--shadow);margin-bottom:18px;
+  }
+  .dhead-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+  .dhead h1{font-size:20px;font-weight:750;letter-spacing:-.4px;margin:0}
+  .dhead-meta{display:flex;align-items:center;gap:16px;color:var(--ink-3);font-size:13px;flex-wrap:wrap}
+
+  .dgrid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:18px;align-items:start}
+  @media(max-width:920px){.dgrid{grid-template-columns:1fr}}
+
+  .panel{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    box-shadow:var(--shadow);overflow:hidden;margin-bottom:18px;
+  }
+  .panel-h{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:14px 18px;border-bottom:1px solid var(--border);
+  }
+  .panel-h h2{font-size:14px;font-weight:750;margin:0;letter-spacing:-.2px;display:flex;align-items:center;gap:8px}
+  .panel-h .hint{font-size:12px;color:var(--ink-3);font-weight:500}
+  .panel-b{padding:16px 18px}
+
+  /* Timeline */
+  .tl{position:relative;padding-left:6px}
+  .tl-item{position:relative;padding:0 0 18px 30px}
+  .tl-item:last-child{padding-bottom:0}
+  .tl-item::before{
+    content:"";position:absolute;left:8px;top:20px;bottom:-4px;width:2px;background:var(--border);
+  }
+  .tl-item:last-child::before{display:none}
+  .tl-node{
+    position:absolute;left:0;top:2px;width:18px;height:18px;border-radius:50%;
+    background:var(--surface);border:2.5px solid var(--border-strong);display:grid;place-items:center;
+    font-size:10px;color:var(--ink-3);z-index:1;
+  }
+  .tl-node.done{border-color:var(--ok);background:var(--ok);color:#fff}
+  .tl-node.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .tl-node.claude{border-color:var(--claude);background:var(--claude);color:#fff}
+  .tl-node.codex{border-color:var(--codex);background:var(--codex);color:#fff}
+  .tl-node.wait{border-color:var(--wait);background:var(--wait-bg);color:var(--wait)}
+  .tl-item h3{font-size:13.5px;font-weight:700;margin:0 0 2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .tl-when{font-size:11.5px;color:var(--ink-3);font-weight:600;font-family:var(--mono)}
+  .tl-desc{font-size:12.5px;color:var(--ink-2);margin-top:3px}
+  .tl-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+  .tag{
+    font-size:11px;font-weight:650;padding:2px 8px;border-radius:6px;
+    background:var(--surface-2);border:1px solid var(--border);color:var(--ink-2);
+  }
+  .tag.mono{font-family:var(--mono);font-size:10.5px}
+  .tag.dur{color:var(--ink-3)}
+  .tag.res{color:var(--accent);background:var(--accent-soft);border-color:transparent}
+
+  /* Findings triage */
+  .finding{
+    border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:11px;overflow:hidden;
+    transition:opacity .18s, border-color .14s;
+  }
+  .finding:last-child{margin-bottom:0}
+  .finding-h{display:flex;align-items:flex-start;gap:11px;padding:12px 14px}
+  .finding-body{min-width:0;flex:1}
+  .finding-row1{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+  .finding-loc{font-family:var(--mono);font-size:12px;color:var(--ink);font-weight:650}
+  .finding-claim{font-size:13.5px;font-weight:650;color:var(--ink);margin:2px 0 4px}
+  .finding-rat{font-size:12.5px;color:var(--ink-2)}
+  .cat{font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--ink-3);background:var(--surface-2);border:1px solid var(--border);padding:1px 7px;border-radius:5px}
+  .cons{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}
+  .cons.both{background:#e6f4ea;color:#2b8a3e}
+  .cons.single{background:#eef0f2;color:#5a6570}
+
+  .finding-actions{display:flex;gap:7px;padding:0 14px 12px;flex-wrap:wrap}
+  .act{
+    font-size:12px;font-weight:650;padding:5px 12px;border-radius:7px;border:1px solid var(--border);
+    background:var(--surface);color:var(--ink-2);transition:all .12s;
+  }
+  .act:hover{border-color:var(--border-strong);background:var(--surface-2)}
+  .act.approve[aria-pressed="true"]{background:var(--ok-bg);border-color:#a9dcb8;color:var(--ok)}
+  .act.dismiss[aria-pressed="true"]{background:var(--sev-l-bg);border-color:#cfd4da;color:var(--ink-2)}
+  .finding.is-dismissed{opacity:.5}
+  .finding.is-dismissed .finding-claim{text-decoration:line-through;text-decoration-color:var(--ink-3)}
+  .finding.is-approved{border-color:#a9dcb8}
+  .finding-state{margin-left:auto;font-size:11.5px;font-weight:700;align-self:center}
+  .finding.is-approved .finding-state{color:var(--ok)}
+  .finding.is-dismissed .finding-state{color:var(--ink-3)}
+  .finding-state.wait{color:var(--wait)}
+
+  /* Comment preview */
+  pre.md{
+    margin:0;padding:14px 16px;background:#1c2230;color:#d7deea;border-radius:var(--radius-sm);
+    font-family:var(--mono);font-size:12px;line-height:1.62;overflow:auto;white-space:pre-wrap;word-break:break-word;
+    border:1px solid #2b3446;max-height:520px;
+  }
+  pre.md .h{color:#8fb4ff;font-weight:700}
+  pre.md .c{color:#ff9b9b}
+  pre.md .hi{color:#ffcf8f}
+  pre.md .g{color:#8fe0a8}
+  pre.md .dim{color:#8c95a6}
+  .postbar{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+  .btn-primary{
+    background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:700;
+    display:inline-flex;align-items:center;gap:8px;box-shadow:0 1px 2px rgba(59,91,219,.3);
+  }
+  .btn-primary:hover{background:#3350c9}
+  .post-note{font-size:12px;color:var(--ink-3)}
+  .post-note b{color:var(--ok)}
+
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+</style>
+</head>
+<body class="mode-overview">
+
+  <header class="appbar">
+    <div class="appbar-inner">
+      <div class="logo">
+        <span class="mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        </span>
+        <span>Almighty PR Review<span class="sub"> · local triage</span></span>
+      </div>
+      <div class="appbar-spacer"></div>
+      <div class="appbar-meta">
+        <span><span class="dot-live" aria-hidden="true"></span>watcher 활성</span>
+        <span>2벤더 · Claude + Codex</span>
+        <span aria-hidden="true"><span class="kbd">esc</span> 뒤로</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabsbar" aria-label="레포지토리">
+    <div class="tabs" id="tabs" role="tablist"></div>
+  </nav>
+
+  <main>
+    <!-- ============ OVERVIEW ============ -->
+    <section class="overview" aria-label="PR 오버뷰">
+      <div class="ov-head">
+        <div>
+          <h1 class="ov-title">리뷰 상황판<span class="repo" id="ovRepo"></span></h1>
+          <div class="ov-sub" id="ovSub"></div>
+        </div>
+        <div class="statstrip" id="statstrip"></div>
+      </div>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <!-- ============ DETAIL ============ -->
+    <section class="detail" aria-label="PR 디테일" id="detail"></section>
+  </main>
+
+<script>
+"use strict";
+
+/* ---------------- Mock data — the review server reviewing itself ---------------- */
+const REPOS = [
+  {id:"all",   name:"전체"},
+  {id:"cashdoc", name:"cashdoc-api-server"},
+  {id:"yeogiya", name:"Yeogiya-API-Server"},
+  {id:"cashreview", name:"cashreview-api"},
+  {id:"smartdoctor", name:"smartdoctor-api"},
+];
+
+// findings pool
+const F = {
+  jwt:   {sev:"critical", cat:"security", vendor:"Codex",  cons:"single", loc:"auth/token.py:88",
+          claim:"JWT 검증에 만료(exp) 체크 없음",
+          rat:"decode 시 verify_exp=False 상태로 서명만 확인 → 만료 토큰이 그대로 통과. 재발급 없이 무기한 접근 가능."},
+  sem:   {sev:"high", cat:"bug", vendor:"both", cons:"both", loc:"runner_pool.py:88",
+          claim:"취소 경로에서 세마포어 release 누락 → 풀 고갈",
+          rat:"cancel 시 acquire된 세마포어를 반환하지 않아 slot이 영구 점유. async with로 감싸 예외/취소에도 release 보장 필요."},
+  wtleak:{sev:"high", cat:"bug", vendor:"both", cons:"both", loc:"worktree.py:52",
+          claim:"리뷰 실패 시 worktree 미제거 → 디스크 누적",
+          rat:"예외 발생 시 cleanup 미도달. try/finally로 worktree 제거를 보장해야 함."},
+  wtpath:{sev:"high", cat:"security", vendor:"Claude", cons:"single", loc:"worktree.py:77",
+          claim:"브랜치명 경로 미살균 → ../ traversal",
+          rat:"브랜치명을 그대로 경로 조합에 사용. '../'가 포함된 브랜치로 작업 디렉터리 밖 접근 가능."},
+  nplus: {sev:"medium", cat:"perf", vendor:"Claude", cons:"single", loc:"report/query.py:203",
+          claim:"루프 내 N+1 쿼리",
+          rat:"finding마다 개별 PR 조회. join 또는 in-clause 배치로 단일 쿼리화 가능."},
+  jitter:{sev:"medium", cat:"bug", vendor:"both", cons:"both", loc:"backoff.py:20",
+          claim:"지수백오프에 jitter 없음 → thundering herd",
+          rat:"고정 배수 재시도로 다수 워커가 동시 재시도. full-jitter 도입 권장."},
+  noop:  {sev:"medium", cat:"bug", vendor:"Claude", cons:"single", loc:"context.py:18",
+          claim:"no-op ContextProvider가 None 반환 → 호출부 NPE",
+          rat:"기본 provider가 None을 반환하는데 호출부는 dict를 가정. 빈 dict 반환으로 수정."},
+  imp:   {sev:"low", cat:"style", vendor:"both", cons:"both", loc:"format.py:31",
+          claim:"미사용 import",
+          rat:"json 모듈 import 후 미사용. 제거."},
+};
+
+// PRs per repo
+const PRS = [
+  {repo:"cashdoc", num:412, title:"fix: 결제 콜백 await 누락", author:"jiwoo", branch:"fix/payment-callback-await",
+   status:"wait", updated:"12분 전",
+   need:{level:"complex", reason:"결제 상태 전이 + 콜백 동시성 3파일"},
+   findings:["sem","jitter","imp"],
+   trace:{screen:{model:"haiku(low)",dur:"1.2s"}, claude:{dur:"48s",n:3}, codex:{dur:"41s",n:2}, merged:true, triage:{a:0,d:0,w:3}, posted:null}},
+
+  {repo:"cashdoc", num:409, title:"feat: 사전 스크리닝 게이트", author:"minho", branch:"feat/prescreen-gate",
+   status:"review", updated:"3분 전",
+   need:{level:"complex", reason:"스키마 변경 + 라우팅 로직 신규"},
+   findings:["nplus","noop"],
+   trace:{screen:{model:"haiku(low)",dur:"0.9s"}, claude:{dur:"running",n:null}, codex:{dur:"52s",n:1}, merged:false, triage:{a:0,d:0,w:2}, posted:null}},
+
+  {repo:"cashdoc", num:401, title:"chore: 미사용 import 정리", author:"jiwoo", branch:"chore/cleanup-imports",
+   status:"skip", updated:"1시간 전",
+   need:{level:"trivial", reason:"주석/문서·import만"},
+   findings:[],
+   trace:{screen:{model:"haiku(low)",dur:"0.4s"}, skipped:true, triage:{a:0,d:0,w:0}, posted:null}},
+
+  {repo:"yeogiya", num:238, title:"refactor: worktree 격리 도입", author:"soyeon", branch:"refactor/worktree-isolation",
+   status:"wait", updated:"27분 전",
+   need:{level:"complex", reason:"프로세스 격리 + 파일시스템 정리 로직"},
+   findings:["wtleak","wtpath","imp"],
+   trace:{screen:{model:"haiku(low)",dur:"1.1s"}, claude:{dur:"1m03s",n:3}, codex:{dur:"58s",n:2}, merged:true, triage:{a:0,d:0,w:3}, posted:null}},
+
+  {repo:"yeogiya", num:231, title:"fix: 세마포어 누수 방어(async with)", author:"minho", branch:"fix/runner-pool-semaphore",
+   status:"posted", updated:"어제",
+   need:{level:"moderate", reason:"동시성 1파일 · 국소 수정"},
+   findings:["sem"],
+   trace:{screen:{model:"haiku(low)",dur:"0.7s"}, claude:{dur:"36s",n:1}, codex:{dur:"33s",n:1}, merged:true, triage:{a:1,d:0,w:0},
+          posted:{url:"github.com/…/yeogiya/pull/231#issuecomment-2311",when:"어제 18:22"}}},
+
+  {repo:"cashreview", num:77, title:"fix: 인증 토큰 만료 검증 추가", author:"jiwoo", branch:"security/jwt-exp-check",
+   status:"wait", updated:"6분 전",
+   need:{level:"complex", reason:"인증 경계 · 보안 크리티컬 1파일"},
+   findings:["jwt"],
+   trace:{screen:{model:"haiku(low)",dur:"0.6s"}, claude:{dur:"29s",n:0}, codex:{dur:"31s",n:1}, merged:true, triage:{a:0,d:0,w:1}, posted:null}},
+
+  {repo:"cashreview", num:73, title:"perf: 리포트 쿼리 N+1 제거", author:"soyeon", branch:"perf/report-query-batch",
+   status:"review", updated:"방금",
+   need:{level:"moderate", reason:"쿼리 경로 1파일 · 데이터 변형 없음"},
+   findings:["nplus"],
+   trace:{screen:{model:"haiku(low)",dur:"0.5s"}, claude:{dur:"27s",n:1}, codex:{dur:"running",n:null}, merged:false, triage:{a:0,d:0,w:1}, posted:null}},
+
+  {repo:"smartdoctor", num:154, title:"fix: 재시도 백오프 jitter 추가", author:"minho", branch:"fix/backoff-jitter",
+   status:"wait", updated:"41분 전",
+   need:{level:"moderate", reason:"재시도 정책 1파일"},
+   findings:["jitter","imp"],
+   trace:{screen:{model:"haiku(low)",dur:"0.5s"}, claude:{dur:"24s",n:2}, codex:{dur:"22s",n:1}, merged:true, triage:{a:0,d:0,w:2}, posted:null}},
+
+  {repo:"smartdoctor", num:149, title:"chore: 미사용 import 정리(→trivial)", author:"jiwoo", branch:"chore/rm-unused-import",
+   status:"skip", updated:"2시간 전",
+   need:{level:"trivial", reason:"import 1줄 제거만"},
+   findings:[],
+   trace:{screen:{model:"haiku(low)",dur:"0.3s"}, skipped:true, triage:{a:0,d:0,w:0}, posted:null}},
+];
+
+const SEV_ORDER={critical:0,high:1,medium:2,low:3};
+const SEV_LET={critical:"C",high:"H",medium:"M",low:"L"};
+const SEV_CLS={critical:"c",high:"h",medium:"m",low:"l"};
+
+/* ---------------- Overview render ---------------- */
+let currentRepo = "all";
+const triageState = {}; // key: `${num}:${fid}` -> 'approve'|'dismiss'|undefined
+
+function prsFor(repo){ return repo==="all" ? PRS : PRS.filter(p=>p.repo===repo); }
+
+function sevCounts(fids){
+  const c={critical:0,high:0,medium:0,low:0};
+  fids.forEach(id=>c[F[id].sev]++);
+  return c;
+}
+
+function renderTabs(){
+  const el=document.getElementById("tabs");
+  el.innerHTML="";
+  REPOS.forEach(r=>{
+    const n=prsFor(r.id).length;
+    const b=document.createElement("button");
+    b.className="tab"; b.role="tab";
+    b.setAttribute("aria-selected", r.id===currentRepo);
+    b.innerHTML=`${r.name}<span class="count">${n}</span>`;
+    b.onclick=()=>{ currentRepo=r.id; renderTabs(); renderOverview(); showOverview(); };
+    el.appendChild(b);
+  });
+}
+
+function statusPill(p){
+  const map={
+    review:{cls:"s-review", label:"리뷰중", color:"#3b5bdb", anim:true},
+    wait:{cls:"s-wait", label:"승인 대기", color:"#c78500"},
+    posted:{cls:"s-posted", label:"포스팅됨", color:"#2b8a3e"},
+    skip:{cls:"s-skip", label:"스킵(trivial)", color:"#9aa3ad"},
+    screen:{cls:"s-screen", label:"사전스크리닝중", color:"#c78500", anim:true},
+  };
+  const m=map[p.status];
+  return `<span class="status ${m.cls}"><span class="sd ${m.anim?'anim':''}" style="background:${m.color}"></span>${m.label}</span>`;
+}
+
+function vendorPills(p){
+  const cN=p.trace.claude, xN=p.trace.codex;
+  if(p.status==="skip") return "";
+  const cRun = cN && cN.dur==="running";
+  const xRun = xN && xN.dur==="running";
+  const cp=`<span class="vpill claude ${cRun?'pending':''}"><span class="st"></span>Claude${cRun?'…':' '+(cN?cN.n:0)}</span>`;
+  const xp=`<span class="vpill codex ${xRun?'pending':''}"><span class="st"></span>Codex${xRun?'…':' '+(xN?xN.n:0)}</span>`;
+  return `<div class="vendors">${cp}${xp}</div>`;
+}
+
+function needBadge(n){
+  const rz = n.reason;
+  const cap = {trivial:"trivial",moderate:"moderate",complex:"complex"}[n.level];
+  return `<span class="need ${n.level}"><span class="glyph"></span>${cap}<span class="rz"> · ${rz}</span></span>`;
+}
+
+function sevChips(fids){
+  if(fids.length===0) return `<span class="sevchip none">클린 ✓</span>`;
+  const c=sevCounts(fids);
+  let out="";
+  ["critical","high","medium","low"].forEach(s=>{
+    if(c[s]>0) out+=`<span class="sevchip ${SEV_CLS[s]}">${SEV_LET[s]}${c[s]}</span>`;
+  });
+  const both=fids.filter(id=>F[id].cons==="both").length;
+  const label = both===fids.length ? "양쪽 합의" : both===0 ? "단일" : `${both} 합의·${fids.length-both} 단일`;
+  out+=`<span class="consensus">${label}</span>`;
+  return `<div class="sevrow">${out}</div>`;
+}
+
+function renderOverview(){
+  const repoObj=REPOS.find(r=>r.id===currentRepo);
+  document.getElementById("ovRepo").textContent = currentRepo==="all"?"· 모든 레포":"· "+repoObj.name;
+  const list=prsFor(currentRepo);
+
+  // stats
+  const st={total:list.length, wait:0, review:0, posted:0, skip:0, crit:0};
+  list.forEach(p=>{
+    if(p.status==="wait")st.wait++;
+    if(p.status==="review")st.review++;
+    if(p.status==="posted")st.posted++;
+    if(p.status==="skip")st.skip++;
+    st.crit+=sevCounts(p.findings).critical;
+  });
+  document.getElementById("ovSub").textContent =
+    `${st.total}개 PR · 감지 → 사전스크리닝 → Claude·Codex 리뷰 → 트리아지 → 포스팅`;
+  document.getElementById("statstrip").innerHTML = `
+    <div class="stat wait"><div class="n">${st.wait}</div><div class="l">승인 대기</div></div>
+    <div class="stat"><div class="n">${st.review}</div><div class="l">리뷰중</div></div>
+    <div class="stat attn"><div class="n">${st.crit}</div><div class="l">Critical</div></div>
+    <div class="stat"><div class="n">${st.posted}</div><div class="l">포스팅됨</div></div>
+    <div class="stat"><div class="n">${st.skip}</div><div class="l">스킵</div></div>`;
+
+  // cards
+  const cards=document.getElementById("cards");
+  cards.innerHTML="";
+  list.forEach(p=>{
+    const idx=PRS.indexOf(p);
+    const card=document.createElement("button");
+    card.className="card";
+    card.setAttribute("aria-label", `PR #${p.num} ${p.title} 디테일 열기`);
+    const repoTag = currentRepo==="all" ? `<span class="branch">${REPOS.find(r=>r.id===p.repo).name}</span>` : "";
+    card.innerHTML=`
+      <div class="card-main">
+        <div class="card-row1">
+          <span class="pr-num">#${p.num}</span>
+          <span class="pr-title">${p.title}</span>
+        </div>
+        <div class="card-meta">
+          <span class="who"><span class="avatar">${p.author.slice(0,2).toUpperCase()}</span>${p.author}</span>
+          <span class="branch">${p.branch}</span>
+          ${repoTag}
+          <span>· ${p.updated}</span>
+        </div>
+        <div style="margin-top:11px">${needBadge(p.need)}</div>
+      </div>
+      <div class="card-side">
+        ${statusPill(p)}
+        ${vendorPills(p)}
+        ${sevChips(p.findings)}
+      </div>`;
+    card.onclick=()=>openDetail(idx);
+    cards.appendChild(card);
+  });
+}
+
+/* ---------------- Detail render ---------------- */
+function tItem(node, cls, title, when, desc, tags){
+  const t=(tags||[]).map(x=>`<span class="tag ${x.cls||''}">${x.t}</span>`).join("");
+  return `<div class="tl-item">
+    <div class="tl-node ${cls}">${node}</div>
+    <h3>${title}${when?`<span class="tl-when">${when}</span>`:""}</h3>
+    ${desc?`<div class="tl-desc">${desc}</div>`:""}
+    ${t?`<div class="tl-tags">${t}</div>`:""}
+  </div>`;
+}
+
+function buildTimeline(p){
+  const tr=p.trace;
+  let items="";
+  items+=tItem("✓","done","감지됨","", `watcher가 <b>${p.branch}</b> push 감지`, [{t:REPOS.find(r=>r.id===p.repo).name,cls:"mono"}]);
+  items+=tItem("✓","done","사전 스크리닝", tr.screen.dur, `가벼운 모델이 diff만 보고 복잡도 산정`,
+    [{t:tr.screen.model,cls:"mono"},{t:p.need.level,cls:"res"},{t:tr.screen.dur,cls:"dur"}]);
+
+  if(tr.skipped){
+    items+=tItem("→","","리뷰 스킵", "", `trivial 판정 → 2벤더 리뷰 게이트 통과 안 함`, [{t:"skipped",cls:"res"}]);
+    return `<div class="tl">${items}</div>`;
+  }
+
+  // claude
+  const c=tr.claude;
+  if(c.dur==="running"){
+    items+=tItem("◐","active","Claude 리뷰", "진행중", `sonnet · effort xhigh`,
+      [{t:"claude sonnet",cls:"mono"},{t:"xhigh"},{t:"running…",cls:"dur"}]);
+  }else{
+    items+=tItem("C","claude","Claude 리뷰", tr.dur, `sonnet · effort xhigh · ${c.n} findings`,
+      [{t:"claude sonnet",cls:"mono"},{t:"xhigh"},{t:`${c.n} findings`,cls:"res"},{t:c.dur,cls:"dur"}]);
+  }
+  // codex
+  const x=tr.codex;
+  if(x.dur==="running"){
+    items+=tItem("◐","active","Codex 리뷰", "진행중", `gpt-5.5 · effort high`,
+      [{t:"codex gpt-5.5",cls:"mono"},{t:"high"},{t:"running…",cls:"dur"}]);
+  }else{
+    items+=tItem("X","codex","Codex 리뷰", "", `gpt-5.5 · effort high · ${x.n} findings`,
+      [{t:"codex gpt-5.5",cls:"mono"},{t:"high"},{t:`${x.n} findings`,cls:"res"},{t:x.dur,cls:"dur"}]);
+  }
+
+  if(tr.merged){
+    const both=p.findings.filter(id=>F[id].cons==="both").length;
+    items+=tItem("⛃","done","병합 · 중복 제거", "", `두 벤더 findings 합의/단일 분류`,
+      [{t:`${both} 합의`,cls:"res"},{t:`${p.findings.length-both} 단일`}]);
+  }
+
+  const tg=liveTriage(p);
+  if(p.status==="posted"){
+    items+=tItem("✓","done","트리아지 완료", "", `승인 ${tg.a} · 기각 ${tg.d} · 대기 ${tg.w}`,
+      [{t:`승인 ${tg.a}`,cls:"res"}]);
+    items+=tItem("✓","done","GitHub 포스팅", tr.posted.when, `구조화 코멘트 게시`,
+      [{t:tr.posted.url,cls:"mono"}]);
+  }else if(c.dur==="running"||x.dur==="running"){
+    items+=tItem("…","wait","트리아지 대기", "", `리뷰 완료 후 트리아지 가능`, []);
+  }else{
+    items+=tItem("!","wait","트리아지", "대기중", `승인 <b>${tg.a}</b> · 기각 <b>${tg.d}</b> · 대기 <b>${tg.w}</b>`,
+      [{t:"내 승인 필요",cls:"res"}]);
+    items+=tItem("↑","","GitHub 포스팅", "미게시", `승인한 findings만 코멘트로 게시`, []);
+  }
+  return `<div class="tl">${items}</div>`;
+}
+
+function liveTriage(p){
+  let a=0,d=0,w=0;
+  p.findings.forEach(fid=>{
+    const s=triageState[`${p.num}:${fid}`];
+    if(s==="approve")a++; else if(s==="dismiss")d++; else w++;
+  });
+  if(p.status==="posted") return p.trace.triage;
+  return {a,d,w};
+}
+
+function renderFindings(p){
+  if(p.findings.length===0){
+    return `<div style="padding:22px;text-align:center;color:var(--ink-3)">
+      <div style="font-size:26px;margin-bottom:6px">✓</div>
+      trivial 스킵 — 리뷰 findings 없음</div>`;
+  }
+  const sorted=[...p.findings].sort((a,b)=>SEV_ORDER[F[a].sev]-SEV_ORDER[F[b].sev]);
+  return sorted.map(fid=>{
+    const f=F[fid];
+    const key=`${p.num}:${fid}`;
+    const state=triageState[key];
+    const posted = p.status==="posted";
+    const eff = posted ? "approve" : state; // posted PRs shown approved
+    const cls = eff==="approve"?"is-approved":eff==="dismiss"?"is-dismissed":"";
+    const stateLabel = eff==="approve"?"승인됨":eff==="dismiss"?"기각됨":`<span class="finding-state wait">대기</span>`;
+    const vendorPill = f.cons==="both"
+      ? `<span class="vpill claude"><span class="st"></span>C</span><span class="vpill codex"><span class="st"></span>X</span>`
+      : f.vendor==="Claude"
+        ? `<span class="vpill claude"><span class="st"></span>Claude</span>`
+        : `<span class="vpill codex"><span class="st"></span>Codex</span>`;
+    return `<div class="finding ${cls}" data-key="${key}">
+      <div class="finding-h">
+        <span class="sevchip ${SEV_CLS[f.sev]}" title="${f.sev}">${SEV_LET[f.sev]}</span>
+        <div class="finding-body">
+          <div class="finding-row1">
+            <span class="finding-loc">${f.loc}</span>
+            <span class="cat">${f.cat}</span>
+            <span class="cons ${f.cons}">${f.cons==="both"?"양쪽 합의":"단일"}</span>
+            ${vendorPill}
+          </div>
+          <div class="finding-claim">${f.claim}</div>
+          <div class="finding-rat">${f.rat}</div>
+        </div>
+        <span class="finding-state">${eff==="approve"?"승인됨":eff==="dismiss"?"기각됨":"<span class=\'wait\'>대기</span>"}</span>
+      </div>
+      <div class="finding-actions">
+        <button class="act approve" aria-pressed="${eff==="approve"}" ${posted?"disabled":""} onclick="toggleTriage('${key}','approve')">✓ 승인</button>
+        <button class="act dismiss" aria-pressed="${eff==="dismiss"}" ${posted?"disabled":""} onclick="toggleTriage('${key}','dismiss')">✕ 기각</button>
+        <button class="act" ${posted?"disabled":""} onclick="alert('편집 모달(목업): claim/rationale를 손보고 포스팅 문구를 다듬는 자리입니다.')">✎ 편집</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function commentMarkdown(p){
+  const approved = p.findings.filter(fid=>{
+    if(p.status==="posted") return true;
+    return triageState[`${p.num}:${fid}`]==="approve";
+  }).sort((a,b)=>SEV_ORDER[F[a].sev]-SEV_ORDER[F[b].sev]);
+
+  const H = s=>`<span class="h">${s}</span>`;
+  let out="";
+  out+=H(`## 🤖 Almighty PR Review — 2벤더 교차 리뷰`)+"\n\n";
+  out+=`<span class="dim">Claude sonnet(xhigh) · Codex gpt-5.5(high) · 사전스크리닝 haiku(low)</span>\n`;
+  out+=`복잡도 <span class="hi">${p.need.level}</span> — ${p.need.reason}\n\n`;
+  if(approved.length===0){
+    out+=`<span class="dim">— 승인된 항목이 없습니다. 왼쪽에서 findings를 승인하면 여기 미리보기가 채워집니다. —</span>`;
+    return out;
+  }
+  out+=H(`### 요약`)+"\n";
+  const c=sevCounts(approved);
+  const parts=[];["critical","high","medium","low"].forEach(s=>{if(c[s])parts.push(`${SEV_LET[s]}${c[s]}`)});
+  out+=`승인된 ${approved.length}건 · ${parts.join(" ")} · 양쪽 합의 ${approved.filter(id=>F[id].cons==="both").length}건\n\n`;
+  out+=H(`### 항목`)+"\n";
+  approved.forEach((fid,i)=>{
+    const f=F[fid];
+    out+=H(`#### ${i+1}. [${f.sev.toUpperCase()}] ${f.loc}`)+"\n";
+    out+=`- **분류**: ${f.cat} · ${f.cons==="both"?"양쪽 합의(Claude+Codex)":"단일("+f.vendor+")"}\n`;
+    out+=`- **문제**: <span class="c">${f.claim}</span>\n`;
+    out+=`- **근거**: ${f.rat}\n\n`;
+  });
+  out+=`<span class="dim">— 이 코멘트는 로컬 트리아지에서 내가 승인한 항목만 포함합니다. —</span>`;
+  return out;
+}
+
+function openDetail(idx){
+  const p=PRS[idx];
+  const repoName=REPOS.find(r=>r.id===p.repo).name;
+  const d=document.getElementById("detail");
+  d.dataset.idx=idx;
+  d.innerHTML=`
+    <button class="back" onclick="showOverview()" aria-label="오버뷰로 뒤로가기">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      오버뷰
+    </button>
+    <div class="dhead">
+      <div class="dhead-top">
+        <span class="pr-num">#${p.num}</span>
+        <h1>${p.title}</h1>
+        ${statusPill(p)}
+      </div>
+      <div class="dhead-meta">
+        <span class="who"><span class="avatar">${p.author.slice(0,2).toUpperCase()}</span>${p.author}</span>
+        <span class="branch">${repoName}</span>
+        <span class="branch">${p.branch}</span>
+        <span>· ${p.updated}</span>
+      </div>
+      <div style="margin-top:12px">${needBadge(p.need)}</div>
+    </div>
+
+    <div class="dgrid">
+      <div>
+        <div class="panel">
+          <div class="panel-h"><h2>🕓 리뷰 트레이스 타임라인</h2><span class="hint">감지 → 포스팅까지</span></div>
+          <div class="panel-b" id="tlBox">${buildTimeline(p)}</div>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <div class="panel-h"><h2>⚖️ Findings 트리아지</h2><span class="hint" id="triageHint"></span></div>
+          <div class="panel-b" id="findBox">${renderFindings(p)}</div>
+        </div>
+        <div class="panel">
+          <div class="panel-h"><h2>📝 포스팅될 구조화 코멘트</h2><span class="hint">승인 항목만 반영</span></div>
+          <div class="panel-b">
+            <pre class="md" id="mdBox">${commentMarkdown(p)}</pre>
+            <div class="postbar">
+              <button class="btn-primary" onclick="fakePost(${idx})">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                GitHub PR에 게시
+              </button>
+              <span class="post-note" id="postNote"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  updateDetailDerived(idx);
+  document.body.classList.remove("mode-overview");
+  document.body.classList.add("mode-detail");
+  window.scrollTo(0,0);
+  d.querySelector(".back").focus();
+}
+
+function updateDetailDerived(idx){
+  const p=PRS[idx];
+  const tg=liveTriage(p);
+  const hint=document.getElementById("triageHint");
+  if(hint) hint.textContent = `승인 ${tg.a} · 기각 ${tg.d} · 대기 ${tg.w}`;
+  const note=document.getElementById("postNote");
+  if(note){
+    if(p.status==="posted"){
+      note.innerHTML=`<b>게시됨</b> · ${p.trace.posted.when}`;
+    }else{
+      note.innerHTML = tg.a>0 ? `${tg.a}건 게시 예정 · 대기 ${tg.w}` : `승인된 항목이 없습니다`;
+    }
+  }
+}
+
+window.toggleTriage=function(key,action){
+  triageState[key] = triageState[key]===action ? undefined : action;
+  const idx=+document.getElementById("detail").dataset.idx;
+  const p=PRS[idx];
+  document.getElementById("findBox").innerHTML=renderFindings(p);
+  document.getElementById("mdBox").innerHTML=commentMarkdown(p);
+  document.getElementById("tlBox").innerHTML=buildTimeline(p);
+  updateDetailDerived(idx);
+};
+
+window.fakePost=function(idx){
+  const p=PRS[idx];
+  const tg=liveTriage(p);
+  if(p.status!=="posted" && tg.a===0){
+    alert("승인된 findings가 없습니다. 먼저 항목을 승인하세요.");
+    return;
+  }
+  const note=document.getElementById("postNote");
+  note.innerHTML=`<b>게시됨(목업)</b> · ${tg.a||p.trace.triage.a}건 코멘트 · 방금`;
+};
+
+window.showOverview=function(){
+  document.body.classList.remove("mode-detail");
+  document.body.classList.add("mode-overview");
+  renderOverview();
+  window.scrollTo(0,0);
+};
+
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && document.body.classList.contains("mode-detail")) showOverview();
+});
+
+/* init */
+renderTabs();
+renderOverview();
+</script>
+</body>
+</html>

@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Almighty PR Review — Split</title>
+<style>
+  :root{
+    --bg:#f4f6f9; --surface:#ffffff; --surface-2:#f8fafc; --surface-3:#eef2f7;
+    --border:#e2e8f0; --border-strong:#cbd5e1;
+    --text:#0f172a; --text-2:#475569; --text-3:#94a3b8;
+    --accent:#4f46e5; --accent-soft:#eef2ff; --accent-line:#c7d2fe;
+    --focus:#6366f1;
+    --sev-c:#dc2626; --sev-c-bg:#fef2f2; --sev-c-bd:#fecaca;
+    --sev-h:#ea580c; --sev-h-bg:#fff7ed; --sev-h-bd:#fed7aa;
+    --sev-m:#d97706; --sev-m-bg:#fffbeb; --sev-m-bd:#fde68a;
+    --sev-l:#64748b; --sev-l-bg:#f1f5f9; --sev-l-bd:#e2e8f0;
+    --trivial:#64748b; --trivial-bg:#f1f5f9;
+    --moderate:#ca8a04; --moderate-bg:#fefce8;
+    --complex:#dc2626; --complex-bg:#fef2f2;
+    --claude:#8b5cf6; --claude-bg:#f5f3ff;
+    --codex:#0891b2; --codex-bg:#ecfeff;
+    --ok:#16a34a; --ok-bg:#f0fdf4;
+    --shadow:0 1px 2px rgba(15,23,42,.04), 0 2px 8px rgba(15,23,42,.06);
+    --shadow-lg:0 8px 30px rgba(15,23,42,.10);
+    --r:10px; --r-sm:7px;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--sans); background:var(--bg); color:var(--text);
+    font-size:13.5px; line-height:1.5; -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column; height:100vh; overflow:hidden;
+  }
+  :focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+  ::selection{background:#ddd6fe}
+
+  /* ── App bar ── */
+  .appbar{
+    display:flex; align-items:center; gap:14px;
+    padding:11px 20px; background:var(--surface);
+    border-bottom:1px solid var(--border); flex:none;
+  }
+  .brand{display:flex; align-items:center; gap:10px; font-weight:700; font-size:15px; letter-spacing:-.2px}
+  .logo{
+    width:28px; height:28px; border-radius:8px; flex:none;
+    background:linear-gradient(135deg,#6366f1,#8b5cf6);
+    display:grid; place-items:center; color:#fff;
+    box-shadow:0 2px 6px rgba(99,102,241,.35);
+  }
+  .brand .sub{color:var(--text-3); font-weight:500; font-size:11.5px; margin-left:2px}
+  .appbar .spacer{flex:1}
+  .appbar .stat-strip{display:flex; gap:8px; align-items:center}
+  .kpi{
+    display:flex; flex-direction:column; align-items:flex-start; gap:1px;
+    padding:4px 12px; border-radius:8px; background:var(--surface-2);
+    border:1px solid var(--border);
+  }
+  .kpi b{font-size:14px; line-height:1; font-variant-numeric:tabular-nums}
+  .kpi span{font-size:10px; color:var(--text-3); text-transform:uppercase; letter-spacing:.4px}
+  .kpi.warn b{color:var(--sev-h)}
+  .icon-btn{
+    width:32px; height:32px; border-radius:8px; border:1px solid var(--border);
+    background:var(--surface); color:var(--text-2); cursor:pointer;
+    display:grid; place-items:center; transition:.15s;
+  }
+  .icon-btn:hover{background:var(--surface-3); color:var(--text)}
+
+  /* ── Repo tabs ── */
+  .tabbar{
+    display:flex; align-items:center; gap:3px; padding:0 16px;
+    background:var(--surface); border-bottom:1px solid var(--border);
+    flex:none; overflow-x:auto;
+  }
+  .tab{
+    position:relative; padding:9px 13px 11px; border:none; background:none;
+    font-family:inherit; font-size:12.5px; font-weight:600; color:var(--text-3);
+    cursor:pointer; white-space:nowrap; display:flex; align-items:center; gap:7px;
+    border-bottom:2px solid transparent; transition:.15s;
+  }
+  .tab:hover{color:var(--text-2)}
+  .tab[aria-selected="true"]{color:var(--accent); border-bottom-color:var(--accent)}
+  .tab .cnt{
+    font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:20px;
+    background:var(--surface-3); color:var(--text-2); font-variant-numeric:tabular-nums;
+  }
+  .tab[aria-selected="true"] .cnt{background:var(--accent-soft); color:var(--accent)}
+  .tab .dot{width:6px;height:6px;border-radius:50%;background:var(--sev-h)}
+
+  /* ── Layout: 2-pane ── */
+  .work{flex:1; display:grid; grid-template-columns:minmax(340px,420px) 1fr; min-height:0}
+  .master{
+    background:var(--surface); border-right:1px solid var(--border);
+    display:flex; flex-direction:column; min-height:0;
+  }
+  .detail{background:var(--bg); min-height:0; overflow-y:auto}
+
+  /* ── Master header / filter ── */
+  .master-head{
+    padding:10px 14px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:8px; flex:none;
+  }
+  .search{
+    flex:1; display:flex; align-items:center; gap:7px;
+    background:var(--surface-2); border:1px solid var(--border);
+    border-radius:8px; padding:6px 10px;
+  }
+  .search input{border:none; background:none; outline:none; font-family:inherit; font-size:12.5px; width:100%; color:var(--text)}
+  .search svg{color:var(--text-3); flex:none}
+  .seg{display:flex; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:2px}
+  .seg button{
+    border:none; background:none; font-family:inherit; font-size:11px; font-weight:600;
+    color:var(--text-3); padding:4px 8px; border-radius:6px; cursor:pointer;
+  }
+  .seg button[aria-pressed="true"]{background:var(--surface); color:var(--text); box-shadow:var(--shadow)}
+
+  .master-list{overflow-y:auto; flex:1; padding:6px}
+  .master-list::-webkit-scrollbar,.detail::-webkit-scrollbar{width:9px}
+  .master-list::-webkit-scrollbar-thumb,.detail::-webkit-scrollbar-thumb{background:#dde3ec; border-radius:6px; border:2px solid var(--surface)}
+
+  /* ── PR row card ── */
+  .pr{
+    display:block; width:100%; text-align:left; border:1px solid transparent;
+    background:none; font-family:inherit; color:inherit; cursor:pointer;
+    border-radius:var(--r); padding:10px 11px; margin-bottom:3px; transition:.13s;
+    position:relative;
+  }
+  .pr:hover{background:var(--surface-2)}
+  .pr[aria-current="true"]{background:var(--accent-soft); border-color:var(--accent-line)}
+  .pr[aria-current="true"]::before{
+    content:""; position:absolute; left:0; top:9px; bottom:9px; width:3px;
+    border-radius:3px; background:var(--accent);
+  }
+  .pr-top{display:flex; align-items:center; gap:7px; margin-bottom:4px}
+  .pr-num{font-family:var(--mono); font-size:11px; color:var(--text-3); font-weight:600}
+  .pr-title{font-weight:600; font-size:13px; line-height:1.35; letter-spacing:-.1px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1}
+  .pr-meta{display:flex; align-items:center; gap:6px; color:var(--text-3); font-size:11px; margin-bottom:7px}
+  .pr-meta .av{
+    width:15px;height:15px;border-radius:50%; display:grid;place-items:center;
+    font-size:8.5px; font-weight:700; color:#fff; background:var(--text-3);
+  }
+  .pr-badges{display:flex; align-items:center; gap:5px; flex-wrap:wrap}
+
+  /* status pill */
+  .status{
+    display:inline-flex; align-items:center; gap:4px; font-size:10.5px; font-weight:600;
+    padding:2px 7px; border-radius:20px; border:1px solid var(--border);
+    background:var(--surface-2); color:var(--text-2); white-space:nowrap;
+  }
+  .status .sd{width:5px;height:5px;border-radius:50%}
+  .status.detected{color:var(--text-2)} .status.detected .sd{background:var(--text-3)}
+  .status.screening .sd{background:var(--moderate); animation:pulse 1.4s infinite}
+  .status.reviewing{background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent)}
+  .status.reviewing .sd{background:var(--accent); animation:pulse 1.1s infinite}
+  .status.awaiting{background:var(--sev-h-bg); border-color:var(--sev-h-bd); color:var(--sev-h)}
+  .status.awaiting .sd{background:var(--sev-h)}
+  .status.posted{background:var(--ok-bg); border-color:#bbf7d0; color:var(--ok)}
+  .status.posted .sd{background:var(--ok)}
+  .status.skipped{background:var(--surface-3); color:var(--text-3)}
+  .status.skipped .sd{background:var(--text-3)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* vendor progress pill */
+  .vpill{display:inline-flex; align-items:center; gap:3px; font-size:10px; font-weight:700;
+    padding:2px 6px; border-radius:20px; font-family:var(--mono)}
+  .vpill.claude{background:var(--claude-bg); color:var(--claude)}
+  .vpill.codex{background:var(--codex-bg); color:var(--codex)}
+  .vpill .spin{width:7px;height:7px;border-radius:50%; border:1.5px solid currentColor; border-right-color:transparent; animation:sp .7s linear infinite}
+  .vpill .chk{font-size:9px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* need badge */
+  .need{
+    display:inline-flex; align-items:center; gap:4px; font-size:10.5px; font-weight:700;
+    padding:2px 8px; border-radius:20px; border:1px solid transparent; white-space:nowrap;
+  }
+  .need .nd{width:6px;height:6px;border-radius:2px}
+  .need.trivial{background:var(--trivial-bg); color:var(--trivial)} .need.trivial .nd{background:var(--trivial)}
+  .need.moderate{background:var(--moderate-bg); color:var(--moderate); border-color:#fde68a} .need.moderate .nd{background:var(--moderate)}
+  .need.complex{background:var(--complex-bg); color:var(--complex); border-color:var(--sev-c-bd)} .need.complex .nd{background:var(--complex)}
+
+  /* severity chips summary */
+  .sevrow{display:inline-flex; gap:3px; align-items:center}
+  .sev{
+    display:inline-flex; align-items:center; gap:2px; font-size:10px; font-weight:800;
+    padding:1px 5px; border-radius:5px; font-family:var(--mono); border:1px solid transparent;
+  }
+  .sev.c{background:var(--sev-c-bg); color:var(--sev-c); border-color:var(--sev-c-bd)}
+  .sev.h{background:var(--sev-h-bg); color:var(--sev-h); border-color:var(--sev-h-bd)}
+  .sev.m{background:var(--sev-m-bg); color:var(--sev-m); border-color:var(--sev-m-bd)}
+  .sev.l{background:var(--sev-l-bg); color:var(--sev-l); border-color:var(--sev-l-bd)}
+  .consensus{font-size:9.5px; color:var(--text-3); font-weight:600; margin-left:2px}
+
+  /* ── Detail pane ── */
+  .detail-inner{max-width:940px; margin:0 auto; padding:22px 26px 60px}
+  .d-head{margin-bottom:20px}
+  .d-crumb{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--text-3); margin-bottom:9px; font-family:var(--mono)}
+  .d-crumb b{color:var(--text-2)}
+  .d-title{font-size:21px; font-weight:750; letter-spacing:-.4px; line-height:1.25; margin-bottom:10px}
+  .d-sub{display:flex; align-items:center; gap:14px; flex-wrap:wrap; color:var(--text-2); font-size:12.5px}
+  .d-sub .who{display:flex; align-items:center; gap:6px}
+  .d-sub .av{width:20px;height:20px;border-radius:50%; display:grid;place-items:center; font-size:9.5px; font-weight:700; color:#fff}
+  .branch{font-family:var(--mono); font-size:11.5px; background:var(--surface-3); padding:2px 8px; border-radius:6px; color:var(--text-2)}
+  .d-actions{margin-left:auto; display:flex; gap:8px}
+  .btn{
+    font-family:inherit; font-size:12.5px; font-weight:600; padding:7px 14px; border-radius:8px;
+    border:1px solid var(--border-strong); background:var(--surface); color:var(--text); cursor:pointer; transition:.15s;
+    display:inline-flex; align-items:center; gap:6px;
+  }
+  .btn:hover{background:var(--surface-2)}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{background:#4338ca}
+  .btn.primary:disabled{background:var(--border-strong); border-color:var(--border-strong); cursor:not-allowed; opacity:.7}
+
+  .card{background:var(--surface); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); margin-bottom:16px; overflow:hidden}
+  .card-h{display:flex; align-items:center; gap:9px; padding:13px 16px; border-bottom:1px solid var(--border)}
+  .card-h h3{font-size:13px; font-weight:700; letter-spacing:-.1px}
+  .card-h .hint{margin-left:auto; font-size:11px; color:var(--text-3)}
+  .card-h .ic{color:var(--text-3); display:grid; place-items:center}
+  .card-b{padding:16px}
+
+  /* ── Timeline ── */
+  .tl{position:relative; padding-left:8px}
+  .tl-item{position:relative; padding:0 0 18px 30px}
+  .tl-item:last-child{padding-bottom:0}
+  .tl-item::before{content:""; position:absolute; left:9px; top:20px; bottom:-4px; width:2px; background:var(--border)}
+  .tl-item:last-child::before{display:none}
+  .tl-item.done::before{background:#c7f0d4}
+  .tl-dot{position:absolute; left:0; top:1px; width:20px; height:20px; border-radius:50%;
+    display:grid; place-items:center; font-size:10px; color:#fff; z-index:1}
+  .tl-dot.done{background:var(--ok)} .tl-dot.active{background:var(--accent); box-shadow:0 0 0 4px var(--accent-soft)}
+  .tl-dot.wait{background:#fff; border:2px solid var(--border-strong); color:var(--text-3)}
+  .tl-dot.claude{background:var(--claude)} .tl-dot.codex{background:var(--codex)}
+  .tl-head{display:flex; align-items:baseline; gap:9px; flex-wrap:wrap}
+  .tl-head .name{font-weight:700; font-size:12.5px}
+  .tl-head .time{font-family:var(--mono); font-size:10.5px; color:var(--text-3)}
+  .tl-head .dur{font-size:10.5px; color:var(--text-3); font-family:var(--mono)}
+  .tl-body{margin-top:3px; font-size:12px; color:var(--text-2); line-height:1.5}
+  .tl-tags{display:flex; gap:6px; margin-top:6px; flex-wrap:wrap}
+  .tag{font-size:10px; font-weight:600; font-family:var(--mono); padding:2px 7px; border-radius:6px; background:var(--surface-2); border:1px solid var(--border); color:var(--text-2)}
+  .tag.model{background:var(--accent-soft); color:var(--accent); border-color:var(--accent-line)}
+  .tag.claude{background:var(--claude-bg); color:var(--claude); border:none}
+  .tag.codex{background:var(--codex-bg); color:var(--codex); border:none}
+  .tag.ok{background:var(--ok-bg); color:var(--ok); border-color:#bbf7d0}
+
+  /* ── Findings triage ── */
+  .fbar{display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--surface-2); font-size:11.5px; color:var(--text-2)}
+  .fbar .prog{flex:1; display:flex; align-items:center; gap:8px}
+  .prbar{flex:1; height:6px; border-radius:6px; background:var(--surface-3); overflow:hidden; max-width:180px}
+  .prbar i{display:block; height:100%; background:var(--ok); transition:width .3s}
+  .finding{border-bottom:1px solid var(--border); padding:13px 16px; transition:.2s; display:flex; gap:12px}
+  .finding:last-child{border-bottom:none}
+  .finding.approved{background:linear-gradient(90deg,var(--ok-bg),transparent 60%)}
+  .finding.dismissed{opacity:.5}
+  .finding.dismissed .f-main{text-decoration:line-through; text-decoration-color:var(--text-3)}
+  .f-sev-bar{width:3px; border-radius:3px; flex:none; background:var(--sev-l)}
+  .finding[data-sev="critical"] .f-sev-bar{background:var(--sev-c)}
+  .finding[data-sev="high"] .f-sev-bar{background:var(--sev-h)}
+  .finding[data-sev="medium"] .f-sev-bar{background:var(--sev-m)}
+  .finding[data-sev="low"] .f-sev-bar{background:var(--sev-l)}
+  .f-main{flex:1; min-width:0}
+  .f-top{display:flex; align-items:center; gap:6px; margin-bottom:5px; flex-wrap:wrap}
+  .f-loc{font-family:var(--mono); font-size:11.5px; color:var(--text); font-weight:600}
+  .f-claim{font-size:12.5px; font-weight:600; margin-bottom:3px; letter-spacing:-.1px}
+  .f-rat{font-size:11.5px; color:var(--text-2); line-height:1.5}
+  .f-vendor{font-size:10px; font-weight:700; font-family:var(--mono); padding:1px 6px; border-radius:5px}
+  .f-vendor.consensus{background:#ecfdf5; color:#047857}
+  .f-vendor.claude{background:var(--claude-bg); color:var(--claude)}
+  .f-vendor.codex{background:var(--codex-bg); color:var(--codex)}
+  .f-cat{font-size:10px; font-weight:600; color:var(--text-3); text-transform:uppercase; letter-spacing:.4px}
+  .f-side{display:flex; flex-direction:column; gap:5px; align-items:stretch; flex:none; width:96px}
+  .fbtn{font-family:inherit; font-size:11px; font-weight:600; padding:5px 8px; border-radius:7px; border:1px solid var(--border); background:var(--surface); color:var(--text-2); cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; transition:.13s}
+  .fbtn:hover{background:var(--surface-2)}
+  .fbtn.approve.on{background:var(--ok); border-color:var(--ok); color:#fff}
+  .fbtn.dismiss.on{background:var(--sev-l); border-color:var(--sev-l); color:#fff}
+  .fbtn.edit{font-size:10.5px}
+  .f-state{font-size:10px; font-weight:700; text-align:center; letter-spacing:.3px; text-transform:uppercase; color:var(--text-3); min-height:12px}
+  .finding.approved .f-state{color:var(--ok)}
+  .finding.dismissed .f-state{color:var(--sev-l)}
+
+  /* ── Comment preview ── */
+  .codewrap{margin:0; background:#0f172a; border-radius:10px; overflow:hidden}
+  .code-h{display:flex; align-items:center; gap:8px; padding:8px 14px; background:#1e293b; color:#94a3b8; font-size:11px; font-family:var(--mono)}
+  .code-h .dots{display:flex; gap:5px} .code-h .dots i{width:9px;height:9px;border-radius:50%}
+  .copy{margin-left:auto; background:#334155; border:none; color:#cbd5e1; font-family:var(--mono); font-size:10.5px; padding:3px 9px; border-radius:6px; cursor:pointer}
+  .copy:hover{background:#475569}
+  pre.code{margin:0; padding:14px 16px; overflow-x:auto; font-family:var(--mono); font-size:11.5px; line-height:1.65; color:#e2e8f0}
+  pre.code .h1{color:#818cf8; font-weight:700}
+  pre.code .h2{color:#38bdf8}
+  pre.code .sev-c{color:#f87171; font-weight:700}
+  pre.code .sev-h{color:#fb923c; font-weight:700}
+  pre.code .sev-m{color:#fbbf24}
+  pre.code .mut{color:#64748b}
+  pre.code .ok{color:#4ade80}
+  pre.code .loc{color:#a5b4fc}
+
+  .empty{display:grid; place-items:center; height:100%; color:var(--text-3); text-align:center; padding:40px}
+  .empty svg{margin-bottom:12px; opacity:.5}
+
+  .toast{position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(80px); background:var(--text); color:#fff; padding:10px 18px; border-radius:10px; font-size:12.5px; font-weight:600; box-shadow:var(--shadow-lg); opacity:0; transition:.28s; z-index:100; display:flex; align-items:center; gap:8px}
+  .toast.show{transform:translateX(-50%) translateY(0); opacity:1}
+
+  @media(max-width:920px){
+    .work{grid-template-columns:1fr; grid-template-rows:auto 1fr}
+    .master{border-right:none; border-bottom:1px solid var(--border); max-height:42vh}
+    .stat-strip{display:none!important}
+  }
+</style>
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+    </div>
+    Almighty PR Review<span class="sub">· local triage</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="stat-strip" role="group" aria-label="집계">
+    <div class="kpi"><b id="kpiOpen">7</b><span>대기 PR</span></div>
+    <div class="kpi warn"><b id="kpiAwait">3</b><span>승인 대기</span></div>
+    <div class="kpi"><b id="kpiFind">14</b><span>findings</span></div>
+  </div>
+  <button class="icon-btn" title="새로고침" aria-label="새로고침">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+  </button>
+</header>
+
+<nav class="tabbar" id="tabbar" role="tablist" aria-label="레포지토리"></nav>
+
+<div class="work">
+  <!-- MASTER -->
+  <section class="master" aria-label="PR 오버뷰">
+    <div class="master-head">
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="text" id="search" placeholder="PR 검색 (제목·작성자·번호)" aria-label="PR 검색">
+      </div>
+      <div class="seg" role="group" aria-label="정렬/필터">
+        <button data-filter="all" aria-pressed="true">전체</button>
+        <button data-filter="awaiting" aria-pressed="false">대기</button>
+      </div>
+    </div>
+    <div class="master-list" id="prList" role="listbox" aria-label="PR 목록"></div>
+  </section>
+
+  <!-- DETAIL -->
+  <section class="detail" id="detail" aria-label="PR 디테일" tabindex="-1"></section>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+/* ── Mock data: the server reviewing itself ── */
+const REPOS = [
+  {id:"all",   name:"전체"},
+  {id:"cash",  name:"cashdoc-api-server"},
+  {id:"yeogi", name:"Yeogiya-API-Server"},
+  {id:"review",name:"cashreview-api"},
+  {id:"smart", name:"smartdoctor-api"},
+];
+
+const AV = {
+  jhkim:{n:"jhkim", c:"#6366f1"}, ylee:{n:"ylee", c:"#0891b2"},
+  swpark:{n:"swpark", c:"#db2777"}, mschoi:{n:"mschoi", c:"#059669"},
+  bot:{n:"almighty-bot", c:"#8b5cf6"},
+};
+
+// finding pool
+const F = {
+  jwt:{sev:"critical",cat:"security",vendor:"codex",loc:"auth/token.py:88",
+    claim:"JWT 검증에 만료(exp) 체크 없음",
+    rat:"decode_token()가 서명만 검증하고 exp 클레임을 확인하지 않음. 탈취된 토큰이 영구 유효 → 세션 무효화 불가. jwt.decode에 options={'verify_exp':True} 명시 또는 만료 분기 추가 필요."},
+  sem:{sev:"high",cat:"bug",vendor:"consensus",loc:"runner_pool.py:88",
+    claim:"취소 경로에서 세마포어 release 누락 → 풀 고갈",
+    rat:"acquire 후 예외/취소 시 release가 호출되지 않아 permit이 영구 소진. 반복되면 풀이 완전히 고갈되어 신규 리뷰가 hang. `async with self._sem:` 컨텍스트로 감싸 보장."},
+  wtclean:{sev:"high",cat:"bug",vendor:"consensus",loc:"worktree.py:52",
+    claim:"리뷰 실패 시 worktree 미제거 → 디스크 누적",
+    rat:"예외 발생 시 git worktree가 정리되지 않고 남아 장기적으로 디스크 고갈. try/finally로 remove를 finally에 배치."},
+  wtpath:{sev:"high",cat:"security",vendor:"claude",loc:"worktree.py:77",
+    claim:"브랜치명 경로 미살균 → ../ traversal",
+    rat:"PR 브랜치명을 그대로 경로 조인에 사용. `../../` 포함 시 작업 디렉토리 밖으로 escape 가능. 화이트리스트/normalize 후 base 경로 prefix 검증 필요."},
+  nplus1:{sev:"medium",cat:"perf",vendor:"claude",loc:"report/query.py:203",
+    claim:"루프 내 N+1 쿼리",
+    rat:"finding마다 개별 SELECT로 파일 메타를 조회. PR당 수십~수백 쿼리 발생. IN 절 배치 조회 또는 selectinload로 1~2쿼리로 축소."},
+  jitter:{sev:"medium",cat:"bug",vendor:"consensus",loc:"backoff.py:20",
+    claim:"지수백오프에 jitter 없음 → thundering herd",
+    rat:"여러 러너가 동일 간격으로 재시도해 API rate limit 재충돌. full-jitter(random(0, base*2^n)) 적용 권장."},
+  ctxnpe:{sev:"medium",cat:"bug",vendor:"claude",loc:"context.py:18",
+    claim:"no-op ContextProvider가 None 반환 → 호출부 NPE",
+    rat:"기본 provider가 None을 반환하는데 호출부는 .files 접근. 빈 Context 객체를 반환하도록 수정."},
+  unused:{sev:"low",cat:"style",vendor:"consensus",loc:"format.py:31",
+    claim:"미사용 import",
+    rat:"`from typing import Optional` 미사용. ruff F401. 제거."},
+};
+
+// severity count helper
+function counts(keys){
+  const c={critical:0,high:0,medium:0,low:0};
+  keys.forEach(k=>c[F[k].sev]++); return c;
+}
+
+const PRS = [
+  {repo:"review", num:142, title:"refactor: worktree 격리 도입", author:"jhkim", updated:"3분 전",
+   branch:"feat/worktree-isolation", status:"awaiting",
+   need:"complex", needWhy:"동시성 로직 + 파일시스템 격리, 3파일",
+   findings:["sem","wtclean","wtpath","jitter","unused"],
+   trace:{screen:{model:"haiku",effort:"low",dur:"4.2s",files:6},
+     claude:{model:"sonnet",effort:"xhigh",dur:"1m 48s",n:5},
+     codex:{model:"gpt-5.5",effort:"high",dur:"2m 12s",n:4},
+     merged:9, triage:{a:0,d:0,w:5}}},
+
+  {repo:"review", num:139, title:"feat: 사전 스크리닝 게이트", author:"ylee", updated:"22분 전",
+   branch:"feat/prescreen-gate", status:"awaiting",
+   need:"moderate", needWhy:"신규 모듈 1개 + 라우팅 변경",
+   findings:["nplus1","ctxnpe"],
+   trace:{screen:{model:"haiku",effort:"low",dur:"2.9s",files:3},
+     claude:{model:"sonnet",effort:"xhigh",dur:"58s",n:2},
+     codex:{model:"gpt-5.5",effort:"high",dur:"1m 04s",n:1},
+     merged:3, triage:{a:0,d:0,w:2}}},
+
+  {repo:"review", num:137, title:"chore: 미사용 import 정리", author:"mschoi", updated:"1시간 전",
+   branch:"chore/cleanup-imports", status:"skipped",
+   need:"trivial", needWhy:"주석/import만, 로직 변경 없음",
+   findings:[],
+   trace:{screen:{model:"haiku",effort:"low",dur:"1.6s",files:2},skip:true}},
+
+  {repo:"cash", num:508, title:"fix: 결제 콜백 await 누락", author:"swpark", updated:"11분 전",
+   branch:"hotfix/payment-callback-await", status:"awaiting",
+   need:"complex", needWhy:"결제 경로 async 흐름 변경, 콜백 2파일",
+   findings:["jwt","jitter"],
+   trace:{screen:{model:"haiku",effort:"low",dur:"3.1s",files:4},
+     claude:{model:"sonnet",effort:"xhigh",dur:"1m 21s",n:1},
+     codex:{model:"gpt-5.5",effort:"high",dur:"1m 33s",n:2},
+     merged:3, triage:{a:0,d:0,w:2}}},
+
+  {repo:"cash", num:503, title:"feat: 리뷰 결과 웹훅 알림", author:"jhkim", updated:"40분 전",
+   branch:"feat/review-webhook", status:"reviewing",
+   need:"moderate", needWhy:"외부 연동 1파일 + 재시도 로직",
+   findings:["jitter"],
+   trace:{screen:{model:"haiku",effort:"low",dur:"2.4s",files:3},
+     claude:{model:"sonnet",effort:"xhigh",dur:"running",n:null,active:true},
+     codex:{model:"gpt-5.5",effort:"high",dur:"running",n:null,active:true}}},
+
+  {repo:"yeogi", num:71, title:"feat: 러너 풀 백프레셔", author:"ylee", updated:"1시간 전",
+   branch:"feat/runner-backpressure", status:"awaiting",
+   need:"complex", needWhy:"세마포어 + 취소 경로, 동시성 3파일",
+   findings:["sem","jitter","unused"],
+   trace:{screen:{model:"haiku",effort:"low",dur:"3.8s",files:5},
+     claude:{model:"sonnet",effort:"xhigh",dur:"1m 39s",n:3},
+     codex:{model:"gpt-5.5",effort:"high",dur:"1m 57s",n:2},
+     merged:5, triage:{a:0,d:0,w:3}}},
+
+  {repo:"smart", num:214, title:"refactor: 리포트 쿼리 최적화", author:"mschoi", updated:"2시간 전",
+   branch:"perf/report-query", status:"posted",
+   need:"moderate", needWhy:"쿼리 계층 리팩터, N+1 후보",
+   findings:["nplus1"],
+   trace:{screen:{model:"haiku",effort:"low",dur:"2.2s",files:2},
+     claude:{model:"sonnet",effort:"xhigh",dur:"47s",n:1},
+     codex:{model:"gpt-5.5",effort:"high",dur:"52s",n:1},
+     merged:1, triage:{a:1,d:0,w:0},
+     posted:{url:"github.com/.../pull/214#issuecomment-2093",time:"2시간 전"}}},
+];
+
+const STATUS_LABEL = {
+  detected:"감지됨", screening:"사전스크리닝", reviewing:"리뷰중",
+  awaiting:"승인 대기", posted:"포스팅됨", skipped:"스킵",
+};
+const NEED_LABEL = {trivial:"trivial", moderate:"moderate", complex:"complex"};
+const SEV_SHORT = {critical:"C",high:"H",medium:"M",low:"L"};
+
+// runtime triage state per finding-instance keyed by pr.num + findingKey
+const triageState = {}; // "142::sem" -> "approve"|"dismiss"|null
+
+let activeRepo = "all";
+let activeFilter = "all";
+let searchTerm = "";
+let activePR = null;
+
+/* ── Build tabs ── */
+const tabbar = document.getElementById("tabbar");
+function repoCount(id){
+  return PRS.filter(p=>id==="all"||p.repo===id).filter(p=>p.status==="awaiting").length;
+}
+REPOS.forEach(r=>{
+  const b=document.createElement("button");
+  b.className="tab"; b.role="tab"; b.dataset.repo=r.id;
+  b.setAttribute("aria-selected", r.id===activeRepo);
+  const total=PRS.filter(p=>r.id==="all"||p.repo===r.id).length;
+  const await_=repoCount(r.id);
+  b.innerHTML=`${r.name} <span class="cnt">${total}</span>${await_?'<span class="dot" title="승인 대기"></span>':''}`;
+  b.addEventListener("click",()=>{activeRepo=r.id; syncTabs(); renderList(true);});
+  tabbar.appendChild(b);
+});
+function syncTabs(){
+  [...tabbar.children].forEach(b=>b.setAttribute("aria-selected", b.dataset.repo===activeRepo));
+}
+
+/* ── Filter seg ── */
+document.querySelectorAll(".seg button").forEach(b=>{
+  b.addEventListener("click",()=>{
+    document.querySelectorAll(".seg button").forEach(x=>x.setAttribute("aria-pressed",x===b));
+    activeFilter=b.dataset.filter; renderList(false);
+  });
+});
+document.getElementById("search").addEventListener("input",e=>{searchTerm=e.target.value.trim().toLowerCase(); renderList(false);});
+
+/* ── Render master list ── */
+const listEl=document.getElementById("prList");
+function visiblePRs(){
+  return PRS.filter(p=>activeRepo==="all"||p.repo===activeRepo)
+    .filter(p=>activeFilter==="all"||p.status==="awaiting")
+    .filter(p=>{
+      if(!searchTerm) return true;
+      return (p.title+" "+p.author+" #"+p.num).toLowerCase().includes(searchTerm);
+    });
+}
+function sevSummary(keys){
+  if(!keys.length) return '<span class="consensus">findings 없음</span>';
+  const c=counts(keys);
+  let h='<span class="sevrow">';
+  if(c.critical)h+=`<span class="sev c">C${c.critical}</span>`;
+  if(c.high)h+=`<span class="sev h">H${c.high}</span>`;
+  if(c.medium)h+=`<span class="sev m">M${c.medium}</span>`;
+  if(c.low)h+=`<span class="sev l">L${c.low}</span>`;
+  h+='</span>';
+  const cons=keys.filter(k=>F[k].vendor==="consensus").length;
+  h+=`<span class="consensus">· ${cons?`합의 ${cons}`:'단일'}</span>`;
+  return h;
+}
+function statusPill(p){
+  if(p.status==="reviewing"){
+    return `<span class="status reviewing"><span class="sd"></span>리뷰중</span>
+      <span class="vpill claude"><span class="spin"></span>Claude</span>
+      <span class="vpill codex"><span class="spin"></span>Codex</span>`;
+  }
+  return `<span class="status ${p.status}"><span class="sd"></span>${STATUS_LABEL[p.status]}</span>`;
+}
+function renderList(resetSelection){
+  const rows=visiblePRs();
+  listEl.innerHTML="";
+  if(!rows.length){
+    listEl.innerHTML=`<div class="empty" style="height:auto;padding:34px 20px">일치하는 PR이 없습니다</div>`;
+  }
+  rows.forEach(p=>{
+    const av=AV[p.author];
+    const btn=document.createElement("button");
+    btn.className="pr"; btn.role="option"; btn.dataset.num=p.num;
+    btn.setAttribute("aria-current", activePR&&activePR.num===p.num);
+    btn.innerHTML=`
+      <div class="pr-top">
+        <span class="pr-num">#${p.num}</span>
+        <span class="pr-title">${p.title}</span>
+      </div>
+      <div class="pr-meta">
+        <span class="av" style="background:${av.c}">${av.n[0].toUpperCase()}</span>
+        ${av.n} · ${p.updated}
+      </div>
+      <div class="pr-badges">
+        ${statusPill(p)}
+        <span class="need ${p.need}"><span class="nd"></span>${NEED_LABEL[p.need]}</span>
+      </div>
+      <div class="pr-badges" style="margin-top:6px">
+        ${sevSummary(p.findings)}
+      </div>`;
+    btn.addEventListener("click",()=>selectPR(p.num));
+    listEl.appendChild(btn);
+  });
+  if(resetSelection){
+    const first=rows[0];
+    if(first) selectPR(first.num); else renderDetail(null);
+  }
+}
+
+/* ── Select + render detail ── */
+function selectPR(num){
+  activePR=PRS.find(p=>p.num===num);
+  [...listEl.querySelectorAll(".pr")].forEach(b=>b.setAttribute("aria-current", b.dataset.num==num));
+  renderDetail(activePR);
+  document.getElementById("detail").scrollTop=0;
+}
+
+const detailEl=document.getElementById("detail");
+
+function traceHTML(p){
+  const t=p.trace, items=[];
+  items.push(`
+    <div class="tl-item done"><div class="tl-dot done">✓</div>
+      <div class="tl-head"><span class="name">감지</span><span class="time">webhook · ${p.updated}</span></div>
+      <div class="tl-body">PR #${p.num} 이벤트 수신 → 큐 등록. 브랜치 <code style="font-family:var(--mono)">${p.branch}</code></div>
+    </div>`);
+  items.push(`
+    <div class="tl-item done"><div class="tl-dot done">✓</div>
+      <div class="tl-head"><span class="name">사전 스크리닝</span><span class="dur">${t.screen.dur}</span></div>
+      <div class="tl-body">diff ${t.screen.files}파일 스캔 → 복잡도 <b style="color:var(--${p.need==='complex'?'complex':p.need==='moderate'?'moderate':'trivial'})">${p.need}</b>. ${p.needWhy}</div>
+      <div class="tl-tags"><span class="tag model">${t.screen.model}</span><span class="tag">effort ${t.screen.effort}</span></div>
+    </div>`);
+  if(t.skip){
+    items.push(`
+      <div class="tl-item"><div class="tl-dot wait">⤼</div>
+        <div class="tl-head"><span class="name">리뷰 스킵</span></div>
+        <div class="tl-body">trivial 판정 → 벤더 리뷰 게이트에서 스킵. 비용 절감(러너 미기동).</div>
+        <div class="tl-tags"><span class="tag">gate: trivial→skip</span></div>
+      </div>`);
+    return `<div class="tl">${items.join("")}</div>`;
+  }
+  const cl=t.claude, cx=t.codex;
+  const vendorItem=(cls,label,v)=>{
+    if(v.active) return `
+      <div class="tl-item"><div class="tl-dot active">●</div>
+        <div class="tl-head"><span class="name">${label} 리뷰</span><span class="dur">진행중…</span></div>
+        <div class="tl-body">worktree 격리 실행 중. 결과 대기.</div>
+        <div class="tl-tags"><span class="tag ${cls}">${v.model}</span><span class="tag">effort ${v.effort}</span></div>
+      </div>`;
+    return `
+      <div class="tl-item done"><div class="tl-dot ${cls}">${label[0]}</div>
+        <div class="tl-head"><span class="name">${label} 리뷰</span><span class="dur">${v.dur}</span></div>
+        <div class="tl-body">findings <b>${v.n}</b>건 도출.</div>
+        <div class="tl-tags"><span class="tag ${cls}">${v.model}</span><span class="tag">effort ${v.effort}</span><span class="tag">${v.n} findings</span></div>
+      </div>`;
+  };
+  items.push(vendorItem("claude","Claude",cl));
+  items.push(vendorItem("codex","Codex",cx));
+
+  if(t.merged!=null){
+    items.push(`
+      <div class="tl-item done"><div class="tl-dot done">✓</div>
+        <div class="tl-head"><span class="name">병합·중복제거</span></div>
+        <div class="tl-body">양 벤더 findings 정규화 → <b>${t.merged}</b>건. 동일 위치 합의 표기, 나머지 단일 벤더로 태깅.</div>
+      </div>`);
+  }
+  if(t.triage){
+    const st=liveTriage(p);
+    items.push(`
+      <div class="tl-item ${p.status==='posted'?'done':''}"><div class="tl-dot ${p.status==='posted'?'done':'active'}">${p.status==='posted'?'✓':'●'}</div>
+        <div class="tl-head"><span class="name">트리아지</span><span class="dur">${p.status==='posted'?'완료':'진행중'}</span></div>
+        <div class="tl-body">승인 <b style="color:var(--ok)">${st.a}</b> · 기각 <b>${st.d}</b> · 대기 <b style="color:var(--sev-h)">${st.w}</b></div>
+      </div>`);
+  }
+  if(t.posted){
+    items.push(`
+      <div class="tl-item done"><div class="tl-dot done">↗</div>
+        <div class="tl-head"><span class="name">GitHub 포스팅</span><span class="time">${t.posted.time}</span></div>
+        <div class="tl-body">승인된 findings를 구조화 코멘트로 게시.</div>
+        <div class="tl-tags"><span class="tag ok">${t.posted.url}</span></div>
+      </div>`);
+  } else if(!t.skip){
+    items.push(`
+      <div class="tl-item"><div class="tl-dot wait">↗</div>
+        <div class="tl-head"><span class="name">GitHub 포스팅</span><span class="dur">대기</span></div>
+        <div class="tl-body">승인 확정 후 코멘트 게시 가능.</div>
+      </div>`);
+  }
+  return `<div class="tl">${items.join("")}</div>`;
+}
+
+function liveTriage(p){
+  let a=0,d=0,w=0;
+  p.findings.forEach(k=>{
+    const s=triageState[p.num+"::"+k];
+    if(s==="approve")a++; else if(s==="dismiss")d++; else w++;
+  });
+  // seed posted PR as all approved by default
+  return {a,d,w};
+}
+
+function findingHTML(p,k){
+  const f=F[k];
+  const key=p.num+"::"+k;
+  const st=triageState[key];
+  const cls=st==="approve"?"approved":st==="dismiss"?"dismissed":"";
+  const vlabel=f.vendor==="consensus"?"CONSENSUS":f.vendor==="claude"?"Claude":"Codex";
+  return `
+    <div class="finding ${cls}" data-sev="${f.sev}" data-key="${key}">
+      <div class="f-sev-bar"></div>
+      <div class="f-main">
+        <div class="f-top">
+          <span class="sev ${SEV_SHORT[f.sev].toLowerCase()}">${SEV_SHORT[f.sev]}</span>
+          <span class="f-cat">${f.cat}</span>
+          <span class="f-vendor ${f.vendor}">${vlabel}</span>
+          <span class="f-loc">${f.loc}</span>
+        </div>
+        <div class="f-claim">${f.claim}</div>
+        <div class="f-rat">${f.rat}</div>
+      </div>
+      <div class="f-side">
+        <button class="fbtn approve ${st==="approve"?"on":""}" data-act="approve" data-key="${key}">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>승인
+        </button>
+        <button class="fbtn dismiss ${st==="dismiss"?"on":""}" data-act="dismiss" data-key="${key}">기각</button>
+        <button class="fbtn edit" data-act="edit" data-key="${key}">✎ 편집</button>
+        <span class="f-state">${st==="approve"?"approved":st==="dismiss"?"dismissed":""}</span>
+      </div>
+    </div>`;
+}
+
+function commentPreview(p){
+  const approved=p.findings.filter(k=>triageState[p.num+"::"+k]==="approve");
+  const list = approved.length?approved:p.findings; // show all if none yet approved
+  const isPreview = approved.length===0;
+  const sevOrder={critical:0,high:1,medium:2,low:3};
+  const sorted=[...list].sort((a,b)=>sevOrder[F[a].sev]-sevOrder[F[b].sev]);
+  let body = sorted.map(k=>{
+    const f=F[k];
+    const sc=f.sev==="critical"?"sev-c":f.sev==="high"?"sev-h":f.sev==="medium"?"sev-m":"mut";
+    const vlabel=f.vendor==="consensus"?"Claude+Codex 합의":f.vendor==="claude"?"Claude":"Codex";
+    return `<span class="h2">### [${f.sev.toUpperCase()}] ${f.claim}</span>
+- <span class="mut">위치</span>  <span class="loc">${f.loc}</span>
+- <span class="mut">벤더</span>  ${vlabel}
+- <span class="mut">근거</span>  ${f.rat.split(".")[0]}.
+`;
+  }).join("\n");
+  const cCnt=counts(sorted);
+  const summary=`${sorted.length}건 (${cCnt.critical?'C'+cCnt.critical+' ':''}${cCnt.high?'H'+cCnt.high+' ':''}${cCnt.medium?'M'+cCnt.medium+' ':''}${cCnt.low?'L'+cCnt.low:''})`.trim();
+  return `<span class="h1">## 🤖 Almighty PR Review — #${p.num}</span>
+<span class="mut">> Claude sonnet(xhigh) + Codex gpt-5.5(high) 교차 리뷰 · 트리아지 승인분만 게시</span>
+
+<span class="ok">**요약**</span>  ${summary} · 사전스크리닝 <b>${p.need}</b>
+
+${body}
+<span class="mut">---
+_generated by almighty-pr-review · 이 코멘트는 승인된 항목만 포함합니다._</span>`;
+}
+
+function renderDetail(p){
+  if(!p){
+    detailEl.innerHTML=`<div class="empty">
+      <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6M9 8h6"/><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
+      <div>왼쪽에서 PR을 선택하면<br>리뷰 트레이스와 트리아지가 표시됩니다.</div></div>`;
+    return;
+  }
+  const av=AV[p.author];
+  const repoName=REPOS.find(r=>r.id===p.repo).name;
+  const canPost=p.findings.some(k=>triageState[p.num+"::"+k]==="approve") && p.status!=="posted";
+  detailEl.innerHTML=`
+  <div class="detail-inner">
+    <div class="d-head">
+      <div class="d-crumb"><b>${repoName}</b> / <span>pull</span> / #${p.num}</div>
+      <div class="d-title">${p.title}</div>
+      <div class="d-sub">
+        <span class="who"><span class="av" style="background:${av.c}">${av.n[0].toUpperCase()}</span>${av.n}</span>
+        <span class="branch">${p.branch}</span>
+        <span class="need ${p.need}"><span class="nd"></span>${NEED_LABEL[p.need]} · ${p.needWhy}</span>
+        <div class="d-actions">
+          <button class="btn" onclick="toast('worktree diff를 열었습니다 (mock)')">diff 열기</button>
+          <button class="btn primary" id="postBtn" ${canPost?'':'disabled'} onclick="doPost(${p.num})">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+            ${p.status==="posted"?"게시됨":"승인분 포스팅"}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+        <h3>리뷰 트레이스</h3>
+        <span class="hint">감지 → 스크리닝 → 이중 리뷰 → 트리아지 → 포스팅</span>
+      </div>
+      <div class="card-b">${traceHTML(p)}</div>
+    </div>
+
+    ${p.findings.length?`
+    <div class="card">
+      <div class="card-h">
+        <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
+        <h3>Findings 트리아지</h3>
+        <span class="hint">${p.findings.length}건 · 승인한 항목만 게시</span>
+      </div>
+      <div class="fbar">
+        <span class="prog">승인 진행
+          <span class="prbar"><i id="prfill" style="width:0%"></i></span>
+          <span id="progtxt"></span>
+        </span>
+      </div>
+      <div id="findings">${p.findings.map(k=>findingHTML(p,k)).join("")}</div>
+    </div>`:`
+    <div class="card"><div class="card-b" style="text-align:center;color:var(--text-3);padding:22px">
+      사전 스크리닝에서 <b>${p.need}</b>로 판정되어 벤더 리뷰가 스킵되었습니다. findings 없음.
+    </div></div>`}
+
+    ${p.findings.length?`
+    <div class="card">
+      <div class="card-h">
+        <span class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg></span>
+        <h3>구조화 코멘트 프리뷰</h3>
+        <span class="hint" id="cmtHint"></span>
+      </div>
+      <div class="card-b">
+        <div class="codewrap">
+          <div class="code-h"><div class="dots"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#4ade80"></i></div>
+            comment.md<button class="copy" onclick="toast('클립보드에 복사했습니다 (mock)')">복사</button></div>
+          <pre class="code" id="cmtBody"></pre>
+        </div>
+      </div>
+    </div>`:``}
+  </div>`;
+
+  bindFindingActions(p);
+  updateProgress(p);
+}
+
+function bindFindingActions(p){
+  detailEl.querySelectorAll(".fbtn").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      const key=btn.dataset.key, act=btn.dataset.act;
+      if(act==="edit"){toast("rationale 편집 (mock) — "+key.split("::")[1]); return;}
+      const cur=triageState[key];
+      triageState[key] = cur===act ? null : act;
+      // update finding row
+      const row=detailEl.querySelector(`.finding[data-key="${key}"]`);
+      const s=triageState[key];
+      row.className="finding "+(s==="approve"?"approved":s==="dismiss"?"dismissed":"");
+      row.dataset.sev=F[key.split("::")[1]].sev;
+      row.querySelector(".approve").classList.toggle("on",s==="approve");
+      row.querySelector(".dismiss").classList.toggle("on",s==="dismiss");
+      row.querySelector(".f-state").textContent = s==="approve"?"approved":s==="dismiss"?"dismissed":"";
+      updateProgress(p);
+      refreshTraceTriage(p);
+      refreshComment(p);
+      updatePostBtn(p);
+      renderList(false); // keep master sev summary consistent
+      [...listEl.querySelectorAll(".pr")].forEach(b=>b.setAttribute("aria-current", b.dataset.num==p.num));
+    });
+  });
+}
+
+function updateProgress(p){
+  const st=liveTriage(p);
+  const decided=st.a+st.d, total=p.findings.length;
+  const fill=detailEl.querySelector("#prfill");
+  const txt=detailEl.querySelector("#progtxt");
+  if(fill){fill.style.width=(total?Math.round(decided/total*100):0)+"%";}
+  if(txt){txt.innerHTML=`승인 <b style="color:var(--ok)">${st.a}</b> · 기각 <b>${st.d}</b> · 대기 <b style="color:var(--sev-h)">${st.w}</b>`;}
+  refreshComment(p);
+}
+function refreshComment(p){
+  const el=detailEl.querySelector("#cmtBody");
+  if(!el) return;
+  el.innerHTML=commentPreview(p);
+  const approved=p.findings.filter(k=>triageState[p.num+"::"+k]==="approve").length;
+  const hint=detailEl.querySelector("#cmtHint");
+  if(hint) hint.textContent = approved?`승인 ${approved}건 반영`:"아직 승인 전 — 전체 미리보기";
+}
+function refreshTraceTriage(p){
+  // re-render trace card to reflect triage counts
+  const card=detailEl.querySelectorAll(".card")[0];
+  if(card) card.querySelector(".card-b").innerHTML=traceHTML(p);
+}
+function updatePostBtn(p){
+  const btn=detailEl.querySelector("#postBtn");
+  if(!btn) return;
+  const canPost=p.findings.some(k=>triageState[p.num+"::"+k]==="approve") && p.status!=="posted";
+  btn.disabled=!canPost;
+}
+
+/* ── Actions ── */
+window.doPost=function(num){
+  const p=PRS.find(x=>x.num===num);
+  const n=p.findings.filter(k=>triageState[p.num+"::"+k]==="approve").length;
+  if(!n){toast("승인된 findings가 없습니다"); return;}
+  p.status="posted";
+  p.trace.posted={url:"github.com/.../pull/"+num+"#issuecomment-新",time:"방금"};
+  toast(`✓ #${num} — 승인 ${n}건을 GitHub 코멘트로 게시했습니다`);
+  renderList(false);
+  selectPR(num);
+};
+window.toast=function(msg){
+  const t=document.getElementById("toast");
+  t.innerHTML=`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg>${msg}`;
+  t.classList.add("show");
+  clearTimeout(window._tt);
+  window._tt=setTimeout(()=>t.classList.remove("show"),2200);
+};
+
+/* ── Keyboard nav (j/k, up/down) ── */
+document.addEventListener("keydown",e=>{
+  if(e.target.tagName==="INPUT") return;
+  if(["j","k","ArrowDown","ArrowUp"].includes(e.key)){
+    const rows=visiblePRs();
+    if(!rows.length) return;
+    let i=rows.findIndex(r=>activePR&&r.num===activePR.num);
+    if(e.key==="j"||e.key==="ArrowDown") i=Math.min(rows.length-1,i+1);
+    else i=Math.max(0,i-1);
+    selectPR(rows[i].num);
+    const el=listEl.querySelector(`.pr[data-num="${rows[i].num}"]`);
+    if(el) el.scrollIntoView({block:"nearest"});
+    e.preventDefault();
+  }
+});
+
+/* ── Seed posted PR triage ── */
+PRS.filter(p=>p.status==="posted").forEach(p=>{
+  p.findings.forEach(k=>triageState[p.num+"::"+k]="approve");
+});
+
+/* ── Init ── */
+renderList(true);
+</script>
+</body>
+</html>

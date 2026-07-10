@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Almighty PR Review — Cockpit (Ops Console)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel-2:#1c2230; --line:#2b3444;
+    --ink:#e6edf3; --ink-dim:#8b98a9; --ink-faint:#5b6675;
+    --accent:#58a6ff; --focus:#1f6feb;
+    --crit:#f85149; --high:#e3852b; --med:#d1a800; --low:#6b7684;
+    --claude:#a879ff; --codex:#2fb992; --consensus:#e3b341;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;line-height:1.4;overflow:hidden}
+  .app{display:grid;grid-template-rows:auto auto 1fr;height:100vh}
+
+  /* top bar */
+  header{display:flex;align-items:center;gap:16px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line)}
+  header .logo{font-family:var(--mono);font-weight:700;letter-spacing:.5px}
+  header .logo b{color:var(--accent)}
+  header .env{font-family:var(--mono);font-size:11px;color:var(--ink-dim);border:1px solid var(--line);padding:1px 6px;border-radius:4px}
+  header .spacer{flex:1}
+  header .clock{font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+
+  /* stat tiles */
+  .tiles{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
+  .tile{background:var(--panel);padding:7px 12px}
+  .tile .k{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink-faint)}
+  .tile .v{font-family:var(--mono);font-size:20px;font-weight:600;margin-top:2px}
+  .tile .v small{font-size:11px;color:var(--ink-dim);font-weight:400}
+  .tile.crit .v{color:var(--crit)} .tile.high .v{color:var(--high)}
+  .bar{height:4px;border-radius:2px;background:var(--panel-2);margin-top:6px;overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--accent)}
+  .bar.warn>i{background:var(--high)}
+
+  /* body: 3 panes */
+  .panes{display:grid;grid-template-columns:210px 1fr 320px;min-height:0}
+  .pane{overflow:auto;border-right:1px solid var(--line)}
+  .pane:last-child{border-right:0}
+  .pane h2{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink-faint);margin:0;padding:9px 12px 6px;position:sticky;top:0;background:var(--bg)}
+
+  /* repo tree */
+  .repo{padding:2px 0}
+  .repo>.rname{padding:5px 12px;font-family:var(--mono);font-size:12px;color:var(--ink-dim);display:flex;justify-content:space-between}
+  .pr{display:flex;align-items:center;gap:7px;padding:5px 12px 5px 20px;cursor:pointer;border-left:2px solid transparent}
+  .pr:hover{background:var(--panel)}
+  .pr.sel{background:var(--panel-2);border-left-color:var(--accent)}
+  .pr .num{font-family:var(--mono);color:var(--ink-faint);font-size:11px}
+  .pr .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .st-new{background:var(--accent)} .st-reviewing{background:var(--high);animation:pulse 1.4s infinite}
+  .st-reviewed{background:var(--codex)}
+  @keyframes pulse{50%{opacity:.35}}
+
+  /* findings table */
+  .filters{display:flex;gap:6px;padding:6px 12px;flex-wrap:wrap;position:sticky;top:26px;background:var(--bg);z-index:2}
+  .chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border:1px solid var(--line);border-radius:12px;color:var(--ink-dim);cursor:pointer;user-select:none}
+  .chip.on{color:var(--ink);border-color:var(--accent);background:rgba(88,166,255,.12)}
+  table{width:100%;border-collapse:collapse}
+  thead th{position:sticky;top:60px;background:var(--bg);text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink-faint);font-weight:500;padding:5px 10px;border-bottom:1px solid var(--line)}
+  tbody tr{cursor:pointer;border-bottom:1px solid var(--panel)}
+  tbody tr:hover{background:var(--panel)}
+  tbody tr.sel{background:var(--panel-2);outline:1px solid var(--focus);outline-offset:-1px}
+  tbody tr.done td{opacity:.4}
+  td{padding:5px 10px;vertical-align:top}
+  .sev{font-family:var(--mono);font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px}
+  .sev.CRITICAL{background:rgba(248,81,73,.16);color:var(--crit)}
+  .sev.HIGH{background:rgba(227,133,43,.16);color:var(--high)}
+  .sev.MEDIUM{background:rgba(209,168,0,.16);color:var(--med)}
+  .sev.LOW{background:rgba(107,118,132,.18);color:var(--low)}
+  .vend{font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:3px;border:1px solid var(--line)}
+  .vend.claude{color:var(--claude)} .vend.codex{color:var(--codex)}
+  .vend.both{color:var(--consensus);border-color:var(--consensus)}
+  .floc{font-family:var(--mono);font-size:11px;color:var(--ink-dim)}
+  .ftitle{font-size:12px}
+  .stateflag{font-family:var(--mono);font-size:10px;color:var(--ink-faint)}
+
+  /* detail pane */
+  .detail{padding:12px}
+  .detail .empty{color:var(--ink-faint);text-align:center;margin-top:40px;font-size:12px}
+  .detail h3{margin:0 0 4px;font-size:14px}
+  .detail .meta{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+  .detail .prose{color:var(--ink-dim);font-size:12px;margin:10px 0}
+  .code{background:#010409;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:11px;overflow:auto;color:#c9d1d9}
+  .code .del{color:var(--crit)} .code .add{color:var(--codex)}
+  .actions{display:flex;gap:6px;margin-top:12px}
+  .btn{font-family:var(--mono);font-size:11px;padding:6px 10px;border-radius:5px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;flex:1;text-align:center}
+  .btn:hover{border-color:var(--accent)}
+  .btn.approve{background:rgba(47,185,146,.14);border-color:var(--codex);color:var(--codex)}
+  .btn.dismiss{background:rgba(248,81,73,.12);border-color:var(--crit);color:var(--crit)}
+  kbd{font-family:var(--mono);font-size:10px;background:var(--panel-2);border:1px solid var(--line);border-bottom-width:2px;border-radius:3px;padding:0 4px;color:var(--ink-dim)}
+
+  footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top:1px solid var(--line);padding:4px 12px;font-family:var(--mono);font-size:11px;color:var(--ink-faint);display:flex;gap:16px}
+  footer b{color:var(--ink-dim)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="logo"><b>◇</b> almighty <span style="color:var(--ink-dim)">/ review-cockpit</span></span>
+    <span class="env">solo · local · @st42597</span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">—</span>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="panes">
+    <section class="pane">
+      <h2>Repos / PRs</h2>
+      <div id="tree"></div>
+    </section>
+
+    <section class="pane">
+      <div class="filters" id="filters"></div>
+      <table>
+        <thead><tr><th>Sev</th><th>By</th><th>Finding</th><th>Location</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </section>
+
+    <aside class="pane">
+      <h2>Finding detail</h2>
+      <div class="detail" id="detail"><div class="empty">행을 선택하거나 <kbd>j</kbd>/<kbd>k</kbd> 로 이동</div></div>
+    </aside>
+  </div>
+</div>
+
+<footer>
+  <span><b>j/k</b> 이동</span><span><b>a</b> 승인·포스팅</span><span><b>x</b> 기각</span>
+  <span><b>1-4</b> 심각도 필터</span><span style="margin-left:auto" id="fstat"></span>
+</footer>
+
+<script>
+const PRS=[
+ {id:151,repo:'smartdoctor-eks',title:'Fix rate-limit semaphore leak',status:'reviewed'},
+ {id:142,repo:'dentii-web',title:'Add retry backoff to review queue',status:'reviewed'},
+ {id:138,repo:'cashdoc-api',title:'Refactor worktree isolation',status:'reviewing'},
+ {id:97, repo:'unite-session',title:'Introduce ContextProvider no-op seam',status:'new'},
+];
+const F=[
+ {pr:151,sev:'CRITICAL',vend:'both',file:'runner_pool.py',line:88,title:'Semaphore leaked when task cancelled mid-run',detail:'acquire() 후 예외/취소 경로에서 release() 가 호출되지 않아 N회 취소 뒤 풀이 영구 고갈된다. asyncio.Semaphore 를 async with 로 감싸야 한다.',diff:'- await sem.acquire()\n- await run(pr)\n+ async with sem:\n+     await run(pr)',state:'new'},
+ {pr:151,sev:'HIGH',vend:'claude',file:'runner_pool.py',line:104,title:'wait_for swallows CancelledError',detail:'timeout 래퍼가 CancelledError 를 삼켜 상위 취소 전파가 끊긴다.',diff:'- except Exception:\n+ except asyncio.TimeoutError:',state:'new'},
+ {pr:151,sev:'HIGH',vend:'both',file:'worktree.py',line:52,title:'Worktree not removed on review failure',detail:'실패 시 정리가 없어 디스크에 worktree 가 무한 누적된다. finally 블록에서 제거 필요.',diff:'  try:\n      review(wt)\n+ finally:\n+     wt.remove()',state:'new'},
+ {pr:151,sev:'MEDIUM',vend:'codex',file:'queue.py',line:31,title:'Magic number 5 for retry cap',detail:'리트라이 상한이 하드코딩. 레포별 설정으로 빼는 게 좋다.',diff:'- if attempts > 5:\n+ if attempts > cfg.max_retries:',state:'new'},
+ {pr:151,sev:'LOW',vend:'claude',file:'runner_pool.py',line:12,title:'Docstring references old class name',detail:'RunnerPool 로 이름이 바뀌었는데 docstring 은 여전히 WorkerPool.',diff:'',state:'new'},
+ {pr:142,sev:'HIGH',vend:'both',file:'backoff.py',line:20,title:'Backoff has no jitter → thundering herd',detail:'여러 레포가 동시에 rate-limit 을 맞으면 같은 간격으로 재시도해 동시 폭주. full-jitter 권장.',diff:'- delay = base * 2**n\n+ delay = random.uniform(0, base * 2**n)',state:'new'},
+ {pr:142,sev:'MEDIUM',vend:'claude',file:'backoff.py',line:44,title:'Retry may exceed rate-limit reset window',detail:'reset 시각을 넘겨 계속 재시도할 수 있음.',diff:'',state:'approved'},
+ {pr:142,sev:'LOW',vend:'codex',file:'config.py',line:9,title:'Inconsistent naming maxRetries vs retry_max',detail:'camelCase/snake_case 혼용.',diff:'',state:'dismissed'},
+ {pr:138,sev:'HIGH',vend:'claude',file:'worktree.py',line:77,title:'Worktree path not sanitized (traversal)',detail:'브랜치명이 경로로 직접 들어가 ../ 주입 가능.',diff:'+ name = re.sub(r"[^\\w.-]","_",branch)',state:'new'},
+ {pr:138,sev:'MEDIUM',vend:'both',file:'worktree.py',line:120,title:'No cleanup on SIGTERM',detail:'서버 종료 시 남은 worktree 정리 훅 부재.',diff:'',state:'new'},
+ {pr:138,sev:'LOW',vend:'codex',file:'worktree.py',line:3,title:'Unused import shutil',detail:'',diff:'',state:'posted'},
+ {pr:97, sev:'MEDIUM',vend:'claude',file:'context.py',line:18,title:'no-op provider returns None, callers may NPE',detail:'no-op seam 이 None 반환 → 호출부가 .get() 하면 터짐. 빈 컨텍스트 객체 반환 권장.',diff:'- return None\n+ return EmptyContext()',state:'new'},
+];
+const SEVW={CRITICAL:0,HIGH:1,MEDIUM:2,LOW:3};
+let selPr=151, selF=null, sevFilter=new Set();
+
+function tiles(){
+  const open=F.filter(f=>f.state==='new');
+  const by=s=>open.filter(f=>f.sev===s).length;
+  const budget=62; // % rate-limit used
+  document.getElementById('tiles').innerHTML=`
+   <div class="tile"><div class="k">Open PRs</div><div class="v">${PRS.length}</div></div>
+   <div class="tile"><div class="k">In review</div><div class="v">${PRS.filter(p=>p.status==='reviewing').length}<small> / running</small></div></div>
+   <div class="tile"><div class="k">Open findings</div><div class="v">${open.length}</div></div>
+   <div class="tile crit"><div class="k">Critical</div><div class="v">${by('CRITICAL')}</div></div>
+   <div class="tile high"><div class="k">Consensus</div><div class="v">${open.filter(f=>f.vend==='both').length}<small> both</small></div></div>
+   <div class="tile"><div class="k">Rate-limit</div><div class="v">${budget}<small>%</small></div><div class="bar warn"><i style="width:${budget}%"></i></div></div>`;
+}
+function tree(){
+  const repos=[...new Set(PRS.map(p=>p.repo))];
+  document.getElementById('tree').innerHTML=repos.map(r=>{
+    const prs=PRS.filter(p=>p.repo===r);
+    const n=F.filter(f=>prs.some(p=>p.id===f.pr)&&f.state==='new').length;
+    return `<div class="repo"><div class="rname"><span>${r}</span><span>${n}</span></div>`+
+      prs.map(p=>`<div class="pr ${p.id===selPr?'sel':''}" onclick="pick(${p.id})">
+        <span class="dot st-${p.status}"></span><span class="num">#${p.id}</span>
+        <span class="t">${p.title}</span></div>`).join('')+`</div>`;
+  }).join('');
+}
+function filters(){
+  document.getElementById('filters').innerHTML=['CRITICAL','HIGH','MEDIUM','LOW'].map(s=>
+   `<span class="chip ${sevFilter.has(s)?'on':''}" onclick="toggleSev('${s}')">${s.toLowerCase()}</span>`).join('')+
+   `<span class="chip ${sevFilter.size?'':'on'}" onclick="clearSev()">all</span>`;
+}
+function rows(){
+  let list=F.filter(f=>f.pr===selPr);
+  if(sevFilter.size) list=list.filter(f=>sevFilter.has(f.sev));
+  list.sort((a,b)=>SEVW[a.sev]-SEVW[b.sev]);
+  document.getElementById('rows').innerHTML=list.map((f,i)=>{
+    const idx=F.indexOf(f);
+    const done=f.state!=='new';
+    return `<tr class="${idx===selF?'sel':''} ${done?'done':''}" onclick="pickF(${idx})">
+      <td><span class="sev ${f.sev}">${f.sev[0]}${f.sev==='CRITICAL'?'RIT':f.sev.slice(1).toLowerCase()}</span></td>
+      <td><span class="vend ${f.vend}">${f.vend==='both'?'✓both':f.vend}</span></td>
+      <td class="ftitle">${f.title}</td>
+      <td class="floc">${f.file}:${f.line}</td>
+      <td class="stateflag">${done?f.state:''}</td></tr>`;
+  }).join('')||`<tr><td colspan="5" style="color:var(--ink-faint);padding:20px;text-align:center">이 PR엔 표시할 finding 이 없음</td></tr>`;
+  document.getElementById('fstat').textContent=`${list.filter(f=>f.state==='new').length} open in #${selPr}`;
+}
+function detail(){
+  const el=document.getElementById('detail');
+  if(selF===null){el.innerHTML=`<div class="empty">행을 선택하거나 <kbd>j</kbd>/<kbd>k</kbd> 로 이동</div>`;return;}
+  const f=F[selF];
+  el.innerHTML=`<h3>${f.title}</h3>
+   <div class="meta"><span class="sev ${f.sev}">${f.sev}</span>
+     <span class="vend ${f.vend}">${f.vend==='both'?'✓ Claude + Codex':f.vend}</span>
+     <span class="floc">${f.file}:${f.line}</span></div>
+   <div class="prose">${f.detail||'(추가 설명 없음)'}</div>
+   ${f.diff?`<div class="code">${f.diff.split('\n').map(l=>{
+     const c=l.startsWith('+')?'add':l.startsWith('-')?'del':'';
+     return `<span class="${c}">${l.replace(/</g,'&lt;')||'&nbsp;'}</span>`;}).join('<br>')}</div>`:''}
+   <div class="actions">
+     <button class="btn approve" onclick="act('approved')">a · 승인·포스팅</button>
+     <button class="btn dismiss" onclick="act('dismissed')">x · 기각</button>
+   </div>
+   <p style="color:var(--ink-faint);font-size:11px;margin-top:10px">승인 시 <span class="floc">&lt;!-- almighty-review --&gt;</span> 마커와 함께 GitHub 코멘트로 포스팅됩니다.</p>`;
+}
+function render(){tiles();tree();filters();rows();detail();}
+function pick(id){selPr=id;selF=null;render();}
+function pickF(i){selF=i;render();document.querySelector('tr.sel')?.scrollIntoView({block:'nearest'});}
+function toggleSev(s){sevFilter.has(s)?sevFilter.delete(s):sevFilter.add(s);selF=null;render();}
+function clearSev(){sevFilter.clear();render();}
+function act(state){if(selF===null)return;F[selF].state=state;const n=nextNew();selF=null;render();if(n!=null)pickF(n);}
+function nextNew(){const list=F.map((f,i)=>({f,i})).filter(x=>x.f.pr===selPr&&x.f.state==='new');return list.length?list[0].i:null;}
+function move(d){
+  let list=F.map((f,i)=>i).filter(i=>F[i].pr===selPr);
+  if(sevFilter.size)list=list.filter(i=>sevFilter.has(F[i].sev));
+  list.sort((a,b)=>SEVW[F[a].sev]-SEVW[F[b].sev]);
+  if(!list.length)return;
+  let pos=list.indexOf(selF);pos=pos<0?0:Math.min(list.length-1,Math.max(0,pos+d));
+  pickF(list[pos]);
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='j')move(1); else if(e.key==='k')move(-1);
+  else if(e.key==='a')act('approved'); else if(e.key==='x')act('dismissed');
+  else if(['1','2','3','4'].includes(e.key))toggleSev(['CRITICAL','HIGH','MEDIUM','LOW'][+e.key-1]);
+});
+setInterval(()=>document.getElementById('clock').textContent=new Date().toLocaleTimeString('en-GB'),1000);
+render();
+</script>
+</body>
+</html>

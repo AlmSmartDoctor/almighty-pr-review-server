@@ -2,12 +2,13 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from server import config
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment
-from server.github.gh import GhClient
+from server.github.gh import GhClient, GitHubCliError
 from server.models import Finding
 from server.repos import (
     finding_repo,
@@ -93,14 +94,35 @@ def list_repos(conn=Depends(get_conn)):
 def overview(conn=Depends(get_conn)):
     rows = conn.execute("""
       SELECT p.id, p.number, p.title, r.full_name AS repo,
+             p.author, p.created_at, p.first_seen_at,
              (SELECT complexity FROM pre_screen ps WHERE ps.pr_id=p.id
                 ORDER BY ps.id DESC LIMIT 1) AS prescreen,
+             (SELECT duration_ms FROM pre_screen ps WHERE ps.pr_id=p.id
+                ORDER BY ps.id DESC LIMIT 1) AS prescreen_duration_ms,
+             (SELECT COUNT(*)
+                FROM finding f JOIN review_run rr ON rr.id=f.run_id
+                WHERE rr.pr_id=p.id) AS finding_count,
              (SELECT MIN(CASE f.severity WHEN 'critical' THEN 0 WHEN 'high'
                 THEN 1 WHEN 'medium' THEN 2 ELSE 3 END)
                 FROM finding f JOIN review_run rr ON rr.id=f.run_id
                 WHERE rr.pr_id=p.id) AS sev_rank,
              (SELECT id FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_id
+                ORDER BY id DESC LIMIT 1) AS run_id,
+             (SELECT status FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_status,
+             (SELECT started_at FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_started_at,
+             (SELECT finished_at FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_finished_at,
+             (SELECT CASE
+                       WHEN rr.started_at IS NULL THEN NULL
+                       ELSE (strftime('%s', COALESCE(rr.finished_at, datetime('now'))) -
+                             strftime('%s', rr.started_at)) * 1000
+                     END
+                FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_duration_ms,
+             (SELECT error FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_error
       FROM pull_request p JOIN repo r ON r.id=p.repo_id
       WHERE p.state='open' ORDER BY p.updated_at DESC
     """).fetchall()
@@ -137,6 +159,8 @@ class SettingsPatch(BaseModel):
     default_poll_interval: int | None = None
     approval_gate_on: int | None = None
     prescreen_model: str | None = None
+    review_model: str | None = None
+    codex_model: str | None = None
     prescreen_gate_threshold: str | None = None
 
 
@@ -184,15 +208,85 @@ def get_gh():
     return _gh
 
 
-@app.post("/api/runs/{run_id}/post")
-def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
-    run = review_repo.get_run(conn, run_id)
-    pr = pr_repo.get(conn, run["pr_id"])
+def _github_error_message(error: GitHubCliError) -> str:
+    if error.http_status == 401:
+        return "GitHub 인증이 필요합니다. GH_TOKEN, GITHUB_TOKEN, GITHUB_PERSONAL_ACCESS_TOKEN 중 하나를 확인하세요."
+    if error.http_status == 403:
+        return "GitHub 권한이 부족하거나 SSO 승인이 필요합니다."
+    if error.http_status == 404:
+        return "GitHub repo 또는 PR에 접근할 수 없습니다."
+    return error.message
+
+
+def _health_status_code(health: dict) -> int:
+    for section in ("auth", "repo", "issue"):
+        status = health[section].get("status")
+        if status:
+            return status if status in {401, 403, 404} else 502
+    return 200
+
+
+def _post_health(conn, pid: int, gh) -> dict:
+    pr = pr_repo.get(conn, pid)
     repo = repo_repo.get(conn, pr["repo_id"])
-    rows = [
-        f for f in finding_repo.list_for_run(conn, run_id) if f["status"] == "approved"
+    health = {
+        "ok": False,
+        "auth": {"ok": False, "login": None, "error": None},
+        "repo": {"ok": False, "full_name": repo["full_name"], "error": None},
+        "issue": {"ok": False, "number": pr["number"], "error": None},
+        "message": "",
+    }
+    try:
+        user = gh.preflight_user()
+        health["auth"].update({"ok": True, "login": user.get("login")})
+    except GitHubCliError as e:
+        health["auth"].update(
+            {"error": _github_error_message(e), "status": e.http_status}
+        )
+        health["message"] = health["auth"]["error"]
+        return health
+
+    try:
+        repo_info = gh.preflight_repo(repo["full_name"])
+        health["repo"].update(
+            {"ok": True, "full_name": repo_info.get("full_name", repo["full_name"])}
+        )
+    except GitHubCliError as e:
+        health["repo"].update(
+            {"error": _github_error_message(e), "status": e.http_status}
+        )
+        health["message"] = health["repo"]["error"]
+        return health
+
+    try:
+        issue = gh.preflight_issue(repo["full_name"], pr["number"])
+        health["issue"].update(
+            {"ok": True, "number": issue.get("number", pr["number"])}
+        )
+    except GitHubCliError as e:
+        health["issue"].update(
+            {"error": _github_error_message(e), "status": e.http_status}
+        )
+        health["message"] = health["issue"]["error"]
+        return health
+
+    health["ok"] = True
+    health["message"] = "GitHub 포스팅 가능"
+    return health
+
+
+POSTABLE_FINDING_STATUSES = {"approved", "edited"}
+
+
+def _postable_rows(conn, run_id: int):
+    return [
+        f
+        for f in finding_repo.list_for_run(conn, run_id)
+        if f["status"] in POSTABLE_FINDING_STATUSES
     ]
-    posted = []
+
+
+def _comments_for_rows(rows):
     by_vendor: dict[str, list[Finding]] = {}
     for f in rows:
         by_vendor.setdefault(f["vendor"], []).append(
@@ -207,18 +301,67 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
                 f["confidence"] or 0.0,
             )
         )
-    for vendor, findings in by_vendor.items():
-        body = build_comment(vendor=vendor, findings=findings)
+    return [
+        {"vendor": vendor, "body": build_comment(vendor=vendor, findings=findings)}
+        for vendor, findings in by_vendor.items()
+    ]
+
+
+@app.get("/api/runs/{run_id}/post-preview")
+def post_preview(run_id: int, conn=Depends(get_conn)):
+    return {"comments": _comments_for_rows(_postable_rows(conn, run_id))}
+
+
+@app.get("/api/prs/{pid}/post-health")
+def post_health(pid: int, conn=Depends(get_conn), gh=Depends(get_gh)):
+    health = _post_health(conn, pid, gh)
+    return JSONResponse(status_code=_health_status_code(health), content=health)
+
+
+@app.post("/api/runs/{run_id}/post")
+def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
+    run = review_repo.get_run(conn, run_id)
+    pr = pr_repo.get(conn, run["pr_id"])
+    repo = repo_repo.get(conn, pr["repo_id"])
+    health = _post_health(conn, pr["id"], gh)
+    if not health["ok"]:
+        return JSONResponse(
+            status_code=_health_status_code(health),
+            content={"detail": health},
+        )
+    rows = _postable_rows(conn, run_id)
+    posted = []
+    for comment in _comments_for_rows(rows):
+        vendor = comment["vendor"]
+        body = comment["body"]
         # ★개정(codex 재검증 [MEDIUM]): 진짜 update-or-create.
         # 같은 PR·벤더의 기존 비대체 코멘트가 있으면 GitHub상 in-place 수정,
         # 없으면 새로 post. → GitHub 화면에도 중복이 남지 않음.
         prev = posted_repo.latest_for_pr_vendor(conn, pr_id=pr["id"], vendor=vendor)
         fids = [f["id"] for f in rows if f["vendor"] == vendor]
-        if prev is not None and prev["github_comment_id"]:
-            res = gh.edit_comment(repo["full_name"], prev["github_comment_id"], body)
-            posted_repo.supersede(conn, prev["id"])
-        else:
-            res = gh.post_comment(repo["full_name"], pr["number"], body)
+        try:
+            if prev is not None and prev["github_comment_id"]:
+                res = gh.edit_comment(
+                    repo["full_name"], prev["github_comment_id"], body
+                )
+                posted_repo.supersede(conn, prev["id"])
+            else:
+                res = gh.post_comment(repo["full_name"], pr["number"], body)
+        except GitHubCliError as e:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "detail": {
+                        "message": _github_error_message(e),
+                        "posted": posted,
+                        "failed": {
+                            "vendor": vendor,
+                            "error": _github_error_message(e),
+                            "command_kind": e.command_kind,
+                        },
+                    }
+                },
+            )
         # ★개정 (codex v3 [LOW]): API JSON의 .id를 그대로 저장(URL 파싱 제거).
         posted_repo.add(
             conn,

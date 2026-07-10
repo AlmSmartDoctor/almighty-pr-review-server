@@ -4,6 +4,8 @@ ALLOWED = {
     "default_poll_interval",
     "approval_gate_on",
     "prescreen_model",
+    "review_model",
+    "codex_model",
     "prescreen_gate_threshold",
 }
 

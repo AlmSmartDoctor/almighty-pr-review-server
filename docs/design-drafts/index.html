@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Almighty PR Review — 디자인 방향 갤러리 v2</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef1f5; --line:#e2e6ec;
+    --ink:#1a1f27; --ink-dim:#5a6472; --ink-faint:#8b95a3;
+    --accent:#3b5bdb;
+    --split:#3b5bdb; --drill:#6741d9;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6}
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 24px 80px}
+
+  header .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--ink-faint)}
+  header h1{font-size:30px;margin:8px 0 6px;letter-spacing:-.02em}
+  header h1 b{color:var(--accent)}
+  header p{color:var(--ink-dim);max-width:74ch;margin:0}
+  .note{margin-top:16px;padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;font-size:13px;color:var(--ink-dim)}
+  .note b{color:var(--ink)}
+  .note a{color:var(--accent)}
+  code{font-family:var(--mono);background:var(--panel-2);padding:1px 6px;border-radius:5px;color:var(--ink-dim)}
+
+  .sectlabel{margin:34px 0 4px;font-family:var(--mono);font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--ink-faint)}
+  .sectlabel.primary{color:var(--accent)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:22px;margin-top:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden;display:flex;flex-direction:column;transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease;box-shadow:0 1px 2px rgba(20,30,50,.04)}
+  .card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(20,30,50,.10)}
+  .card.split:hover{border-color:var(--split)} .card.drill:hover{border-color:var(--drill)}
+
+  .preview{position:relative;background:#fff;border-bottom:1px solid var(--line);height:300px;overflow:hidden}
+  .preview iframe{position:absolute;top:0;left:0;width:1440px;height:900px;border:0;transform:scale(.40);transform-origin:top left;pointer-events:none}
+  .preview .veil{position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(255,255,255,0) 78%,rgba(255,255,255,.55) 100%)}
+  .badgerow{position:absolute;top:12px;left:12px;z-index:3;display:flex;gap:6px}
+  .badge{font-family:var(--mono);font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(255,255,255,.9);border:1px solid var(--line);color:var(--ink-dim);backdrop-filter:blur(3px)}
+  .badge.hero{background:var(--accent);color:#fff;border-color:transparent}
+  .card.drill .badge.hero{background:var(--drill)}
+
+  .body{padding:18px 20px 20px;display:flex;flex-direction:column;flex:1}
+  .kicker{font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase}
+  .card.split .kicker{color:var(--split)} .card.drill .kicker{color:var(--drill)}
+  .body h2{font-size:22px;margin:6px 0 4px;letter-spacing:-.01em}
+  .philo{color:var(--ink-dim);font-size:14px;margin:0 0 14px}
+  .philo b{color:var(--ink)}
+  ul.feat{list-style:none;padding:0;margin:0 0 16px;font-size:13.5px}
+  ul.feat li{padding:4px 0 4px 20px;position:relative;color:var(--ink-dim)}
+  ul.feat li::before{content:"→";position:absolute;left:0;color:var(--ink-faint)}
+  ul.feat li b{color:var(--ink)}
+
+  .decisions{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:12.5px;margin-bottom:20px;padding-top:12px;border-top:1px dashed var(--line)}
+  .decisions dt{color:var(--ink-faint);font-family:var(--mono)}
+  .decisions dd{margin:0;color:var(--ink-dim)}
+
+  .open{margin-top:auto;display:flex;align-items:center;justify-content:center;gap:10px;text-decoration:none;font-weight:700;font-size:16px;padding:15px;border-radius:12px;color:#fff}
+  .card.split .open{background:var(--split)} .card.drill .open{background:var(--drill)}
+  .open:hover{filter:brightness(1.08)}
+  .open .path{font-family:var(--mono);font-size:11px;opacity:.8;font-weight:400}
+
+  .archive{margin-top:16px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .archive p{margin:0 0 12px;font-size:13px;color:var(--ink-dim)}
+  .archive .arow{display:flex;flex-wrap:wrap;gap:10px}
+  .archive a{flex:1 1 210px;display:flex;flex-direction:column;gap:2px;text-decoration:none;padding:11px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel-2);transition:border-color .15s}
+  .archive a:hover{border-color:var(--ink-faint)}
+  .archive a .n{font-weight:600;color:var(--ink);font-size:14px}
+  .archive a .d{color:var(--ink-faint);font-size:12px}
+  .archive a .p{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-top:2px}
+
+  .foot{margin-top:34px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink-faint);font-size:13px}
+  .foot a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Almighty PR Review · Local Dashboard v2</div>
+    <h1><b>주력 후보 2안</b> — Split vs Drill</h1>
+    <p>같은 데이터(멀티벤더 PR findings 트리아지)를 두 가지 내비게이션 철학으로 그린 v2 초안입니다.
+       둘 다 라이트 테마 · 상단 레포 탭(전체+4레포) · 오버뷰(상태·리뷰필요성 배지·severity 요약) ·
+       디테일(리뷰 트레이스 타임라인 + findings 트리아지 + 구조화 코멘트 프리뷰)을 완전 오프라인으로 담았습니다.
+       차이는 <b>디테일에 어떻게 도달하느냐</b> 하나입니다.</p>
+    <div class="note"><b>선택 포인트:</b> 목록과 상세를 <b>동시에</b> 보며 빠르게 오가려면 <b>Split</b>,
+       한 PR에 <b>몰입</b>해 넓은 화면으로 트리아지하려면 <b>Drill</b>. 상세 비교는 <a href="./COMPARISON.md">COMPARISON.md</a> 참고.</div>
+  </header>
+
+  <div class="sectlabel primary">▍ v2 주력 후보</div>
+  <div class="grid">
+
+    <!-- SPLIT -->
+    <article class="card split">
+      <div class="preview">
+        <div class="badgerow"><span class="badge hero">주력</span><span class="badge">light</span><span class="badge">2-pane</span></div>
+        <iframe src="./variant-split.html" title="Split 미리보기" loading="lazy" scrolling="no"></iframe>
+        <div class="veil"></div>
+      </div>
+      <div class="body">
+        <div class="kicker">Variant 1 · Master–Detail</div>
+        <h2>Split</h2>
+        <p class="philo">한 화면 <b>2-pane</b>. 왼쪽 PR 목록에서 고르면 오른쪽 디테일이 즉시 갱신 — 컨텍스트를 잃지 않고 여러 PR을 훑는다.</p>
+        <ul class="feat">
+          <li>좌 마스터: PR별 <b>상태·리뷰필요성·severity</b> 요약 목록 + 검색/필터</li>
+          <li>우 디테일: <b>리뷰 트레이스 타임라인</b> · findings 트리아지 · 코멘트 프리뷰</li>
+          <li>선택해도 <b>화면 전환 없음</b> — 목록 위치 유지</li>
+          <li>승인/기각 토글 시 진행 카운터·프리뷰 실시간 반영</li>
+        </ul>
+        <dl class="decisions">
+          <dt>내비</dt><dd>마스터–디테일 (전환 없음)</dd>
+          <dt>밀도</dt><dd>High — 목록+상세 동시 조망</dd>
+          <dt>강점</dt><dd>다수 PR 빠른 비교·연속 트리아지</dd>
+        </dl>
+        <a class="open" href="./variant-split.html">Split 열기 <span class="path">./variant-split.html</span></a>
+      </div>
+    </article>
+
+    <!-- DRILL -->
+    <article class="card drill">
+      <div class="preview">
+        <div class="badgerow"><span class="badge hero">주력</span><span class="badge">light</span><span class="badge">full-screen</span></div>
+        <iframe src="./variant-drill.html" title="Drill 미리보기" loading="lazy" scrolling="no"></iframe>
+        <div class="veil"></div>
+      </div>
+      <div class="body">
+        <div class="kicker">Variant 2 · Drill-Down</div>
+        <h2>Drill</h2>
+        <p class="philo">오버뷰 ↔ 디테일 <b>전체화면 이동</b>. 상황판에서 PR을 누르면 넓은 상세로 들어가고, <code>esc</code>/뒤로로 복귀 — 한 번에 하나에 몰입.</p>
+        <ul class="feat">
+          <li>오버뷰: KPI 상황판 + PR 카드(<b>상태·리뷰필요성·severity·합의</b>)</li>
+          <li>디테일: 전체화면 <b>리뷰 트레이스</b> · findings 트리아지 · 프리뷰</li>
+          <li>카드 클릭으로 진입, <b>뒤로가기</b>(오버뷰 버튼/esc)로 복귀</li>
+          <li>디테일에서 승인/기각 → 오버뷰 배지에 반영</li>
+        </ul>
+        <dl class="decisions">
+          <dt>내비</dt><dd>전체화면 드릴다운 + 뒤로가기</dd>
+          <dt>밀도</dt><dd>Medium — 상세는 넓게, 몰입</dd>
+          <dt>강점</dt><dd>복잡한 PR 정밀 트리아지·낮은 산만도</dd>
+        </dl>
+        <a class="open" href="./variant-drill.html">Drill 열기 <span class="path">./variant-drill.html</span></a>
+      </div>
+    </article>
+  </div>
+
+  <div class="sectlabel">▍ v1 참고 초안 (아카이브)</div>
+  <div class="archive">
+    <p>초기 방향 탐색용 3종. 다크/보드형 실험으로, v2 주력 후보 이전 단계입니다. 참고용으로만 링크를 남깁니다.</p>
+    <div class="arow">
+      <a href="./variant-cockpit.html">
+        <span class="n">Cockpit</span>
+        <span class="d">Ops 콘솔 · 다크 3-pane · 키보드 우선 고밀도</span>
+        <span class="p">./variant-cockpit.html</span>
+      </a>
+      <a href="./variant-focus.html">
+        <span class="n">Focus</span>
+        <span class="d">원-카드 트리아지 · 한 번에 하나의 결정</span>
+        <span class="p">./variant-focus.html</span>
+      </a>
+      <a href="./variant-kanban.html">
+        <span class="n">Kanban</span>
+        <span class="d">Triage→Approved→Posted 파이프라인 보드</span>
+        <span class="p">./variant-kanban.html</span>
+      </a>
+    </div>
+  </div>
+
+  <div class="foot">
+    미리보기가 안 보이면 각 카드의 <b>열기</b> 버튼으로 전체 화면에서 확인하세요.
+    모든 파일은 외부 리소스 없이 오프라인 동작합니다(<code>file://</code> 로 열어도 OK).
+    트레이드오프·블렌드 추천은 <a href="./COMPARISON.md">COMPARISON.md</a> 에 정리했습니다.
+  </div>
+</div>
+</body>
+</html>

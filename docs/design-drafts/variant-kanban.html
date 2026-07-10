@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Almighty PR Review — Kanban (Triage Flow Board)</title>
+<style>
+  :root{
+    --bg:#eef1f6; --board:#e4e8ef; --col:#f4f6f9; --card:#ffffff;
+    --line:#d7dde6; --ink:#1e2733; --ink-dim:#5c6775; --ink-faint:#98a2b0;
+    --accent:#3d68d8;
+    --crit:#d33a2c; --high:#cd7314; --med:#a6870b; --low:#7c8794;
+    --claude:#7b52d4; --codex:#0f9d78; --consensus:#b07d10;
+    --new:#3d68d8; --approved:#0f9d78; --posted:#6b7684; --dismissed:#c0392b;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;background:#fff;border-bottom:1px solid var(--line)}
+  header .logo{font-weight:600}.header .logo b{color:var(--accent)}
+  header .logo b{color:var(--accent)}
+  header .who{font-size:12px;color:var(--ink-faint)}
+  header .spacer{flex:1}
+  header .grp{display:flex;background:var(--board);border-radius:8px;padding:2px;gap:2px}
+  header .grp button{font-size:12px;border:0;background:transparent;color:var(--ink-dim);padding:5px 12px;border-radius:6px;cursor:pointer}
+  header .grp button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  header .metric{font-size:12px;color:var(--ink-dim)}
+  header .metric b{color:var(--ink);font-variant-numeric:tabular-nums}
+
+  .board{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:14px;flex:1;min-height:0;background:var(--board)}
+  .column{background:var(--col);border-radius:12px;display:flex;flex-direction:column;min-height:0;border:1px solid var(--line)}
+  .colhead{display:flex;align-items:center;gap:8px;padding:11px 13px 9px}
+  .colhead .swatch{width:9px;height:9px;border-radius:3px}
+  .colhead h2{font-size:12px;margin:0;font-weight:600;letter-spacing:.2px}
+  .colhead .n{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-faint);background:#fff;border:1px solid var(--line);border-radius:99px;padding:0 8px;line-height:18px}
+  .colhead .wip{font-size:10px;color:var(--high)}
+  .cards{overflow-y:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:9px;flex:1}
+  .cards.drop{outline:2px dashed var(--accent);outline-offset:-6px;border-radius:12px}
+
+  .fcard{background:var(--card);border:1px solid var(--line);border-left-width:3px;border-radius:9px;padding:10px 11px;cursor:grab;box-shadow:0 1px 2px rgba(20,30,50,.05)}
+  .fcard:active{cursor:grabbing}
+  .fcard.dragging{opacity:.4}
+  .fcard.CRITICAL{border-left-color:var(--crit)} .fcard.HIGH{border-left-color:var(--high)}
+  .fcard.MEDIUM{border-left-color:var(--med)} .fcard.LOW{border-left-color:var(--low)}
+  .fcard .top{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+  .sev{font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;letter-spacing:.3px}
+  .sev.CRITICAL{background:#fdecea;color:var(--crit)} .sev.HIGH{background:#fbefe0;color:var(--high)}
+  .sev.MEDIUM{background:#f7f3df;color:var(--med)} .sev.LOW{background:#eef0f3;color:var(--low)}
+  .vend{font-size:10px;font-family:var(--mono);padding:1px 6px;border-radius:4px;border:1px solid var(--line);margin-left:auto}
+  .vend.claude{color:var(--claude)} .vend.codex{color:var(--codex)}
+  .vend.both{color:var(--consensus);border-color:#e8d29a;background:#fbf5e4}
+  .fcard .ttl{font-size:12.5px;line-height:1.35;margin-bottom:7px}
+  .fcard .foot{display:flex;align-items:center;gap:6px;color:var(--ink-faint)}
+  .fcard .repo{font-family:var(--mono);font-size:10px;background:var(--board);border-radius:4px;padding:1px 6px;color:var(--ink-dim)}
+  .fcard .loc{font-family:var(--mono);font-size:10px}
+  .fcard .mv{margin-left:auto;display:flex;gap:3px}
+  .fcard .mv button{border:1px solid var(--line);background:#fff;border-radius:5px;font-size:11px;width:22px;height:20px;line-height:1;cursor:pointer;color:var(--ink-dim)}
+  .fcard .mv button:hover{border-color:var(--accent);color:var(--accent)}
+  .empty{color:var(--ink-faint);font-size:12px;text-align:center;padding:24px 0}
+
+  footer{background:#fff;border-top:1px solid var(--line);padding:6px 18px;font-size:11px;color:var(--ink-faint);display:flex;gap:16px}
+  footer b{color:var(--ink-dim)}
+</style>
+</head>
+<body>
+  <header>
+    <span class="logo"><b>◇</b> Almighty Review</span>
+    <span class="who">칸반 트리아지 보드 · @st42597</span>
+    <span class="spacer"></span>
+    <span class="metric">그룹핑</span>
+    <div class="grp"><button class="on" onclick="setGroup('finding',this)">finding별</button><button onclick="setGroup('pr',this)">PR별</button></div>
+    <span class="metric" id="metric"></span>
+  </header>
+
+  <div class="board" id="board"></div>
+
+  <footer>
+    <span><b>드래그</b> 또는 <b>◄ ►</b> 로 컬럼 이동</span>
+    <span><b>Triage</b> 검토 대기 · <b>Approved</b> 포스팅 대기 · <b>Posted</b> 게시됨 · <b>Dismissed</b> 기각</span>
+    <span style="margin-left:auto" id="wipnote"></span>
+  </footer>
+
+<script>
+const PRS={
+ 151:{repo:'smartdoctor-eks'},142:{repo:'dentii-web'},138:{repo:'cashdoc-api'},97:{repo:'unite-session'}
+};
+const COLS=[
+ {key:'new',label:'Triage',color:'var(--new)'},
+ {key:'approved',label:'Approved · 포스팅 대기',color:'var(--approved)',wip:5},
+ {key:'posted',label:'Posted',color:'var(--posted)'},
+ {key:'dismissed',label:'Dismissed',color:'var(--dismissed)'},
+];
+let F=[
+ {id:1,pr:151,sev:'CRITICAL',vend:'both',file:'runner_pool.py',line:88,title:'취소 시 세마포어 미반납으로 풀 고갈',col:'new'},
+ {id:2,pr:151,sev:'HIGH',vend:'claude',file:'runner_pool.py',line:104,title:'wait_for 가 CancelledError 를 삼킴',col:'new'},
+ {id:3,pr:151,sev:'HIGH',vend:'both',file:'worktree.py',line:52,title:'리뷰 실패 시 worktree 미정리 누적',col:'new'},
+ {id:4,pr:151,sev:'MEDIUM',vend:'codex',file:'queue.py',line:31,title:'리트라이 상한 5 하드코딩',col:'new'},
+ {id:5,pr:151,sev:'LOW',vend:'claude',file:'runner_pool.py',line:12,title:'Docstring 이 옛 클래스명 참조',col:'new'},
+ {id:6,pr:142,sev:'HIGH',vend:'both',file:'backoff.py',line:20,title:'백오프 지터 부재 → thundering herd',col:'new'},
+ {id:7,pr:142,sev:'MEDIUM',vend:'claude',file:'backoff.py',line:44,title:'리트라이가 rate-limit reset 창을 넘김',col:'approved'},
+ {id:8,pr:142,sev:'LOW',vend:'codex',file:'config.py',line:9,title:'네이밍 혼용 maxRetries/retry_max',col:'dismissed'},
+ {id:9,pr:138,sev:'HIGH',vend:'claude',file:'worktree.py',line:77,title:'브랜치명 미정규화 → path traversal',col:'new'},
+ {id:10,pr:138,sev:'MEDIUM',vend:'both',file:'worktree.py',line:120,title:'SIGTERM 정리 훅 부재',col:'approved'},
+ {id:11,pr:138,sev:'LOW',vend:'codex',file:'worktree.py',line:3,title:'미사용 import shutil',col:'posted'},
+ {id:12,pr:97,sev:'MEDIUM',vend:'claude',file:'context.py',line:18,title:'no-op provider 가 None 반환',col:'new'},
+];
+const SEVW={CRITICAL:0,HIGH:1,MEDIUM:2,LOW:3};
+let group='finding',dragId=null;
+
+function colIndex(k){return COLS.findIndex(c=>c.key===k);}
+function move(id,dir){
+  const f=F.find(x=>x.id===id);const i=colIndex(f.col)+dir;
+  if(i>=0&&i<COLS.length){f.col=COLS[i].key;render();}
+}
+function setGroup(g,btn){group=g;document.querySelectorAll('.grp button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');render();}
+
+function card(f){
+  const pr=PRS[f.pr];const ci=colIndex(f.col);
+  return `<div class="fcard ${f.sev}" draggable="true" data-id="${f.id}">
+    <div class="top"><span class="sev ${f.sev}">${f.sev}</span>
+      <span class="vend ${f.vend}">${f.vend==='both'?'✓ both':f.vend}</span></div>
+    <div class="ttl">${f.title}</div>
+    <div class="foot"><span class="repo">${pr.repo}</span>
+      <span class="loc">#${f.pr} · ${f.file}:${f.line}</span>
+      <span class="mv">
+        <button onclick="move(${f.id},-1)" ${ci===0?'disabled style=opacity:.3':''}>◄</button>
+        <button onclick="move(${f.id},1)" ${ci===COLS.length-1?'disabled style=opacity:.3':''}>►</button>
+      </span></div>
+  </div>`;
+}
+function render(){
+  const board=document.getElementById('board');
+  board.innerHTML=COLS.map(c=>{
+    let items=F.filter(f=>f.col===c.key).sort((a,b)=>SEVW[a.sev]-SEVW[b.sev]);
+    let body;
+    if(group==='pr'&&c.key==='new'){
+      const prs=[...new Set(items.map(f=>f.pr))];
+      body=prs.map(p=>`<div style="font:600 11px var(--mono);color:var(--ink-faint);margin:4px 2px 0">${PRS[p].repo} #${p}</div>`+
+        items.filter(f=>f.pr===p).map(card).join('')).join('')||`<div class="empty">비어 있음</div>`;
+    }else{
+      body=items.map(card).join('')||`<div class="empty">비어 있음</div>`;
+    }
+    const over=c.wip&&items.length>c.wip;
+    return `<section class="column">
+      <div class="colhead"><span class="swatch" style="background:${c.color}"></span>
+        <h2>${c.label}</h2>${c.wip?`<span class="wip">WIP ${items.length}/${c.wip}${over?' ⚠':''}</span>`:''}
+        <span class="n">${items.length}</span></div>
+      <div class="cards" data-col="${c.key}">${body}</div>
+    </section>`;
+  }).join('');
+  wireDnd();
+  const open=F.filter(f=>f.col==='new').length;
+  const crit=F.filter(f=>f.col==='new'&&f.sev==='CRITICAL').length;
+  document.getElementById('metric').innerHTML=`Triage <b>${open}</b> · Critical <b style="color:var(--crit)">${crit}</b> · 포스팅 대기 <b>${F.filter(f=>f.col==='approved').length}</b>`;
+  document.getElementById('wipnote').textContent=crit?`⚠ Critical ${crit}건이 아직 Triage 에 있습니다`:'Critical 없음';
+}
+function wireDnd(){
+  document.querySelectorAll('.fcard').forEach(el=>{
+    el.addEventListener('dragstart',e=>{dragId=+el.dataset.id;el.classList.add('dragging');e.dataTransfer.effectAllowed='move';});
+    el.addEventListener('dragend',()=>{dragId=null;render();});
+  });
+  document.querySelectorAll('.cards').forEach(z=>{
+    z.addEventListener('dragover',e=>{e.preventDefault();z.classList.add('drop');});
+    z.addEventListener('dragleave',()=>z.classList.remove('drop'));
+    z.addEventListener('drop',e=>{e.preventDefault();z.classList.remove('drop');
+      if(dragId!=null){F.find(f=>f.id===dragId).col=z.dataset.col;render();}});
+  });
+}
+render();
+</script>
+</body>
+</html>
