@@ -340,6 +340,61 @@ def test_pipeline_persists_gathered_context(db):
     )
 
 
+def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
+    import json
+    from server.repos import settings_repo
+    from server.context.registry import build_context_provider
+
+    (tmp_path / "ctx.md").write_text("아키텍처 결정: 큐 기반")
+
+    rid = repo_repo.add(db, full_name="acme/api", local_path=str(tmp_path))
+    repo_repo.update(
+        db, rid, context_static_on=1, static_context_path=str(tmp_path / "ctx.md")
+    )
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=40,
+        title="t",
+        author="a",
+        head_sha="s40",
+        base_ref="main",
+        url="u",
+    )
+    repo = repo_repo.get(db, rid)
+    settings = settings_repo.get(db)
+
+    class CapturingAdapter:
+        vendor = "claude"
+
+        def __init__(self):
+            self.prompt = None
+
+        async def review(self, *, prompt, **kw):
+            self.prompt = prompt
+            return []
+
+    cap = CapturingAdapter()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[cap],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path=str(tmp_path),
+        context=build_context_provider(repo, settings),
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    assert "## 외부 컨텍스트" in cap.prompt and "아키텍처 결정" in cap.prompt
+    run = review_repo.get_run(db, run_id)
+    assert "아키텍처 결정" in run["context_text"]
+    meta = json.loads(run["context_meta"])
+    assert (
+        meta["sources"][0]["provider"] == "static"
+        and meta["sources"][0]["status"] == "ok"
+    )
+
+
 def test_build_prompt_empty_no_block():
     out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "")
     assert "## 외부 컨텍스트" not in out and "DIFF" in out

@@ -22,3 +22,19 @@ def test_build_deps_assembles_pipeline_deps():
     assert [a.vendor for a in deps.adapters] == ["claude", "codex"]
     assert callable(deps.gh_diff) and callable(deps.prescreen)
     assert isinstance(deps.context, CompositeContextProvider)
+
+
+def test_build_deps_includes_static_provider_when_enabled():
+    from server.context.static_provider import StaticContextProvider
+
+    deps = build_deps(
+        {
+            "full_name": "acme/api",
+            "local_path": "/tmp/acme",
+            "harness_name": "default",
+            "context_static_on": 1,
+            "static_context_path": "/tmp/acme/ctx.md",
+        },
+        {"context_static_on": 0},
+    )
+    assert any(isinstance(p, StaticContextProvider) for p in deps.context.providers)
