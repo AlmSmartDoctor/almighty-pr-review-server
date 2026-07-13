@@ -381,3 +381,18 @@ def test_registry_includes_db_schema_provider():
 
     c = build_context_provider({"context_db_schema_on": 1}, {"context_db_schema_on": 0})
     assert any(isinstance(p, DBSchemaProvider) for p in c.providers)
+
+
+def test_graphify_provider_always_skipped():
+    from server.context.graphify_provider import GraphifyProvider
+
+    r = GraphifyProvider().fetch(_req())
+    assert r.status == "skipped" and r.text == ""
+
+
+def test_registry_includes_graphify_provider():
+    from server.context.registry import build_context_provider
+    from server.context.graphify_provider import GraphifyProvider
+
+    c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
+    assert any(isinstance(p, GraphifyProvider) for p in c.providers)

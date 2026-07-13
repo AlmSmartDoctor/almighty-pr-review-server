@@ -64,4 +64,11 @@ def build_context_provider(repo, settings):
             providers.append(DBSchemaProvider())
         except Exception as e:  # never raise
             print(f"[context] db_schema provider skipped: {redact_secrets(str(e))}")
+    if _effective(repo, settings, "context_graphify_on"):
+        try:
+            from server.context.graphify_provider import GraphifyProvider
+
+            providers.append(GraphifyProvider())
+        except Exception as e:  # never raise
+            print(f"[context] graphify provider skipped: {redact_secrets(str(e))}")
     return CompositeContextProvider(providers)
