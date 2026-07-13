@@ -30,6 +30,12 @@ ALLOWED = {
     "harness_name",
     "local_path",
     "last_polled_at",  # ★개정: local_path
+    "context_static_on",
+    "context_jira_on",
+    "context_db_schema_on",
+    "context_graphify_on",
+    "static_context_path",
+    "jira_project_keys",
 }
 
 

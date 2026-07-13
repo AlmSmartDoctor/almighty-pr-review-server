@@ -67,3 +67,16 @@ def test_effective_prefers_repo_then_settings_then_off():
     assert _effective({"k": None}, {"k": 1}, "k") == 1  # NULL → inherit settings
     assert _effective({}, {"k": 1}, "k") == 1  # repo missing key → settings
     assert _effective({}, {}, "k") == 0  # neither → off
+
+
+def test_effective_with_real_rows(db):
+    from server.repos import repo_repo, settings_repo
+    from server.context.registry import _effective
+
+    rid = repo_repo.add(db, full_name="acme/api")
+    settings_repo.update(db, context_static_on=1)
+    repo = repo_repo.get(db, rid)  # per-repo NULL → inherit
+    settings = settings_repo.get(db)
+    assert _effective(repo, settings, "context_static_on") == 1
+    repo_repo.update(db, rid, context_static_on=0)  # explicit override off
+    assert _effective(repo_repo.get(db, rid), settings, "context_static_on") == 0

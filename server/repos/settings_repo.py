@@ -7,6 +7,10 @@ ALLOWED = {
     "review_model",
     "codex_model",
     "prescreen_gate_threshold",
+    "context_static_on",
+    "context_jira_on",
+    "context_db_schema_on",
+    "context_graphify_on",
 }
 
 

@@ -141,6 +141,12 @@ class RepoPatch(BaseModel):
     auto_post: int | None = None
     harness_name: str | None = None
     local_path: str | None = None  # ★개정
+    context_static_on: int | None = None
+    context_jira_on: int | None = None
+    context_db_schema_on: int | None = None
+    context_graphify_on: int | None = None
+    static_context_path: str | None = None
+    jira_project_keys: str | None = None
 
 
 @app.patch("/api/repos/{rid}")
@@ -163,6 +169,10 @@ class SettingsPatch(BaseModel):
     review_model: str | None = None
     codex_model: str | None = None
     prescreen_gate_threshold: str | None = None
+    context_static_on: int | None = None
+    context_jira_on: int | None = None
+    context_db_schema_on: int | None = None
+    context_graphify_on: int | None = None
 
 
 @app.patch("/api/settings")

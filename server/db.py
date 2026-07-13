@@ -130,6 +130,26 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "app_settings", "codex_model", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "review_run", "context_text", "TEXT")
     _ensure_column(conn, "review_run", "context_meta", "TEXT")
+    # v2-B 프로바이더 토글 — 전역 기본(app_settings). NOT NULL DEFAULT 0.
+    _ensure_column(
+        conn, "app_settings", "context_static_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        conn, "app_settings", "context_jira_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        conn, "app_settings", "context_db_schema_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        conn, "app_settings", "context_graphify_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    # per-repo override — nullable(NULL이면 global 상속). 비밀 아님.
+    _ensure_column(conn, "repo", "context_static_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_jira_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_db_schema_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_graphify_on", "INTEGER")
+    _ensure_column(conn, "repo", "static_context_path", "TEXT")
+    _ensure_column(conn, "repo", "jira_project_keys", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(

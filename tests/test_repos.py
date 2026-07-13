@@ -162,3 +162,36 @@ def test_set_status_preserves_edited_text(db):
     row = finding_repo.get(db, fid)
     assert row["status"] == "posted"
     assert row["edited_text"] == "human text"
+
+
+def test_settings_context_toggles_roundtrip(db):
+    settings_repo.update(
+        db,
+        context_static_on=1,
+        context_jira_on=1,
+        context_db_schema_on=1,
+        context_graphify_on=1,
+    )
+    s = settings_repo.get(db)
+    assert (
+        s["context_static_on"],
+        s["context_jira_on"],
+        s["context_db_schema_on"],
+        s["context_graphify_on"],
+    ) == (1, 1, 1, 1)
+
+
+def test_repo_context_settings_roundtrip(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    assert repo_repo.get(db, rid)["context_static_on"] is None  # 기본 NULL = 상속
+    repo_repo.update(
+        db,
+        rid,
+        context_static_on=1,
+        static_context_path="/x/ctx.md",
+        jira_project_keys="PROJ,ABC",
+    )
+    r = repo_repo.get(db, rid)
+    assert r["context_static_on"] == 1
+    assert r["static_context_path"] == "/x/ctx.md"
+    assert r["jira_project_keys"] == "PROJ,ABC"

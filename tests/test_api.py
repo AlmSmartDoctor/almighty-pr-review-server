@@ -50,6 +50,34 @@ def test_get_settings(tmp_path):
     assert s["concurrency_limit"] == 2
 
 
+def test_patch_settings_context_toggles(tmp_path):
+    client, _ = _client(tmp_path)
+    r = client.patch(
+        "/api/settings", json={"context_static_on": 1, "context_jira_on": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["context_static_on"] == 1 and body["context_jira_on"] == 1
+
+
+def test_patch_repo_context_settings(tmp_path):
+    client, _ = _client(tmp_path)
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    r = client.patch(
+        f"/api/repos/{created['id']}",
+        json={
+            "context_static_on": 1,
+            "static_context_path": "/x/ctx.md",
+            "jira_project_keys": "PROJ",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["context_static_on"] == 1
+    assert body["static_context_path"] == "/x/ctx.md"
+    assert body["jira_project_keys"] == "PROJ"
+
+
 def test_update_finding_status(tmp_path):
     client, conn = _client(tmp_path)
     from server.repos import repo_repo, pr_repo, finding_repo, review_repo
