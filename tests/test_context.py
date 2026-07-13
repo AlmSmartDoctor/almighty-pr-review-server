@@ -231,3 +231,43 @@ def test_static_provider_does_not_write_to_root(tmp_path):
         _req()
     )
     assert set(os.listdir(tmp_path)) == before
+
+
+def test_extract_keys_from_head_ref():
+    from server.context.jira_keys import extract_keys
+
+    assert extract_keys(_req(head_ref="feature/PROJ-123-add-login")) == ["PROJ-123"]
+
+
+def test_extract_keys_priority_dedup_order():
+    from server.context.jira_keys import extract_keys
+
+    req = _req(
+        head_ref="feature/PROJ-1",
+        title="PROJ-2 and PROJ-1 again",
+        body="see ABC-9",
+    )
+    assert extract_keys(req) == ["PROJ-1", "PROJ-2", "ABC-9"]
+
+
+def test_extract_keys_ignores_base_ref():
+    from server.context.jira_keys import extract_keys
+
+    assert extract_keys(_req(base_ref="release/REL-5")) == []
+
+
+def test_extract_keys_rejects_false_positive_shapes():
+    from server.context.jira_keys import extract_keys
+
+    req = _req(
+        head_ref="release/2.3",
+        title="bump v2.3.0",
+        body="lowercase proj-1 ignored",
+    )
+    assert extract_keys(req) == []
+
+
+def test_extract_keys_empty_request():
+    from server.context.jira_keys import extract_keys
+
+    assert extract_keys(_req()) == []
