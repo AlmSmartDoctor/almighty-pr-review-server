@@ -1,4 +1,9 @@
-from server.context.base import ContextRequest, ContextResult, redact_secrets
+from server.context.base import (
+    ContextRequest,
+    ContextResult,
+    redact_secrets,
+    render_context,
+)
 
 
 class CompositeContextProvider:
@@ -22,9 +27,4 @@ class CompositeContextProvider:
                     error=self._redact(f"{type(e).__name__}: {e}"),
                 )
             self.results.append(r)
-        blocks = [
-            f"### {r.provider}\n{r.text}"
-            for r in self.results
-            if r.status == "ok" and r.text
-        ]
-        return "\n\n".join(blocks)
+        return render_context(self.results)
