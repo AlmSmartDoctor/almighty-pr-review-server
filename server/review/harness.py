@@ -1,10 +1,53 @@
 import json
 import os
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from server import config
+
+_HARNESS_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_HARNESS_FILES = ("config.json", "tools-allowlist.json", "review-system-prompt.md")
+
+
+def validate_harness_name(name: str) -> str:
+    """디렉토리 traversal/임의 경로 주입 차단 — 소문자 kebab/snake만 허용."""
+    if not _HARNESS_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid harness name: {name!r}")
+    return name
+
+
+def list_harnesses() -> list[str]:
+    """HARNESS_DIR에서 필수 3파일을 모두 갖춘 하네스 디렉토리 이름을 정렬 반환."""
+    base = config.HARNESS_DIR
+    if not base.is_dir():
+        return []
+    return sorted(
+        d.name
+        for d in base.iterdir()
+        if d.is_dir() and all((d / f).exists() for f in _HARNESS_FILES)
+    )
+
+
+def create_harness(name: str, *, system_prompt: str | None = None) -> None:
+    """default에서 config/tools를 복사해 새 하네스를 스캐폴드(이미 있으면 ValueError).
+    system_prompt 미지정 시 default의 리뷰 지침을 상속한다."""
+    validate_harness_name(name)
+    dest = config.HARNESS_DIR / name
+    if dest.exists():
+        raise ValueError(f"harness already exists: {name!r}")
+    src = config.HARNESS_DIR / "default"
+    dest.mkdir(parents=True)
+    for f in ("config.json", "tools-allowlist.json"):
+        shutil.copyfile(src / f, dest / f)
+    prompt = (
+        system_prompt
+        if system_prompt is not None
+        else (src / "review-system-prompt.md").read_text()
+    )
+    (dest / "review-system-prompt.md").write_text(prompt)
 
 
 @dataclass

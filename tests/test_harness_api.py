@@ -44,3 +44,83 @@ def test_put_none_leaves_prompt_unchanged(tmp_path, monkeypatch):
     assert (
         client.get("/api/harness/default").json()["system_prompt"] == "원본 리뷰 지침"
     )
+
+
+def test_list_harnesses(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    assert client.get("/api/harness").json()["harnesses"] == ["default"]
+
+
+def test_put_creates_new_harness_scaffolded_from_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+
+    r = client.put("/api/harness/security-focus", json={"system_prompt": "보안 집중"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "security-focus"
+    assert body["system_prompt"] == "보안 집중"
+    # config/tools는 default에서 복사됨
+    assert body["claude_allowed_tools"] == ["Read", "Grep", "Glob"]
+    assert body["model"] == "sonnet"
+    assert sorted(client.get("/api/harness").json()["harnesses"]) == [
+        "default",
+        "security-focus",
+    ]
+
+
+def test_put_create_without_prompt_inherits_default_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    r = client.put("/api/harness/perf_focus", json={})
+    assert r.status_code == 200
+    assert r.json()["system_prompt"] == "원본 리뷰 지침"
+
+
+def test_invalid_harness_name_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    # 대문자/점 등 무효명은 400, 'default' 외 아무 디렉토리도 생성하지 않음
+    assert (
+        client.put("/api/harness/Bad.Name", json={"system_prompt": "x"}).status_code
+        == 400
+    )
+    assert (
+        client.put("/api/harness/UPPER", json={"system_prompt": "x"}).status_code == 400
+    )
+    assert client.get("/api/harness/Bad.Name").status_code == 400
+    assert list(config.HARNESS_DIR.iterdir()) == [config.HARNESS_DIR / "default"]
+
+
+def test_validate_harness_name_blocks_traversal():
+    import pytest
+
+    from server.review.harness import validate_harness_name
+
+    for good in ("default", "security-focus", "perf_focus", "v2"):
+        assert validate_harness_name(good) == good
+    for bad in (
+        "../etc",
+        "a/b",
+        "..",
+        ".",
+        "",
+        "Upper",
+        "dot.name",
+        "sp ace",
+        "x" * 65,
+    ):
+        with pytest.raises(ValueError):
+            validate_harness_name(bad)
+
+
+def test_get_missing_harness_404(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    assert client.get("/api/harness/nonexistent").status_code == 404

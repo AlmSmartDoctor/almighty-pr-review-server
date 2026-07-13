@@ -20,7 +20,12 @@ from server.repos import (
     review_repo,
     settings_repo,
 )
-from server.review.harness import HarnessProfile
+from server.review.harness import (
+    HarnessProfile,
+    create_harness,
+    list_harnesses,
+    validate_harness_name,
+)
 
 
 _initialized = False
@@ -417,8 +422,23 @@ def trigger_review(pid: int, conn=Depends(get_conn)):
     return {"job_id": job_id}
 
 
+@app.get("/api/harness")
+def list_harness():
+    return {"harnesses": list_harnesses()}
+
+
+def _valid_name_or_400(name: str) -> None:
+    try:
+        validate_harness_name(name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid harness name")
+
+
 @app.get("/api/harness/{name}")
 def get_harness(name: str):
+    _valid_name_or_400(name)
+    if not (config.HARNESS_DIR / name).is_dir():
+        raise HTTPException(status_code=404, detail="harness not found")
     hp = HarnessProfile.load(name)
     return {
         "name": hp.name,
@@ -436,7 +456,10 @@ class HarnessPut(BaseModel):
 
 @app.put("/api/harness/{name}")
 def put_harness(name: str, body: HarnessPut):
+    _valid_name_or_400(name)
     base = config.HARNESS_DIR / name
-    if body.system_prompt is not None:
+    if not base.is_dir():
+        create_harness(name, system_prompt=body.system_prompt)
+    elif body.system_prompt is not None:
         (base / "review-system-prompt.md").write_text(body.system_prompt)
     return get_harness(name)
