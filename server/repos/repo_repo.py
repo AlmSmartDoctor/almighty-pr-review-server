@@ -41,6 +41,7 @@ ALLOWED = {
     "context_jira_on",
     "context_db_schema_on",
     "context_graphify_on",
+    "context_feedback_on",
     "static_context_path",
     "jira_project_keys",
     "db_schema_path",

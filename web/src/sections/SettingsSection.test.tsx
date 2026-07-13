@@ -143,10 +143,11 @@ test("renders external context toggles", async () => {
   expect(screen.getByRole("switch", { name: "Jira 연동" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "사내 DB 스키마" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "코드 그래프" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "자가 학습(팀 피드백)" })).toBeInTheDocument();
   expect(screen.queryByPlaceholderText(/토큰|token|url/i)).toBeNull();
 });
 
-test("context save patches only the four context fields", async () => {
+test("context save patches only the context fields", async () => {
   const patchSettings = vi
     .spyOn(api, "patchSettings")
     .mockResolvedValue({ ...contextSettings, context_static_on: 1 });
@@ -158,7 +159,8 @@ test("context save patches only the four context fields", async () => {
 
   await waitFor(() => expect(patchSettings).toHaveBeenCalledTimes(1));
   expect(Object.keys(patchSettings.mock.calls[0][0]).sort()).toEqual([
-    "context_db_schema_on", "context_graphify_on", "context_jira_on", "context_static_on",
+    "context_db_schema_on", "context_feedback_on", "context_graphify_on",
+    "context_jira_on", "context_static_on",
   ]);
   expect(patchSettings.mock.calls[0][0]).toEqual(
     expect.objectContaining({ context_static_on: 1 }),

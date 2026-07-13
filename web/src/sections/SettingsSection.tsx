@@ -34,13 +34,15 @@ type Settings = {
   context_jira_on?: number;
   context_db_schema_on?: number;
   context_graphify_on?: number;
+  context_feedback_on?: number;
 };
 
 type ContextToggleKey =
   | "context_static_on"
   | "context_jira_on"
   | "context_db_schema_on"
-  | "context_graphify_on";
+  | "context_graphify_on"
+  | "context_feedback_on";
 
 type Repo = {
   id: number;
@@ -58,6 +60,7 @@ type Repo = {
   context_jira_on?: number | null;
   context_db_schema_on?: number | null;
   context_graphify_on?: number | null;
+  context_feedback_on?: number | null;
   static_context_path?: string | null;
   jira_project_keys?: string | null;
   db_schema_path?: string | null;
@@ -69,6 +72,7 @@ const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
   { key: "context_jira_on", label: "Jira" },
   { key: "context_db_schema_on", label: "DB" },
   { key: "context_graphify_on", label: "Graphify" },
+  { key: "context_feedback_on", label: "피드백" },
 ];
 
 const EFFORTS = ["low", "medium", "high", "xhigh"];
@@ -124,6 +128,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
       context_jira_on: draft.context_jira_on ?? 0,
       context_db_schema_on: draft.context_db_schema_on ?? 0,
       context_graphify_on: draft.context_graphify_on ?? 0,
+      context_feedback_on: draft.context_feedback_on ?? 0,
     })
       .then((s) => {
         setSettings(s);
@@ -133,6 +138,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
           context_jira_on: s.context_jira_on,
           context_db_schema_on: s.context_db_schema_on,
           context_graphify_on: s.context_graphify_on,
+          context_feedback_on: s.context_feedback_on,
         } : s));
         setStatus("외부 컨텍스트 설정을 저장했습니다.");
       })
@@ -347,6 +353,10 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
             <Field title="코드 그래프" help="연동 예정 · 코드 그래프 인덱싱 파이프라인 필요">
               <Switch aria-label="코드 그래프" checked={!!draft.context_graphify_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_graphify_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="자가 학습(팀 피드백)" help="이 레포의 과거 finding 승인/기각/수정 이력을 요약해 리뷰에 보정 신호로 주입">
+              <Switch aria-label="자가 학습(팀 피드백)" checked={!!draft.context_feedback_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, context_feedback_on: v ? 1 : 0 })} />
             </Field>
           </div>
           <div className="mt-5">

@@ -145,11 +145,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(
         conn, "app_settings", "context_graphify_on", "INTEGER NOT NULL DEFAULT 0"
     )
+    # 자가 학습(팀 피드백) 토글 — finding의 사람 판단을 요약 주입. 별도 소스 컬럼 없음(앱 DB를 읽음).
+    _ensure_column(
+        conn, "app_settings", "context_feedback_on", "INTEGER NOT NULL DEFAULT 0"
+    )
     # per-repo override — nullable(NULL이면 global 상속). 비밀 아님.
     _ensure_column(conn, "repo", "context_static_on", "INTEGER")
     _ensure_column(conn, "repo", "context_jira_on", "INTEGER")
     _ensure_column(conn, "repo", "context_db_schema_on", "INTEGER")
     _ensure_column(conn, "repo", "context_graphify_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_feedback_on", "INTEGER")
     _ensure_column(conn, "repo", "static_context_path", "TEXT")
     _ensure_column(conn, "repo", "jira_project_keys", "TEXT")
     # DBSchema 정적 소스: 레포에 체크인된 DDL 덤프 경로(비밀 아님, root 하위 봉쇄).

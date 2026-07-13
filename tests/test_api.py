@@ -67,6 +67,7 @@ def test_patch_repo_context_settings(tmp_path):
         f"/api/repos/{created['id']}",
         json={
             "context_static_on": 1,
+            "context_feedback_on": 1,
             "static_context_path": "/x/ctx.md",
             "jira_project_keys": "PROJ",
             "db_schema_path": "db/structure.sql",
@@ -76,6 +77,7 @@ def test_patch_repo_context_settings(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["context_static_on"] == 1
+    assert body["context_feedback_on"] == 1
     assert body["static_context_path"] == "/x/ctx.md"
     assert body["jira_project_keys"] == "PROJ"
     assert body["db_schema_path"] == "db/structure.sql"
@@ -147,6 +149,19 @@ def test_patch_repo_can_restore_context_toggle_inheritance(tmp_path):
 
     assert r.status_code == 200
     assert r.json()["context_jira_on"] is None
+
+
+def test_patch_repo_can_restore_feedback_toggle_inheritance(tmp_path):
+    client, _ = _client(tmp_path)
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    client.patch(
+        f"/api/repos/{created['id']}", json={"context_feedback_on": 0}
+    ).raise_for_status()
+
+    r = client.patch(f"/api/repos/{created['id']}", json={"context_feedback_on": None})
+
+    assert r.status_code == 200
+    assert r.json()["context_feedback_on"] is None  # None-reset 루프에 포함
 
 
 def test_update_finding_status(tmp_path):

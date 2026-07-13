@@ -214,6 +214,7 @@ def test_settings_context_toggles_roundtrip(db):
         context_jira_on=1,
         context_db_schema_on=1,
         context_graphify_on=1,
+        context_feedback_on=1,
     )
     s = settings_repo.get(db)
     assert (
@@ -221,7 +222,8 @@ def test_settings_context_toggles_roundtrip(db):
         s["context_jira_on"],
         s["context_db_schema_on"],
         s["context_graphify_on"],
-    ) == (1, 1, 1, 1)
+        s["context_feedback_on"],
+    ) == (1, 1, 1, 1, 1)
 
 
 def test_repo_context_settings_roundtrip(db):
@@ -231,6 +233,7 @@ def test_repo_context_settings_roundtrip(db):
         db,
         rid,
         context_static_on=1,
+        context_feedback_on=1,
         static_context_path="/x/ctx.md",
         jira_project_keys="PROJ,ABC",
         db_schema_path="db/structure.sql",
@@ -238,6 +241,7 @@ def test_repo_context_settings_roundtrip(db):
     )
     r = repo_repo.get(db, rid)
     assert r["context_static_on"] == 1
+    assert r["context_feedback_on"] == 1
     assert r["static_context_path"] == "/x/ctx.md"
     assert r["jira_project_keys"] == "PROJ,ABC"
     assert r["db_schema_path"] == "db/structure.sql"

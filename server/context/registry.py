@@ -94,4 +94,16 @@ def build_context_provider(repo, settings):
             providers.append(GraphifyProvider(graph_source=source))
         except Exception as e:  # never raise
             print(f"[context] graphify provider skipped: {redact_secrets(str(e))}")
+    if _effective(repo, settings, "context_feedback_on"):
+        try:
+            from server.context.feedback_provider import FeedbackContextProvider
+            from server.context.feedback_source import db_feedback_source
+
+            # per-repo 경로 없음 — 소스가 앱 DB에서 이 레포 결정을 읽는다.
+            # 결정이 없으면 소스가 ""를 반환해 자동 미주입.
+            providers.append(
+                FeedbackContextProvider(feedback_source=db_feedback_source())
+            )
+        except Exception as e:  # never raise
+            print(f"[context] feedback provider skipped: {redact_secrets(str(e))}")
     return CompositeContextProvider(providers)

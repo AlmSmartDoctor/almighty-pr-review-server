@@ -776,3 +776,207 @@ def test_registry_graphify_source_wired_from_path(tmp_path):
     assert (
         gp.fetch(_req()).status == "ok" and "프로젝트 현황 X" in gp.fetch(_req()).text
     )
+
+
+# ── 자가 학습(팀 피드백) — 서브프로젝트 C 1차 ──────────────────────────
+
+
+def test_feedback_provider_renders_injected_source():
+    from server.context.feedback_provider import FeedbackContextProvider
+
+    r = FeedbackContextProvider(feedback_source=lambda req: "팀 피드백 요약").fetch(
+        _req()
+    )
+    assert r.status == "ok" and "팀 피드백" in r.text
+
+
+def test_feedback_provider_skipped_without_source():
+    from server.context.feedback_provider import FeedbackContextProvider
+
+    r = FeedbackContextProvider().fetch(_req())
+    assert r.status == "skipped" and r.text == ""
+
+
+def test_feedback_provider_degrades_on_source_error():
+    from server.context.feedback_provider import FeedbackContextProvider
+
+    def boom(req):
+        raise RuntimeError("boom")
+
+    r = FeedbackContextProvider(feedback_source=boom).fetch(_req())
+    assert r.status == "empty" and r.text == ""
+
+
+def test_registry_includes_feedback_provider():
+    from server.context.registry import build_context_provider
+    from server.context.feedback_provider import FeedbackContextProvider
+
+    c = build_context_provider({"context_feedback_on": 1}, {"context_feedback_on": 0})
+    assert any(isinstance(p, FeedbackContextProvider) for p in c.providers)
+
+
+def _fb_rows(*tuples):
+    # (category, status, claim, edited_text)
+    return [
+        dict(category=c, status=s, claim=cl, edited_text=e) for c, s, cl, e in tuples
+    ]
+
+
+def test_summarize_feedback_tallies_and_examples():
+    from server.context.feedback_source import summarize_feedback
+
+    out = summarize_feedback(
+        _fb_rows(
+            ("style", "dismissed", "nit A", None),
+            ("style", "dismissed", "nit B", None),
+            ("correctness", "posted", "real bug", None),
+        )
+    )
+    assert "style: 수용 0 · 기각 2" in out
+    assert "correctness: 수용 1 · 기각 0" in out
+    assert "nit A" in out and "nit B" in out  # 기각 대표 예시
+
+
+def test_summarize_feedback_edited_bucket_via_edited_text():
+    from server.context.feedback_source import summarize_feedback
+
+    out = summarize_feedback(
+        _fb_rows(
+            (
+                "correctness",
+                "posted",
+                "원 지적",
+                "다듬은 문구",
+            ),  # edited_text → 수용(edited)
+            ("style", "dismissed", "x", None),
+            ("style", "dismissed", "y", None),
+        )
+    )
+    assert "correctness: 수용 1 · 기각 0" in out  # posted+edited_text → 수용으로 집계
+    assert "다듬어 수용" in out and "원 지적" in out
+
+
+def test_summarize_feedback_below_floor_returns_empty():
+    from server.context.feedback_source import summarize_feedback
+
+    assert summarize_feedback(_fb_rows(("style", "dismissed", "x", None))) == ""  # 1<3
+
+
+def test_summarize_feedback_dedups_repeated_claims():
+    from server.context.feedback_source import summarize_feedback
+
+    out = summarize_feedback(_fb_rows(*[("style", "dismissed", "같은 지적", None)] * 4))
+    assert "style: 수용 0 · 기각 4" in out
+    assert out.count("같은 지적") == 1  # 예시는 중복 제거
+
+
+def _feedback_db(tmp_path):
+    from server.db import connect, init_schema
+
+    conn = connect(str(tmp_path / "fb.db"))
+    init_schema(conn)
+    return conn
+
+
+def _seed_decisions(conn, full_name, decisions):
+    """decisions: [(category, status, claim, edited_text)]. repo→pr→run 생성 후 finding 적재."""
+    from server.repos import finding_repo, repo_repo
+
+    rid = repo_repo.add(conn, full_name=full_name)
+    pr = conn.execute(
+        "INSERT INTO pull_request (repo_id, number, head_sha) VALUES (?, 1, 'sha')",
+        (rid,),
+    ).lastrowid
+    run = conn.execute(
+        "INSERT INTO review_run (pr_id, head_sha) VALUES (?, 'sha')", (pr,)
+    ).lastrowid
+    conn.commit()
+    for cat, status, claim, edited in decisions:
+        fid = finding_repo.add(
+            conn,
+            run_id=run,
+            vendor="claude",
+            file="a.py",
+            line=1,
+            severity="high",
+            category=cat,
+            claim=claim,
+            rationale="r",
+            confidence=0.9,
+        )
+        if edited is None:
+            finding_repo.set_status(conn, fid, status)
+        else:
+            finding_repo.set_status(conn, fid, status, edited_text=edited)
+
+
+def test_db_feedback_source_summarizes_repo_decisions(tmp_path):
+    from server.context.feedback_source import db_feedback_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_decisions(
+        conn,
+        "acme/api",
+        [
+            ("style", "dismissed", "변수명 개선", None),
+            ("style", "dismissed", "주석 추가", None),
+            ("correctness", "approved", "널 체크 누락", None),
+        ],
+    )
+    conn.close()
+    src = db_feedback_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api"))
+    assert "style: 수용 0 · 기각 2" in out
+    assert "correctness: 수용 1 · 기각 0" in out
+    assert "변수명 개선" in out  # 기각 예시
+
+
+def test_db_feedback_source_scoped_to_repo_and_case_insensitive(tmp_path):
+    from server.context.feedback_source import db_feedback_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_decisions(
+        conn,
+        "Acme/API",  # 등록 casing
+        [
+            ("style", "dismissed", "다른레포 지적", None),
+            ("style", "dismissed", "x", None),
+            ("style", "dismissed", "y", None),
+        ],
+    )
+    _seed_decisions(conn, "other/repo", [("perf", "approved", "격리되어야 함", None)])
+    conn.close()
+    src = db_feedback_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api"))  # 다른 casing으로 조회
+    assert "style: 수용 0 · 기각 3" in out
+    assert "격리되어야 함" not in out and "perf" not in out  # 다른 레포 제외
+
+
+def test_db_feedback_source_empty_without_decisions(tmp_path):
+    from server.context.feedback_source import db_feedback_source
+    from server.repos import repo_repo
+
+    conn = _feedback_db(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")  # 레포는 있으나 사람 결정 없음
+    conn.close()
+    src = db_feedback_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api")) == ""
+
+
+def test_db_feedback_source_excludes_pending(tmp_path):
+    from server.context.feedback_source import db_feedback_source
+
+    conn = _feedback_db(tmp_path)
+    # 3건 모두 미결정(pending) → 결정 0건 → floor 미달 → ""
+    _seed_decisions(
+        conn,
+        "acme/api",
+        [
+            ("style", "pending", "미결정1", None),
+            ("style", "pending", "미결정2", None),
+            ("style", "pending", "미결정3", None),
+        ],
+    )
+    conn.close()
+    src = db_feedback_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api")) == ""

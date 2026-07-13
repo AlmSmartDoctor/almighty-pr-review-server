@@ -27,6 +27,17 @@
 - **소스 #1 — 정적 프로젝트 문서(구현됨).** 레포별 비밀-아님 컬럼 `graphify_path`가 레포 안에 체크인된 프로젝트 문서(예: `docs/PROJECT.md` — 진행상황·아키텍처·도메인 개요)를 가리킨다. 경로는 `static_context_path`/`db_schema_path`와 동일하게 **레포 root 하위로 realpath 봉쇄**(임의 절대경로 exfil 차단, B-INV-9). 변경 파일과 무관하게 **문서 전체를 항상 주입**한다(DBSchema의 변경파일→테이블 필터링과 다름). 미설정이면 소스 미주입=skipped. per-source 캡은 downstream(`render_context`)이 처리한다.
 - **향후 증분(같은 seam에 스택):** 관련 DB 데이터 특징, 서버 보유 데이터(이 레포의 리뷰 이력·열린 finding·최근 PR) 요약 등을 같은 `graph_source` seam에 순차 추가한다.
 
+## 자가 학습 — 팀 피드백 (서브프로젝트 C 1차)
+
+이 레포의 과거 리뷰에서 **사람이 finding에 내린 판단**(승인/기각/수정)을 요약해 이후 리뷰에 "팀이 이런 지적을 이렇게 판단해 왔다"는 보정 신호로 주입한다. 상세는 `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
+
+- **학습 코퍼스는 이미 DB에 있다.** 사람 결정은 `finding.status`(`approved|dismissed|edited|posted`) + `finding.edited_text`로 durable하게 저장되므로 별도 이벤트 저장소를 만들지 않고 finding 테이블을 **읽어서** 요약한다. `server/seams.py`의 `NullMemoryStore`(write-side 스텁)는 finding.status로 포착 안 되는 신호(Slack 반응 등)를 위한 후속 증분까지 배선하지 않는다.
+- **인터페이스:** `FeedbackContextProvider`(`name="team_feedback"`)는 `feedback_source(req) -> str`를 주입받는다. 소스 미주입=`skipped`, 실패=`empty`, 요약 텍스트 있으면 `ok`. NEVER raises.
+- **소스 #1 — 앱 DB 조회(구현됨).** `db_feedback_source(*, db_path=config.DB_PATH)`가 `finding → review_run → pull_request → repo`를 조인해 `repo.full_name = req.repo COLLATE NOCASE`로 **현재 레포 결정만** 집계한다(레포 간 격리). 판단 매핑: 기각=`dismissed`, 수정수용=`edited` 또는 `edited_text` 존재, 승인=그 외. `pending`(미결정) 제외. read-only SELECT + short-lived 커넥션(worker 진행 중에도 WAL 하 안전).
+- **캡·플로어:** `_MAX_DECISIONS=400`(최근순 스캔), `_MIN_DECISIONS=3`(미만이면 미주입), `_MAX_EXAMPLES=5`(기각/수정 대표 예시, claim 중복 제거), `_MAX_CLAIM_CHARS=160`. per-source·총합 캡과 nonce 펜스는 downstream `render_context`가 처리.
+- **비밀 표면 0.** 읽는 건 같은 레포의 비밀-아님 finding 컬럼(claim/rationale/edited_text)뿐이며 이미 대시보드 `/api/runs/{id}/findings`로 공개된 데이터다. 자기 레포 데이터가 자기 리뷰에 머무르므로 exfiltration이 아니다.
+- **per-repo 경로 컬럼 없음.** 소스가 앱 DB를 읽으므로 토글(`context_feedback_on`)만으로 켜고 끈다. 결정이 없으면 소스가 `""`를 반환해 자동 미주입.
+
 ## 비밀 처리 규약 (전 소스 공통 — 보안 불변식)
 
 - 프로바이더 자격증명은 오직 `server/config.py`/env에만 존재한다. sqlite에 절대 넣지 않는다.

@@ -157,6 +157,7 @@ class RepoPatch(BaseModel):
     context_jira_on: int | None = None
     context_db_schema_on: int | None = None
     context_graphify_on: int | None = None
+    context_feedback_on: int | None = None
     verify_singles_on: int | None = None
     incremental_review_on: int | None = None
     static_context_path: str | None = None
@@ -173,6 +174,7 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         "context_jira_on",
         "context_db_schema_on",
         "context_graphify_on",
+        "context_feedback_on",
         "verify_singles_on",
         "incremental_review_on",
     ):
@@ -200,6 +202,7 @@ class SettingsPatch(BaseModel):
     context_jira_on: int | None = None
     context_db_schema_on: int | None = None
     context_graphify_on: int | None = None
+    context_feedback_on: int | None = None
     verify_singles_on: int | None = None
     incremental_review_on: int | None = None
 
