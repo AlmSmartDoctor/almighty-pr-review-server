@@ -271,3 +271,79 @@ def test_extract_keys_empty_request():
     from server.context.jira_keys import extract_keys
 
     assert extract_keys(_req()) == []
+
+
+class _FakeJira:
+    def __init__(self, issues=None, exc=None):
+        self._issues, self._exc = issues or {}, exc
+        self.calls = []
+
+    def get_issue(self, key):
+        self.calls.append(key)
+        if self._exc:
+            raise self._exc
+        if key not in self._issues:
+            raise KeyError(key)
+        return self._issues[key]
+
+
+def test_jira_provider_renders_markdown():
+    from server.context.jira_provider import JiraContextProvider
+
+    fake = _FakeJira(
+        issues={
+            "PROJ-1": {
+                "key": "PROJ-1",
+                "summary": "로그인 버그",
+                "description": "재현...",
+            }
+        }
+    )
+    r = JiraContextProvider(client=fake).fetch(_req(head_ref="feature/PROJ-1"))
+    assert r.status == "ok"
+    assert "PROJ-1" in r.text and "로그인 버그" in r.text
+
+
+def test_jira_provider_empty_when_no_keys():
+    from server.context.jira_provider import JiraContextProvider
+
+    fake = _FakeJira()
+    r = JiraContextProvider(client=fake).fetch(_req())
+    assert r.status == "empty" and r.text == ""
+    assert fake.calls == []
+
+
+def test_jira_provider_error_when_all_keys_fail():
+    from server.context.jira_provider import JiraContextProvider
+
+    fake = _FakeJira(exc=RuntimeError("boom"))
+    r = JiraContextProvider(client=fake).fetch(_req(head_ref="feature/PROJ-1"))
+    assert r.status == "error" and r.text == ""
+    assert "boom" not in (r.error or "")
+
+
+def test_jira_provider_filters_by_project_keys():
+    from server.context.jira_provider import JiraContextProvider
+
+    fake = _FakeJira(
+        issues={
+            "PROJ-1": {"key": "PROJ-1", "summary": "s", "description": ""},
+            "ABC-2": {"key": "ABC-2", "summary": "s", "description": ""},
+        }
+    )
+    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
+        _req(title="PROJ-1 and ABC-2", body="")
+    )
+    assert r.status == "ok"
+    assert fake.calls == ["PROJ-1"]
+
+
+def test_jira_provider_caps_outbound_calls():
+    from server.context.jira_provider import JiraContextProvider
+
+    keys = [f"PROJ-{i}" for i in range(1, 7)]  # 6 distinct keys
+    issues = {k: {"key": k, "summary": "s", "description": ""} for k in keys}
+    fake = _FakeJira(issues=issues)
+    r = JiraContextProvider(client=fake).fetch(_req(body=" ".join(keys)))
+    assert r.status == "ok"
+    assert len(fake.calls) <= 5

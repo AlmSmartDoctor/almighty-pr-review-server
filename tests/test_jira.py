@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from server import config
 from server.context import jira_client
 
@@ -159,3 +163,17 @@ def test_summary_is_truncated_to_size_cap():
     client = _client(http)
     result = client.get_issue("PROJ-1")
     assert len(result["summary"]) == config.MAX_CONTEXT_CHARS_PER_SOURCE
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ALMIGHTY_JIRA_E2E"),
+    reason="set ALMIGHTY_JIRA_E2E=1 + ALMIGHTY_JIRA_* creds",
+)
+def test_jira_real_roundtrip():
+    client = jira_client.JiraClient(
+        base_url=config.JIRA_BASE_URL,
+        email=config.JIRA_EMAIL,
+        token=config.JIRA_API_TOKEN,
+    )
+    result = client.get_issue(os.environ["ALMIGHTY_JIRA_E2E_KEY"])
+    assert result["key"]
