@@ -4,7 +4,13 @@ ALLOWED = {
     "default_poll_interval",
     "approval_gate_on",
     "prescreen_model",
+    "review_model",
+    "codex_model",
     "prescreen_gate_threshold",
+    "context_static_on",
+    "context_jira_on",
+    "context_db_schema_on",
+    "context_graphify_on",
 }
 
 

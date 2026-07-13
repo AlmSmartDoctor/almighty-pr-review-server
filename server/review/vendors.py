@@ -83,11 +83,14 @@ class CodexAdapter(_BaseAdapter):
 
     def _build_argv(self, prompt, hp):
         # argv는 docs/vendor-cli-contract.md(Task 0.5)에서 실증된 값.
-        return [
+        argv = [
             "codex",
             "exec",
             "--skip-git-repo-check",
             "--sandbox",
             hp.codex_sandbox,
-            prompt,
         ]
+        if hp.codex_model:  # 빈 값이면 codex 자체 기본 모델 사용
+            argv += ["--model", hp.codex_model]
+        argv.append(prompt)  # prompt는 positional → 항상 마지막
+        return argv

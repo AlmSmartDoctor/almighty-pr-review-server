@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS pull_request (
   number INTEGER NOT NULL,
   title TEXT, author TEXT, head_sha TEXT NOT NULL,
   base_ref TEXT, state TEXT NOT NULL DEFAULT 'open',
-  url TEXT, last_reviewed_sha TEXT,
+  url TEXT, created_at TEXT, last_reviewed_sha TEXT,
   first_seen_at TEXT, updated_at TEXT,
   UNIQUE(repo_id, number)
 );
@@ -100,7 +100,9 @@ CREATE TABLE IF NOT EXISTS app_settings (
   concurrency_limit INTEGER NOT NULL DEFAULT 2,
   default_poll_interval INTEGER NOT NULL DEFAULT 60,
   approval_gate_on INTEGER NOT NULL DEFAULT 1,
-  prescreen_model TEXT NOT NULL DEFAULT 'claude-haiku',
+  prescreen_model TEXT NOT NULL DEFAULT 'haiku',
+  review_model TEXT NOT NULL DEFAULT 'sonnet',
+  codex_model TEXT NOT NULL DEFAULT '',
   prescreen_gate_threshold TEXT NOT NULL DEFAULT 'moderate'
 );
 """
@@ -121,9 +123,55 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _ensure_column(conn, "pull_request", "created_at", "TEXT")
+    _ensure_column(conn, "pull_request", "head_ref", "TEXT")
+    _ensure_column(conn, "pull_request", "body", "TEXT")
+    _ensure_column(
+        conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
+    )
+    _ensure_column(conn, "app_settings", "codex_model", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "review_run", "context_text", "TEXT")
+    _ensure_column(conn, "review_run", "context_meta", "TEXT")
+    # v2-B 프로바이더 토글 — 전역 기본(app_settings). NOT NULL DEFAULT 0.
+    _ensure_column(
+        conn, "app_settings", "context_static_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        conn, "app_settings", "context_jira_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        conn, "app_settings", "context_db_schema_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        conn, "app_settings", "context_graphify_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    # per-repo override — nullable(NULL이면 global 상속). 비밀 아님.
+    _ensure_column(conn, "repo", "context_static_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_jira_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_db_schema_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_graphify_on", "INTEGER")
+    _ensure_column(conn, "repo", "static_context_path", "TEXT")
+    _ensure_column(conn, "repo", "jira_project_keys", "TEXT")
+    # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
+    # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
+    conn.execute(
+        "UPDATE app_settings SET prescreen_model='haiku' "
+        "WHERE prescreen_model='claude-haiku'"
+    )
     conn.execute("INSERT OR IGNORE INTO app_settings (id) VALUES (1)")
     conn.execute(
         "INSERT OR IGNORE INTO harness (name, scope, path) VALUES "
         "('default', 'global', 'harness/default')"
     )
     conn.commit()
+
+
+def _ensure_column(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    cols = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

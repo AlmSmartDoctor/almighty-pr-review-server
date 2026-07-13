@@ -19,6 +19,7 @@ class PreScreenResult:
 
 
 PRESCREEN_TIMEOUT_SEC = 120  # ★개정: 사전평가도 subprocess → 상한 필수
+MAX_INLINE_DIFF_CHARS = 100_000
 
 
 def _default_runner(args, env=None, cwd=None) -> str:
@@ -47,6 +48,8 @@ def prescreen(
 ) -> PreScreenResult:
     """env/cwd를 넘기면 격리 runtime dir로 실행(build_deps가 하네스 env+격리 cwd 주입).
     프롬프트에 diff가 인라인이라 파일 접근 불필요 → cwd를 빈 runtime dir로 가둔다."""
+    if len(diff) > MAX_INLINE_DIFF_CHARS:
+        return PreScreenResult("complex", 1.0, diff_too_large_reason(diff))
     out = runner(["claude", "-p", PROMPT + diff, "--model", model], env=env, cwd=cwd)
     m = _FENCE.findall(out)
     if m:
@@ -60,3 +63,10 @@ def prescreen(
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
     return PreScreenResult("moderate", 0.5, "사전평가 파싱 실패→기본 리뷰")
+
+
+def diff_too_large_reason(diff: str) -> str:
+    return (
+        f"diff too large for inline review: {len(diff)} chars "
+        f"> {MAX_INLINE_DIFF_CHARS}"
+    )

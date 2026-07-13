@@ -1,7 +1,12 @@
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
 *.db
+*.db-shm
+*.db-wal
 web/node_modules/
 web/dist/
 harness/**/runtime/
+.env
+.env.*

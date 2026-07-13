@@ -17,6 +17,7 @@ class HarnessProfile:
     model: str
     effort: str
     prescreen_model: str
+    codex_model: str  # "" = codex CLI 자체 기본 모델(--model 미전달)
 
     @classmethod
     def load(cls, name: str) -> "HarnessProfile":
@@ -32,6 +33,7 @@ class HarnessProfile:
             model=cfg["model"],
             effort=cfg["effort"],
             prescreen_model=cfg.get("prescreen_model", "haiku"),
+            codex_model=cfg.get("codex_model", ""),
         )
 
     # 인증에 필요한 env allowlist(키체인 접근 등). 정확한 목록은 Task 0.5 실증값.

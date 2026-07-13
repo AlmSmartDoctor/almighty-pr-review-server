@@ -1,8 +1,12 @@
+from server.context.base import ContextRequest
 from server.seams import NoOpContextProvider, LocalIdentity, NullMemoryStore
 
 
 def test_context_provider_noop_returns_empty():
-    assert NoOpContextProvider().gather(repo="acme/api", pr_number=7) == ""
+    assert (
+        NoOpContextProvider().gather(req=ContextRequest(repo="acme/api", pr_number=7))
+        == ""
+    )
 
 
 def test_identity_is_local_me():

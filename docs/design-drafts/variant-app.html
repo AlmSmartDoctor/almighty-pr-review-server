@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Almighty PR Review — App</title>
+<!--
+  확장형 앱 셸 목업.
+  확장 방법: 좌측 nav에 .nav-item(data-view="x") 추가 + 콘텐츠에 <section class="view" data-view="x"> 블록 추가.
+  리뷰 섹션은 검증된 variant-drill.html 을 그대로 임베드(실제 구현에선 컴포넌트로 이식).
+-->
+<style>
+  :root{
+    --bg:#f5f6f8; --surface:#ffffff; --surface-2:#fafbfc;
+    --border:#e3e6ea; --border-strong:#d0d5dc;
+    --ink:#1a1f26; --ink-2:#454f5b; --ink-3:#727c88;
+    --accent:#3b5bdb; --accent-soft:#e7ecfd; --focus:#2242c7;
+    --claude:#6741d9; --claude-bg:#efeafb; --codex:#0b7285; --codex-bg:#e2f2f4;
+    --ok:#2b8a3e; --ok-bg:#e6f4ea; --wait:#b5760a; --wait-bg:#fbf1cf;
+    --sev-c:#c92a2a; --sev-c-bg:#fdecec; --sev-h:#e8590c; --sev-h-bg:#fdeee2;
+    --radius:12px; --radius-sm:9px; --sidebar-w:230px;
+    --shadow:0 1px 2px rgba(20,25,35,.04), 0 3px 10px rgba(20,25,35,.05);
+    --shadow-hi:0 2px 6px rgba(20,25,35,.07), 0 12px 30px rgba(20,25,35,.09);
+    /* 한글 우선 폰트 스택 — 외부 폰트 금지, 시스템 한글 폰트를 앞쪽에 배치 */
+    --font:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Noto Sans KR","Malgun Gothic","Segoe UI",Roboto,sans-serif;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--font); background:var(--bg); color:var(--ink);
+    /* FHD(비-retina) 외부 디스플레이 가독성: 본문 14.5px·줄간격 1.6·중간 굵기 */
+    font-size:14.5px; line-height:1.6; font-weight:400;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    word-break:keep-all;
+  }
+  button{font-family:inherit;cursor:pointer}
+  :focus-visible{outline:2.5px solid var(--focus);outline-offset:2px;border-radius:6px}
+  h1,h2,h3{letter-spacing:-.3px}
+
+  /* ---------------- Shell ---------------- */
+  .shell{display:flex;min-height:100vh}
+  .sidebar{
+    width:var(--sidebar-w);flex:none;position:sticky;top:0;align-self:flex-start;height:100vh;
+    background:var(--surface);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;padding:16px 12px;
+  }
+  .side-logo{display:flex;align-items:center;gap:10px;font-weight:750;font-size:15px;padding:6px 8px 4px}
+  .side-logo .mark{width:28px;height:28px;border-radius:8px;flex:none;
+    background:linear-gradient(135deg,#3b5bdb,#6741d9);display:grid;place-items:center;color:#fff}
+  .side-logo .sub{display:block;font-size:11.5px;color:var(--ink-3);font-weight:500;margin-top:1px}
+  .nav-label{font-size:10.5px;font-weight:750;letter-spacing:.7px;text-transform:uppercase;color:var(--ink-3);padding:16px 10px 6px}
+  .nav{display:flex;flex-direction:column;gap:2px}
+  .nav-item{
+    display:flex;align-items:center;gap:11px;width:100%;text-align:left;
+    background:none;border:none;border-radius:9px;padding:9px 11px;
+    font-size:13.5px;font-weight:600;color:var(--ink-2);
+  }
+  .nav-item:hover{background:var(--surface-2);color:var(--ink)}
+  .nav-item.active{background:var(--accent-soft);color:var(--accent)}
+  .nav-item .ico{width:18px;height:18px;flex:none;display:grid;place-items:center;color:currentColor}
+  .nav-item .nb{margin-left:auto;font-size:10px;font-weight:800;padding:1px 7px;border-radius:10px;
+    background:var(--surface-2);border:1px solid var(--border);color:var(--ink-3)}
+  .nav-item.active .nb{background:#fff;border-color:transparent;color:var(--accent)}
+  .nav-item .soon{margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.4px;color:var(--wait);
+    background:var(--wait-bg);padding:2px 7px;border-radius:10px}
+  .side-foot{margin-top:auto;padding:12px 10px 2px;border-top:1px solid var(--border);
+    color:var(--ink-3);font-size:11.5px;display:flex;flex-direction:column;gap:5px}
+  .dot-live{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg);display:inline-block;margin-right:6px}
+
+  .content{flex:1;min-width:0;display:flex;flex-direction:column}
+  .view{display:none}
+  .view.active{display:block}
+  .view.view-review.active{display:flex;flex-direction:column;flex:1}
+  .page{max-width:1120px;margin:0 auto;width:100%;padding:26px 30px 72px}
+  .page-h{margin:0 0 3px;font-size:21px;font-weight:750}
+  .page-sub{color:var(--ink-3);font-size:13px;margin:0 0 24px}
+
+  /* review iframe */
+  .review-frame{width:100%;height:100vh;border:none;display:block;background:var(--bg)}
+
+  /* ---------------- Settings ---------------- */
+  .card-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    box-shadow:var(--shadow);margin-bottom:18px;overflow:hidden}
+  .card-box > h2{font-size:14.5px;font-weight:750;margin:0;padding:14px 18px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;gap:8px}
+  .card-body{padding:6px 18px}
+  .field{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:13px 0;border-bottom:1px solid var(--border)}
+  .field:last-child{border-bottom:none}
+  .field .fl{font-size:13.5px;font-weight:650}
+  .field .fh{font-size:12px;color:var(--ink-3);margin-top:2px;font-weight:400}
+  select,input[type=number]{font-family:inherit;font-size:13px;padding:7px 11px;border:1px solid var(--border-strong);
+    border-radius:8px;background:var(--surface);color:var(--ink)}
+  input[type=number]{width:84px}
+  .switch{width:44px;height:25px;border-radius:20px;background:var(--border-strong);position:relative;border:none;flex:none;transition:background .15s}
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:19px;height:19px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+  .switch[aria-checked=true]{background:var(--accent)}
+  .switch[aria-checked=true]::after{left:22px}
+  .switch.sm{width:36px;height:21px}
+  .switch.sm::after{width:15px;height:15px}
+  .switch.sm[aria-checked=true]::after{left:18px}
+
+  .repo-table{width:100%;border-collapse:collapse;font-size:13px}
+  .repo-table th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink-3);font-weight:750;padding:10px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+  .repo-table td{padding:10px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+  .repo-table tr:last-child td{border-bottom:none}
+  .repo-name{font-weight:650;font-family:var(--mono);font-size:12.5px}
+  .repo-table td.ctr{text-align:center}
+  .repo-table select{padding:5px 8px;font-size:12.5px}
+
+  .btn-primary{background:var(--accent);color:#fff;border:none;border-radius:9px;padding:10px 18px;font-size:13.5px;font-weight:700;
+    display:inline-flex;align-items:center;gap:8px;box-shadow:0 1px 2px rgba(59,91,219,.3)}
+  .btn-primary:hover{background:#3350c9}
+  .btn-ghost{background:var(--surface);border:1px solid var(--border-strong);color:var(--ink-2);border-radius:9px;padding:10px 16px;font-size:13.5px;font-weight:650}
+  .save-row{display:flex;align-items:center;gap:12px;margin-top:6px}
+  .save-note{font-size:12.5px;color:var(--ink-3)}
+
+  /* ---------------- Harness ---------------- */
+  .harness-layout{display:grid;grid-template-columns:224px 1fr;gap:18px;align-items:start}
+  @media(max-width:900px){.harness-layout{grid-template-columns:1fr}}
+  .hlist{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:8px}
+  .hitem{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;background:none;border:none;border-radius:8px;padding:10px 12px}
+  .hitem .hn{font-weight:700;font-size:13.5px}
+  .hitem .hs{font-size:11.5px;color:var(--ink-3)}
+  .hitem.active{background:var(--accent-soft)}
+  .hitem.active .hn{color:var(--accent)}
+  .hitem.disabled{color:var(--ink-3);cursor:default;opacity:.7}
+  .hnote{font-size:12px;color:var(--ink-3);padding:10px 12px 4px;line-height:1.5}
+  .harness-form .card-box{margin-bottom:16px}
+  .hbanner{display:flex;gap:10px;align-items:flex-start;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 14px;margin:12px 18px 4px;font-size:12.5px;color:var(--ink-2);line-height:1.55}
+  .hbanner b{color:var(--ink)}
+  label.fldlabel{display:block;font-size:12.5px;font-weight:700;color:var(--ink-2);margin:14px 0 6px}
+  textarea.code{width:100%;min-height:184px;font-family:var(--mono);font-size:12.5px;line-height:1.65;padding:12px 14px;
+    border:1px solid var(--border-strong);border-radius:10px;background:var(--surface-2);color:var(--ink);resize:vertical}
+  .checkgrid{display:flex;flex-wrap:wrap;gap:8px 22px;padding:2px 0 4px}
+  .checkline{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600}
+  .checkline input{width:16px;height:16px;accent-color:var(--accent)}
+  .checkline.off{color:var(--ink-3);font-weight:500}
+  .checkline .banx{font-size:11px;color:var(--sev-c);background:var(--sev-c-bg);padding:1px 7px;border-radius:6px;font-weight:700}
+  .hgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:640px){.hgrid{grid-template-columns:1fr}}
+  .vlabel{font-size:12px;font-weight:800;letter-spacing:.2px;padding:2px 9px;border-radius:20px;display:inline-flex;align-items:center;gap:6px;margin-bottom:8px}
+  .vlabel.claude{background:var(--claude-bg);color:var(--claude)}
+  .vlabel.codex{background:var(--codex-bg);color:var(--codex)}
+  .row2{display:flex;gap:10px}
+  .row2 > div{flex:1}
+  .row2 label{display:block;font-size:11.5px;color:var(--ink-3);font-weight:600;margin-bottom:4px}
+  .row2 select{width:100%}
+  .pill-ro{font-size:11.5px;font-weight:700;color:var(--ok);background:var(--ok-bg);padding:3px 10px;border-radius:20px}
+
+  /* ---------------- Stubs (wiki / learning) ---------------- */
+  .soon-banner{display:flex;align-items:center;gap:14px;border:1px dashed var(--border-strong);border-radius:var(--radius);
+    padding:16px 18px;margin-bottom:22px;background:linear-gradient(180deg,#fff,var(--surface-2))}
+  .soon-banner .em{width:42px;height:42px;border-radius:11px;flex:none;display:grid;place-items:center;font-size:20px;background:var(--accent-soft)}
+  .soon-banner .t{font-weight:750;font-size:15px;display:flex;align-items:center;gap:9px}
+  .soon-banner .d{font-size:12.5px;color:var(--ink-3);margin-top:2px}
+  .badge-soon{font-size:10px;font-weight:800;letter-spacing:.4px;color:var(--wait);background:var(--wait-bg);padding:2px 9px;border-radius:20px}
+  .badge-exp{font-size:10px;font-weight:800;letter-spacing:.4px;color:var(--claude);background:var(--claude-bg);padding:2px 9px;border-radius:20px}
+
+  .wiki-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(258px,1fr));gap:14px}
+  .wiki-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:15px 16px;box-shadow:var(--shadow)}
+  .wiki-card .wt{font-weight:750;font-size:14px;margin-bottom:5px}
+  .wiki-card .wd{font-size:12.5px;color:var(--ink-2);line-height:1.55}
+  .wiki-card .wm{display:flex;gap:8px;margin-top:11px;flex-wrap:wrap}
+  .wtag{font-size:11px;font-weight:650;padding:2px 8px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);color:var(--ink-2)}
+  .wtag.hot{color:var(--sev-h);background:var(--sev-h-bg);border-color:transparent}
+  .wtag.sec{color:var(--sev-c);background:var(--sev-c-bg);border-color:transparent}
+  .wiki-card.graph{display:grid;place-items:center;text-align:center;color:var(--ink-3);border-style:dashed;min-height:120px}
+
+  .stat-mini-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+  .stat-mini{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 16px;min-width:130px}
+  .stat-mini .n{font-size:22px;font-weight:800;letter-spacing:-.5px}
+  .stat-mini .l{font-size:12px;color:var(--ink-3);font-weight:600;margin-top:2px}
+  .learn-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow);margin-bottom:12px;display:flex;gap:12px;align-items:flex-start}
+  .learn-card .lg{width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-size:15px}
+  .learn-card .lt{font-weight:700;font-size:13.5px}
+  .learn-card .ld{font-size:12.5px;color:var(--ink-2);margin-top:2px;line-height:1.55}
+
+  /* ---------------- Toast ---------------- */
+  .toast{position:fixed;left:calc(50% + var(--sidebar-w)/2);bottom:28px;transform:translateX(-50%) translateY(20px);
+    opacity:0;pointer-events:none;background:#1c2230;color:#fff;padding:11px 18px;border-radius:10px;
+    font-size:13px;font-weight:600;box-shadow:var(--shadow-hi);transition:opacity .2s, transform .2s;z-index:100;max-width:80vw}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ========== SIDEBAR (목록) ========== -->
+  <aside class="sidebar">
+    <div class="side-logo">
+      <span class="mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+      </span>
+      <span>Almighty<span class="sub">PR Review · local</span></span>
+    </div>
+
+    <div class="nav-label">워크스페이스</div>
+    <nav class="nav" aria-label="주 메뉴">
+      <button class="nav-item active" data-view="review">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
+        리뷰 대시보드 <span class="nb">8</span>
+      </button>
+      <button class="nav-item" data-view="harness">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>
+        하네스 편집
+      </button>
+      <button class="nav-item" data-view="settings">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+        설정
+      </button>
+    </nav>
+
+    <div class="nav-label">확장 (예정)</div>
+    <nav class="nav" aria-label="확장 메뉴">
+      <button class="nav-item" data-view="wiki">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+        LLM 위키 <span class="soon">SOON</span>
+      </button>
+      <button class="nav-item" data-view="learning">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="3.2"/></svg></span>
+        자가 학습 <span class="soon">EXP</span>
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <span><span class="dot-live" aria-hidden="true"></span>watcher 활성 · 4 레포</span>
+      <span>2벤더 · Claude + Codex</span>
+      <span>solo · 내 구독 · API 미사용</span>
+    </div>
+  </aside>
+
+  <!-- ========== CONTENT ========== -->
+  <div class="content">
+
+    <!-- ---------- 리뷰 대시보드 (검증된 drill 임베드) ---------- -->
+    <section class="view view-review active" data-view="review" aria-label="리뷰 대시보드">
+      <iframe class="review-frame" src="./variant-drill.html" title="리뷰 대시보드"></iframe>
+    </section>
+
+    <!-- ---------- 설정 ---------- -->
+    <section class="view" data-view="settings" aria-label="설정">
+      <div class="page">
+        <h1 class="page-h">설정</h1>
+        <p class="page-sub">전역 기본값과 레포별 리뷰 동작을 관리합니다.</p>
+
+        <div class="card-box">
+          <h2>전역 기본값</h2>
+          <div class="card-body">
+            <div class="field">
+              <div><div class="fl">기본 effort</div><div class="fh">벤더 리뷰의 기본 reasoning 강도 (레포별로 재정의 가능)</div></div>
+              <select><option>low</option><option selected>medium</option><option>high</option><option>xhigh</option></select>
+            </div>
+            <div class="field">
+              <div><div class="fl">동시 리뷰 수 (N)</div><div class="fh">세마포어 상한 — rate-limit 보호</div></div>
+              <input type="number" value="2" min="1" max="8" />
+            </div>
+            <div class="field">
+              <div><div class="fl">폴링 간격</div><div class="fh">새 PR·새 head sha 감지 주기 (초)</div></div>
+              <input type="number" value="60" min="15" step="5" />
+            </div>
+            <div class="field">
+              <div><div class="fl">승인 게이트</div><div class="fh">켜면 내가 승인한 findings만 GitHub에 포스팅</div></div>
+              <button class="switch" role="switch" aria-checked="true" aria-label="승인 게이트" onclick="toggleSwitch(this)"></button>
+            </div>
+            <div class="field">
+              <div><div class="fl">사전 스크리닝 모델</div><div class="fh">diff만 보고 변경 복잡도를 가볍게 평가</div></div>
+              <select><option selected>Claude haiku (low)</option><option>Codex (low)</option><option>사용 안 함</option></select>
+            </div>
+            <div class="field">
+              <div><div class="fl">풀리뷰 게이트 임계</div><div class="fh">이 복잡도 이상만 2벤더 풀리뷰 실행</div></div>
+              <select><option>complex만</option><option selected>moderate 이상</option><option>전부 리뷰</option></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-box">
+          <h2>레포별 설정</h2>
+          <div class="card-body" style="padding:6px 14px 12px">
+            <table class="repo-table">
+              <thead><tr>
+                <th>레포</th><th>트리거</th><th>effort</th><th class="ctr">Claude</th><th class="ctr">Codex</th><th class="ctr">병합</th><th class="ctr">auto-post</th><th>하네스</th>
+              </tr></thead>
+              <tbody id="repoRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="save-row">
+          <button class="btn-primary" onclick="toast('설정이 저장되었습니다 (목업)')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+            저장
+          </button>
+          <span class="save-note">변경사항은 다음 폴링/리뷰부터 적용됩니다.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 하네스 편집 ---------- -->
+    <section class="view" data-view="harness" aria-label="하네스 편집">
+      <div class="page">
+        <h1 class="page-h">하네스 편집</h1>
+        <p class="page-sub">리뷰 워커 전용 실행 환경을 웹에서 직접 편집합니다.</p>
+
+        <div class="harness-layout">
+          <div class="hlist">
+            <button class="hitem active"><span class="hn">default</span><span class="hs">global · 두 벤더 공유</span></button>
+            <button class="hitem disabled" disabled><span class="hn">+ 새 하네스</span><span class="hs">레포별·상황별 (추후)</span></button>
+            <div class="hnote">v1은 <b>default</b> 하나를 Claude·Codex가 공유합니다. 레포별/상황별/벤더별 분리는 추후.</div>
+          </div>
+
+          <div class="harness-form">
+            <div class="card-box">
+              <h2>⚙️ default 하네스</h2>
+              <div class="hbanner">
+                <span>🔒</span>
+                <span><b>전역 프로파일 미상속.</b> 로컬 <code>~/.claude</code>·<code>~/.codex</code>·CLAUDE.md·skills·MCP를 물려받지 않고, 이 하네스 설정만으로 격리 구동합니다.</span>
+              </div>
+              <div class="card-body" style="padding:8px 18px 18px">
+                <label class="fldlabel" for="hprompt">리뷰 지침 (system prompt)</label>
+                <textarea id="hprompt" class="code" spellcheck="false">당신은 이 저장소의 시니어 코드 리뷰어입니다.
+주어진 PR diff와 레포 코드를 읽고, 실제 결함(버그·보안·성능)과 명확한 개선점만 보고하세요.
+
+원칙
+- 근거 없는 추측/스타일 취향은 배제. 재현 가능한 문제 위주.
+- 각 finding은 {파일:라인, severity, category, 한 줄 claim, rationale} 형식으로.
+- 확신이 낮으면 confidence를 낮춰 표기.
+- 저장소를 수정하지 말 것(read-only). 포스팅은 서버가 승인 후 수행.</textarea>
+
+                <label class="fldlabel">툴 allowlist (read-only)</label>
+                <div class="checkgrid">
+                  <label class="checkline"><input type="checkbox" checked />Read</label>
+                  <label class="checkline"><input type="checkbox" checked />Grep</label>
+                  <label class="checkline"><input type="checkbox" checked />Glob</label>
+                  <label class="checkline"><input type="checkbox" checked />gh (읽기)</label>
+                  <label class="checkline off"><input type="checkbox" disabled />Bash 쓰기 <span class="banx">차단</span></label>
+                  <label class="checkline off"><input type="checkbox" disabled />git push / merge <span class="banx">차단</span></label>
+                </div>
+
+                <label class="fldlabel">MCP 서버</label>
+                <div style="font-size:12.5px;color:var(--ink-3)">없음 (최소 격리) — 컨텍스트 주입은 B단계에서 ContextProvider로 추가.</div>
+
+                <label class="fldlabel">벤더별 모델 / effort</label>
+                <div class="hgrid">
+                  <div>
+                    <span class="vlabel claude"><span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block"></span>Claude</span>
+                    <div class="row2">
+                      <div><label>모델</label><select><option selected>sonnet</option><option>opus</option><option>haiku</option></select></div>
+                      <div><label>effort</label><select><option>high</option><option selected>xhigh</option></select></div>
+                    </div>
+                  </div>
+                  <div>
+                    <span class="vlabel codex"><span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block"></span>Codex</span>
+                    <div class="row2">
+                      <div><label>모델</label><select><option selected>gpt-5.5</option><option>gpt-5.5-mini</option></select></div>
+                      <div><label>effort</label><select><option selected>high</option><option>medium</option></select></div>
+                    </div>
+                  </div>
+                </div>
+
+                <label class="fldlabel">샌드박스</label>
+                <span class="pill-ro">read-only (고정)</span>
+
+                <div class="save-row" style="margin-top:18px">
+                  <button class="btn-primary" onclick="toast('하네스 &quot;default&quot; 저장됨 · 전역 프로파일 미상속 (목업)')">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+                    하네스 저장
+                  </button>
+                  <button class="btn-ghost" onclick="toast('변경 취소 (목업)')">되돌리기</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- LLM 위키 (스텁) ---------- -->
+    <section class="view" data-view="wiki" aria-label="LLM 위키">
+      <div class="page">
+        <h1 class="page-h">LLM 위키</h1>
+        <p class="page-sub">리뷰가 쌓일수록 자라는 팀 지식베이스.</p>
+        <div class="soon-banner">
+          <span class="em">📚</span>
+          <div>
+            <div class="t">곧 제공 <span class="badge-soon">C 단계 예정</span></div>
+            <div class="d">승인/기각된 리뷰에서 규칙을 추출해 누적하고, Graphify식 지식 그래프로 연결합니다. 아래는 예시 미리보기입니다.</div>
+          </div>
+        </div>
+        <div class="wiki-grid">
+          <div class="wiki-card"><div class="wt">async 함수엔 await 필수</div><div class="wd">비동기 콜백/코루틴에서 await 누락 시 유실·경쟁 조건. 리뷰에서 반복 확인.</div><div class="wm"><span class="wtag hot">12회 지적</span><span class="wtag">PR 8건</span></div></div>
+          <div class="wiki-card"><div class="wt">worktree는 finally에서 정리</div><div class="wd">리뷰 실패 경로에서도 격리 worktree를 반드시 제거해 디스크 누적 방지.</div><div class="wm"><span class="wtag">5회</span><span class="wtag">bug</span></div></div>
+          <div class="wiki-card"><div class="wt">JWT는 exp 검증 필수</div><div class="wd">서명만 확인하고 만료를 검증하지 않으면 무기한 접근. 인증 경계 필수 점검.</div><div class="wm"><span class="wtag sec">security</span><span class="wtag">3회</span></div></div>
+          <div class="wiki-card"><div class="wt">N+1 쿼리 → 배치/조인</div><div class="wd">루프 내 개별 조회를 in-clause/join으로 단일화. 리포트·목록 경로 빈발.</div><div class="wm"><span class="wtag">perf</span><span class="wtag">7회</span></div></div>
+          <div class="wiki-card"><div class="wt">재시도엔 full-jitter</div><div class="wd">고정 배수 백오프는 thundering herd 유발. rate-limit 복구 시 필수.</div><div class="wm"><span class="wtag">4회</span></div></div>
+          <div class="wiki-card graph"><div><div style="font-size:24px">🕸️</div>Graphify 지식 그래프<br><span style="font-size:11.5px">규칙·파일·서브시스템 연결 (예정)</span></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 자가 학습 (스텁) ---------- -->
+    <section class="view" data-view="learning" aria-label="자가 학습">
+      <div class="page">
+        <h1 class="page-h">자가 학습</h1>
+        <p class="page-sub">내 승인/기각과 Slack 논의로 스스로 배우는 리뷰 루프.</p>
+        <div class="soon-banner">
+          <span class="em">✨</span>
+          <div>
+            <div class="t">실험 단계 <span class="badge-exp">EXPERIMENTAL</span></div>
+            <div class="d">트리아지 신호(승인/기각/수정)와 Slack 스레드를 학습 신호로 삼아 리뷰 규칙·프롬프트를 진화(GEPA)시킵니다. 아래는 예시입니다.</div>
+          </div>
+        </div>
+        <div class="stat-mini-row">
+          <div class="stat-mini"><div class="n">68%</div><div class="l">findings 승인율</div></div>
+          <div class="stat-mini"><div class="n">23</div><div class="l">누적 학습 규칙</div></div>
+          <div class="stat-mini"><div class="n">await 누락</div><div class="l">최다 반복 지적</div></div>
+          <div class="stat-mini"><div class="n">style</div><div class="l">최다 기각 분류</div></div>
+        </div>
+        <div class="learn-card"><span class="lg">↓</span><div><div class="lt">style 노이즈 자동 강등 제안</div><div class="ld">style findings가 반복적으로 기각됨(승인율 9%) → 기본 severity를 낮추거나 표시를 접는 규칙을 제안합니다.</div></div></div>
+        <div class="learn-card"><span class="lg">↑</span><div><div class="lt">security 우선순위 상향 유지</div><div class="ld">security findings 승인율 100% → 상단 고정·강조 규칙을 유지합니다.</div></div></div>
+        <div class="learn-card"><span class="lg">#</span><div><div class="lt">Slack #code-review 반영 (예정)</div><div class="ld">"worktree 정리" 관련 스레드 논의를 규칙 강화 신호로 흡수. Slack 연동 후 활성화됩니다.</div></div></div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+/* ---------- 뷰 전환 (확장: nav-item + section 추가만으로) ---------- */
+function switchView(v){
+  document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
+  document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active', s.dataset.view===v));
+  window.scrollTo(0,0);
+}
+document.querySelectorAll('.nav-item[data-view]').forEach(b=>{
+  if(!b.disabled) b.onclick=()=>switchView(b.dataset.view);
+});
+
+/* ---------- 스위치 토글 ---------- */
+function toggleSwitch(el){
+  el.setAttribute('aria-checked', el.getAttribute('aria-checked')==='true' ? 'false' : 'true');
+}
+
+/* ---------- 토스트 ---------- */
+let _tt;
+function toast(msg){
+  const t=document.getElementById('toast');
+  t.innerHTML=msg;
+  t.classList.add('show');
+  clearTimeout(_tt);
+  _tt=setTimeout(()=>t.classList.remove('show'),2000);
+}
+
+/* ---------- 레포별 설정 테이블 ---------- */
+const REPO_ROWS=[
+  {name:"cashdoc-api-server", trigger:"auto",   effort:"high",   claude:true,  codex:true,  merge:false, auto:false},
+  {name:"Yeogiya-API-Server", trigger:"auto",   effort:"medium", claude:true,  codex:true,  merge:true,  auto:false},
+  {name:"cashreview-api",     trigger:"auto",   effort:"high",   claude:true,  codex:false, merge:false, auto:false},
+  {name:"smartdoctor-api",    trigger:"manual", effort:"medium", claude:true,  codex:true,  merge:false, auto:false},
+];
+function sel(opts,cur){return opts.map(o=>`<option ${o===cur?'selected':''}>${o}</option>`).join('');}
+function sw(on){return `<button class="switch sm" role="switch" aria-checked="${on}" onclick="toggleSwitch(this)"></button>`;}
+document.getElementById('repoRows').innerHTML=REPO_ROWS.map(r=>`
+  <tr>
+    <td class="repo-name">${r.name}</td>
+    <td><select>${sel(['auto','manual'],r.trigger)}</select></td>
+    <td><select>${sel(['low','medium','high','xhigh'],r.effort)}</select></td>
+    <td class="ctr">${sw(r.claude)}</td>
+    <td class="ctr">${sw(r.codex)}</td>
+    <td class="ctr">${sw(r.merge)}</td>
+    <td class="ctr">${sw(r.auto)}</td>
+    <td><select><option selected>default</option></select></td>
+  </tr>`).join('');
+</script>
+</body>
+</html>

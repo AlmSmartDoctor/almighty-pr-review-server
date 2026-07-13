@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 
+from server.context.base import ContextRequest
+
 
 class NoOpContextProvider:
-    """v1 no-op. B에서 Jira/DB/Graphify 주입 지점."""
+    """v1 no-op. B에서 CompositeContextProvider(레지스트리)로 대체."""
 
-    def gather(self, *, repo: str, pr_number: int) -> str:
+    def gather(self, *, req: ContextRequest) -> str:
         return ""
 
 

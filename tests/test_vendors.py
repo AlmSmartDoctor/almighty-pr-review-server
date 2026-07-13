@@ -70,6 +70,25 @@ def test_codex_adapter_parses_findings(tmp_path):
     assert args[:2] == ["codex", "exec"]
     assert "--skip-git-repo-check" in args
     assert "--sandbox" in args
+    assert "--model" not in args  # codex_model="" → codex 자체 기본 모델
+
+
+def test_codex_adapter_passes_model_when_set(tmp_path):
+    hp = HarnessProfile.load("default")
+    hp.codex_model = "gpt-5.4"
+    runner = fake_runner(FAKE_OUT)
+    adapter = CodexAdapter(runner=runner)
+    asyncio.run(
+        adapter.review(
+            prompt="리뷰해",
+            workdir=tmp_path,
+            harness=hp,
+            runtime_dir=str(tmp_path / "rt"),
+        )
+    )
+    args = runner.calls[0]["args"]
+    assert args[args.index("--model") + 1] == "gpt-5.4"
+    assert args[-1] != "gpt-5.4"  # prompt는 positional로 항상 마지막
 
 
 def test_default_runner_timeout_raises_vendor_timeout():

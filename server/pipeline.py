@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from server.config import DEFAULT_EFFORT
+from server.config import DEFAULT_EFFORT, CONTEXT_GATHER_TIMEOUT_SEC
 from server.repos import (
     finding_repo,
     prescreen_repo,
@@ -15,7 +15,12 @@ from server.repos import (
 )
 from server.review.harness import HarnessProfile
 from server.review.merge import deterministic_merge
-from server.review.prescreen import PreScreenResult
+from server.review.prescreen import (
+    MAX_INLINE_DIFF_CHARS,
+    PreScreenResult,
+    diff_too_large_reason,
+)
+from server.context.base import ContextRequest, redact_secrets
 from server.review.runner import RunnerPool
 from server.seams import NoOpContextProvider
 
@@ -31,7 +36,7 @@ class PipelineError(RuntimeError):
 @dataclass
 class PipelineDeps:
     gh_diff: Callable[[str, int], str]
-    worktree: Callable  # contextmanager(repo, sha) -> path
+    worktree: Callable  # contextmanager(repo, sha, pr_number) -> path
     adapters: list  # vendor adapters (.vendor, async .review())
     prescreen: Callable[
         [str, str], tuple
@@ -67,6 +72,10 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
 
 async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     hp = HarnessProfile.load(repo["harness_name"])
+    # ★ 설정에서 고른 벤더별 모델로 하네스 기본값 덮어씀
+    hp.model = settings["review_model"]  # Claude
+    hp.codex_model = settings["codex_model"]  # Codex ("" = codex 자체 기본)
+    prescreen_model = settings["prescreen_model"]
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
     # sync subprocess(gh/prescreen)를 to_thread로 오프로드 → 이벤트루프 비블록
@@ -74,7 +83,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
 
     # 2. Pre-screen
     complexity, score, reason = await asyncio.to_thread(
-        deps.prescreen, diff, hp.prescreen_model
+        deps.prescreen, diff, prescreen_model
     )
     ps = PreScreenResult(complexity, score, reason)
     decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
@@ -82,7 +91,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         conn,
         pr_id=pr["id"],
         head_sha=pr["head_sha"],
-        model=hp.prescreen_model,
+        model=prescreen_model,
         complexity=complexity,
         score=score,
         reason=reason,
@@ -93,6 +102,11 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         review_repo.finish_run(conn, run_id, "canceled")
         pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
         return
+    if len(diff) > MAX_INLINE_DIFF_CHARS:
+        review_repo.finish_run(
+            conn, run_id, "canceled", error=diff_too_large_reason(diff)
+        )
+        return
 
     # ★개정 (codex v5 [LOW]): enabled 벤더가 0개면 리뷰할 게 없다 → worktree도
     # 만들지 않고 canceled로 마감(reviewed로 오판하지 않음). trigger/설정 단계에서
@@ -102,9 +116,52 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         review_repo.finish_run(conn, run_id, "canceled", error="no vendor enabled")
         return
 
+    # 컨텍스트 수집(B-INV-1: 부모 프로세스·게이트 통과 후·worktree 이전).
+    # B-INV-8: to_thread+총 타임아웃, 실패/초과는 ''로 degrade → 리뷰 절대 차단 안 함.
+    req = ContextRequest(
+        repo=repo["full_name"],
+        pr_number=pr["number"],
+        title=pr["title"] or "",
+        author=pr["author"] or "",
+        head_ref=(pr["head_ref"] if "head_ref" in pr.keys() else "") or "",
+        base_ref=pr["base_ref"] or "",
+        body=(pr["body"] if "body" in pr.keys() else "") or "",
+    )
+    degraded = False
+    context_results = []
+    try:
+        context_text = await asyncio.wait_for(
+            asyncio.to_thread(deps.context.gather, req=req),
+            timeout=CONTEXT_GATHER_TIMEOUT_SEC,
+        )
+        context_results = getattr(deps.context, "results", [])
+    except Exception as e:  # B-INV-4/8: degrade — .results는 백그라운드 스레드가 변형 중일 수 있어 신뢰 안 함
+        context_text = ""
+        degraded = True
+        print(
+            f"[pipeline] context gather degraded: "
+            f"{redact_secrets(f'{type(e).__name__}: {e}')}"
+        )
+
+    # 런당 외부 컨텍스트 감사 저장. error는 meta 조립에서도 redact(defense-in-depth, B-INV-4).
+    context_meta = {
+        "sources": [
+            {
+                "provider": r.provider,
+                "status": r.status,
+                "chars": len(r.text or ""),
+                "error": redact_secrets(r.error) if r.error else None,
+            }
+            for r in context_results
+        ]
+    }
+    if degraded:
+        context_meta["degraded"] = True
+    review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
+
     # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리
-    prompt = _build_prompt(pr, diff, deps.context)
-    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"]) as wt:
+    prompt = _build_prompt(pr, diff, context_text)
+    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
             vr_ids = {
@@ -201,9 +258,8 @@ def _persist(conn, run_id, items):
         )
 
 
-def _build_prompt(pr, diff, context) -> str:
-    ctx = context.gather(repo="", pr_number=pr["number"])  # v1 = ""
-    ctx_block = f"\n\n## 외부 컨텍스트\n{ctx}" if ctx else ""
+def _build_prompt(pr, diff, context_text: str) -> str:
+    ctx_block = f"\n\n## 외부 컨텍스트\n{context_text}" if context_text else ""
     return (
         f"# PR #{pr['number']}: {pr['title']}\n작성자: {pr['author']}\n"
         f"{ctx_block}\n\n## Diff\n```diff\n{diff}\n```\n"

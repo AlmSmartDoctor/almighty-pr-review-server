@@ -1,4 +1,4 @@
-from server.review.prescreen import prescreen, PreScreenResult
+from server.review.prescreen import MAX_INLINE_DIFF_CHARS, prescreen, PreScreenResult
 
 
 FAKE = (
@@ -52,3 +52,14 @@ def test_prescreen_normalizes_unknown_complexity():
     j = '```json\n{"complexity":"huge","score":0.9,"reason":"x"}\n```'
     res = prescreen(diff="x", model="m", runner=lambda *a, **k: j)
     assert res.decide(threshold="moderate") == "review"  # no KeyError at gate time
+
+
+def test_prescreen_skips_llm_when_diff_too_large():
+    def runner(*args, **kwargs):
+        raise AssertionError("runner should not be called")
+
+    res = prescreen(diff="x" * (MAX_INLINE_DIFF_CHARS + 1), model="m", runner=runner)
+
+    assert res.complexity == "complex"
+    assert res.score == 1.0
+    assert "diff too large" in res.reason
