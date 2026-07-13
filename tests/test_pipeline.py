@@ -340,6 +340,44 @@ def test_pipeline_persists_gathered_context(db):
     )
 
 
+def test_pipeline_passes_head_ref_and_body_to_context_request(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=22,
+        title="t",
+        author="a",
+        head_sha="s22",
+        base_ref="main",
+        url="u",
+        head_ref="feature/PROJ-1",
+        body="Closes PROJ-1",
+    )
+
+    class SpyCtx:
+        def __init__(self):
+            self.results = []
+            self.captured_req = None
+
+        def gather(self, *, req):
+            self.captured_req = req
+            return ""
+
+    spy = SpyCtx()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=spy,
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert spy.captured_req.head_ref == "feature/PROJ-1"
+    assert spy.captured_req.body == "Closes PROJ-1"
+
+
 def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
     import json
     from server.repos import settings_repo

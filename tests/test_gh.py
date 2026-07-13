@@ -31,6 +31,8 @@ def test_list_open_prs_parses_json():
                 "url": "https://x/7",
                 "state": "OPEN",
                 "createdAt": "2026-07-07T11:22:33Z",
+                "headRefName": "feature/PROJ-1",
+                "body": "Closes PROJ-1",
             }
         ]
     )
@@ -45,7 +47,11 @@ def test_list_open_prs_parses_json():
     assert prs[0].head_sha == "abc"
     assert prs[0].author == "kim"
     assert prs[0].created_at == "2026-07-07T11:22:33Z"
+    assert prs[0].head_ref == "feature/PROJ-1"
+    assert prs[0].body == "Closes PROJ-1"
     assert any("createdAt" in arg for arg in runner.calls[0][0])
+    assert any("headRefName" in arg for arg in runner.calls[0][0])
+    assert any("body" in arg for arg in runner.calls[0][0])
 
 
 def test_diff_returns_text():
@@ -93,7 +99,14 @@ def test_edit_comment_patches_in_place():
 
 def test_env_prefers_gh_token_then_github_token_then_pat():
     for env, expected in [
-        ({"GH_TOKEN": "gh", "GITHUB_TOKEN": "gt", "GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}, "gh"),
+        (
+            {
+                "GH_TOKEN": "gh",
+                "GITHUB_TOKEN": "gt",
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "pat",
+            },
+            "gh",
+        ),
         ({"GITHUB_TOKEN": "gt", "GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}, "gt"),
         ({"GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}, "pat"),
     ]:

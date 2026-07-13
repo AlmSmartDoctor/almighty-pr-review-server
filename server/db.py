@@ -124,6 +124,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _ensure_column(conn, "pull_request", "created_at", "TEXT")
+    _ensure_column(conn, "pull_request", "head_ref", "TEXT")
+    _ensure_column(conn, "pull_request", "body", "TEXT")
     _ensure_column(
         conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
     )

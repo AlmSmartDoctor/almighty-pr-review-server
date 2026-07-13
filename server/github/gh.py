@@ -14,6 +14,8 @@ class PrInfo:
     url: str
     state: str
     created_at: str | None = None
+    head_ref: str = ""
+    body: str = ""
 
 
 def _default_runner(args: list[str], **kw) -> str:
@@ -79,7 +81,9 @@ class GhClient:
             return self._run(args, env=env)
         except subprocess.CalledProcessError as e:
             stderr = _redact(e.stderr, env)
-            stdout = _redact(getattr(e, "stdout", None) or getattr(e, "output", None), env)
+            stdout = _redact(
+                getattr(e, "stdout", None) or getattr(e, "output", None), env
+            )
             status = _http_status(f"{stderr}\n{stdout}")
             message = stderr.strip() or stdout.strip() or f"gh {kind} failed"
             raise GitHubCliError(
@@ -101,7 +105,8 @@ class GhClient:
                 "--state",
                 "open",
                 "--json",
-                "number,title,author,headRefOid,baseRefName,url,state,createdAt",
+                "number,title,author,headRefOid,baseRefName,url,state,createdAt,"
+                "headRefName,body",
             ],
             kind="list_open_prs",
         )
@@ -115,12 +120,16 @@ class GhClient:
                 url=d.get("url", ""),
                 state=d.get("state", "OPEN").lower(),
                 created_at=d.get("createdAt"),
+                head_ref=d.get("headRefName", ""),
+                body=d.get("body", ""),
             )
             for d in json.loads(out)
         ]
 
     def diff(self, repo: str, number: int) -> str:
-        return self._call(["gh", "pr", "diff", str(number), "--repo", repo], kind="diff")
+        return self._call(
+            ["gh", "pr", "diff", str(number), "--repo", repo], kind="diff"
+        )
 
     def preflight_user(self) -> dict:
         out = self._call(

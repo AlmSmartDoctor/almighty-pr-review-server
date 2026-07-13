@@ -63,6 +63,42 @@ def test_upsert_pr_stores_and_updates_created_at(db):
     assert pr_repo.get(db, pid)["created_at"] == "2026-07-08T11:22:33Z"
 
 
+def test_upsert_pr_stores_head_ref_and_body(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="aaa",
+        base_ref="main",
+        url="u",
+        head_ref="feature/PROJ-1",
+        body="Closes PROJ-1",
+    )
+    row = pr_repo.get(db, pid)
+    assert row["head_ref"] == "feature/PROJ-1"
+    assert row["body"] == "Closes PROJ-1"
+
+
+def test_upsert_pr_without_head_ref_and_body_defaults_empty(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=8,
+        title="t",
+        author="a",
+        head_sha="aaa",
+        base_ref="main",
+        url="u",
+    )
+    row = pr_repo.get(db, pid)
+    assert row["head_ref"] == ""
+    assert row["body"] == ""
+
+
 def test_finding_status_transition(db):
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(
