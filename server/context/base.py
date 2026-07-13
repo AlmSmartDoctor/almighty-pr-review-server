@@ -1,8 +1,23 @@
+import re
 import secrets
 from dataclasses import dataclass
 from typing import Protocol
 
 from server import config
+
+# b-side 경로 추출. git은 공백·비ASCII(core.quotepath) 경로를 "b/…"로 인용하므로
+# 양쪽 형태를 모두 수용한다. 인용형은 octal escape가 남지만 ASCII 토큰은 보존된다.
+_DIFF_GIT_RE = re.compile(r'^diff --git .* "?b/(.+?)"?$', re.MULTILINE)
+
+
+def parse_changed_files(diff: str) -> tuple:
+    """unified diff(gh pr diff / gh api compare 공통)에서 변경 파일 경로를 순서·중복제거로 추출."""
+    seen = []
+    for m in _DIFF_GIT_RE.finditer(diff or ""):
+        p = m.group(1).strip()
+        if p and p not in seen:
+            seen.append(p)
+    return tuple(seen)
 
 
 @dataclass(frozen=True)

@@ -152,6 +152,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "repo", "context_graphify_on", "INTEGER")
     _ensure_column(conn, "repo", "static_context_path", "TEXT")
     _ensure_column(conn, "repo", "jira_project_keys", "TEXT")
+    # DBSchema 정적 소스: 레포에 체크인된 DDL 덤프 경로(비밀 아님, root 하위 봉쇄).
+    _ensure_column(conn, "repo", "db_schema_path", "TEXT")
     # 고위험 SINGLE finding 반박 패스 토글 — 전역 기본 + per-repo override(NULL=상속).
     _ensure_column(
         conn, "app_settings", "verify_singles_on", "INTEGER NOT NULL DEFAULT 0"

@@ -415,6 +415,35 @@ def test_pipeline_passes_head_ref_and_body_to_context_request(db):
     assert spy.captured_req.body == "Closes PROJ-1"
 
 
+def test_pipeline_populates_changed_files_from_diff(db):
+    _, pid = _seed_pr(db, number=74, head_sha="s74")
+
+    class SpyCtx:
+        def __init__(self):
+            self.results = []
+            self.captured_req = None
+
+        def gather(self, *, req):
+            self.captured_req = req
+            return ""
+
+    spy = SpyCtx()
+    diff = (
+        "diff --git a/src/models/user.py b/src/models/user.py\n@@ -1 +1 @@\n-a\n+b\n"
+        "diff --git a/db/schema.sql b/db/schema.sql\n@@ -1 +1 @@\n-c\n+d\n"
+    )
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=spy,
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert spy.captured_req.changed_files == ("src/models/user.py", "db/schema.sql")
+
+
 def test_pipeline_normalizes_null_head_ref_and_body(db):
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(

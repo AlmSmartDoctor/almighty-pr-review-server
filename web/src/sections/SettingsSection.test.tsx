@@ -224,6 +224,13 @@ test("edits per-repo static_context_path and jira_project_keys", async () => {
   await waitFor(() =>
     expect(patchRepo).toHaveBeenCalledWith(7, { jira_project_keys: "PROJ,ABC" }),
   );
+
+  const dbInput = screen.getByRole("textbox", { name: "acme/api DB 스키마 경로" });
+  fireEvent.change(dbInput, { target: { value: "db/structure.sql" } });
+  fireEvent.blur(dbInput);
+  await waitFor(() =>
+    expect(patchRepo).toHaveBeenCalledWith(7, { db_schema_path: "db/structure.sql" }),
+  );
 });
 
 test("repo harness select is populated from the harness list", async () => {

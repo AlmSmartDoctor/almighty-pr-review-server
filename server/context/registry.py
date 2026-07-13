@@ -69,8 +69,15 @@ def build_context_provider(repo, settings):
     if _effective(repo, settings, "context_db_schema_on"):
         try:
             from server.context.db_schema_provider import DBSchemaProvider
+            from server.context.db_schema_source import file_schema_source
 
-            providers.append(DBSchemaProvider())
+            db_schema_path = _ref(repo, "db_schema_path")
+            source = (
+                file_schema_source(path=db_schema_path, root=_ref(repo, "local_path"))
+                if db_schema_path
+                else None
+            )
+            providers.append(DBSchemaProvider(schema_source=source))
         except Exception as e:  # never raise
             print(f"[context] db_schema provider skipped: {redact_secrets(str(e))}")
     if _effective(repo, settings, "context_graphify_on"):

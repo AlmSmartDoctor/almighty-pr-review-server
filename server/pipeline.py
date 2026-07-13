@@ -22,7 +22,7 @@ from server.review.prescreen import (
     PreScreenResult,
     diff_too_large_reason,
 )
-from server.context.base import ContextRequest, redact_secrets
+from server.context.base import ContextRequest, parse_changed_files, redact_secrets
 from server.context.registry import _effective
 from server.review.runner import RunnerPool
 from server.review.verify import VerifyContext
@@ -150,6 +150,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         head_ref=(pr["head_ref"] if "head_ref" in pr.keys() else "") or "",
         base_ref=pr["base_ref"] or "",
         body=(pr["body"] if "body" in pr.keys() else "") or "",
+        changed_files=parse_changed_files(diff),
     )
     degraded = False
     context_results = []

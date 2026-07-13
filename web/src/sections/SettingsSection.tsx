@@ -60,6 +60,7 @@ type Repo = {
   context_graphify_on?: number | null;
   static_context_path?: string | null;
   jira_project_keys?: string | null;
+  db_schema_path?: string | null;
 };
 
 const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
@@ -421,6 +422,17 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
             value={repo.jira_project_keys ?? ""}
             onChange={(e) => onLocalChange({ jira_project_keys: e.target.value })}
             onBlur={(e) => onPatch({ jira_project_keys: e.target.value })}
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="w-12 shrink-0">DB스키마</span>
+          <Input
+            aria-label={`${repo.full_name} DB 스키마 경로`}
+            className="h-7 min-w-0 text-[11px]"
+            placeholder="레포 내 schema.sql 경로"
+            value={repo.db_schema_path ?? ""}
+            onChange={(e) => onLocalChange({ db_schema_path: e.target.value })}
+            onBlur={(e) => onPatch({ db_schema_path: e.target.value })}
           />
         </label>
       </div>

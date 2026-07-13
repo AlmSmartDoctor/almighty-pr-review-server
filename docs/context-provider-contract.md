@@ -13,11 +13,12 @@
 - **금지: atlassian MCP OAuth 재사용.** 이유: 이 서버의 벤더 하네스는 mcpOAuth(atlassian/datadog/github)를 제외한다(참조: `docs/vendor-cli-contract.md`). Jira 접근은 반드시 전용 API 토큰을 쓴다.
 - 이슈키 추출은 PR의 head_ref → title → body 순으로 정규식 `[A-Z][A-Z0-9]+-\d+` (base_ref는 파싱하지 않는다).
 
-## 사내 DB 스키마 (B9, 유예)
+## 사내 DB 스키마 (B9)
 
-- `~/.claude/db-connections.yml`에 인라인 자격이 존재하나 (a) 다수 커넥션이 SSM 터널 게이트 뒤에 있고 (b) 프로덕션 RDS가 섞여 있으며 (c) "변경된 diff → 관련 테이블" 선택 규칙이 미정 → **B9로 유예**.
-- 접근 시엔 db-inspector 계열 **read-only** 경로만 사용하고 **프로덕션 RDS raw 접속 금지**. 터널 미가동 시 빈 컨텍스트로 degrade.
-- 인터페이스: `DBSchemaProvider`는 `schema_source(req) -> str`를 주입받는다 — 변경 파일(`req.changed_files`)로부터 관련 테이블의 DDL을 돌려주는 함수다. "변경 파일 경로 → 관련 테이블" 매핑 규칙과 read-only 접근 경로(db-inspector 스타일, **프로덕션 RDS raw 접속 없음**)의 구체 구현은 read-only DB 접근이 provisioning될 때까지 유예한다. 소스 미주입 시 `status="skipped"`; 주입된 소스가 실패/도달 불가하면 `status="empty"`, `text=""`로 degrade한다.
+- 인터페이스: `DBSchemaProvider`는 `schema_source(req) -> str`를 주입받는다 — 변경 파일(`req.changed_files`)로부터 관련 테이블의 DDL을 돌려주는 함수다. 소스 미주입 시 `status="skipped"`; 주입된 소스가 실패/도달 불가하면 `status="empty"`, `text=""`로 degrade한다.
+- **소스 #1 — 정적 스키마 파일(구현됨).** 레포별 비밀-아님 컬럼 `db_schema_path`가 레포 안에 체크인된 DDL 덤프(예: `db/structure.sql`, pg_dump/mysqldump/수기 `CREATE TABLE …;`)를 가리킨다. 경로는 `static_context_path`와 동일하게 **레포 root 하위로 realpath 봉쇄**(임의 절대경로 exfil 차단, B-INV-9). 미설정이면 소스 미주입=skipped.
+- **"변경 파일 경로 → 관련 테이블" 매핑 규칙(확정):** 스키마 파일을 `CREATE TABLE` 문 단위로 파싱해 `{테이블명 → 전체 DDL}` 순서맵을 만든다. 변경 파일 경로를 소문자화 후 비영숫자로 토큰화하고 각 토큰을 trailing-`s` 단수화한다(`users`↔`user` 대칭 매칭). 테이블명(단수화)이 어떤 변경 파일의 토큰 집합에 whole-token으로 포함되면 그 테이블을 "관련"으로 본다. 관련 테이블의 DDL을 스키마 파일 순서로 이어붙이되 최대 `_MAX_TABLES`개까지(초과분 절단), 총량은 downstream per-source 캡(`MAX_CONTEXT_CHARS_PER_SOURCE`)이 처리한다. `changed_files`가 비면(신호 없음) 전체 스키마를 덤프하지 않고 `""`로 degrade한다.
+- **소스 #2 — 라이브 read-only introspection(유예).** `~/.claude/db-connections.yml`의 인라인 자격은 (a) 다수 커넥션이 SSM 터널 게이트 뒤, (b) 프로덕션 RDS 혼재, (c) provisioning 미확정 → 유예. 접근 시엔 db-inspector 계열 **read-only** 경로만, **프로덕션 RDS raw 접속 금지**, 터널 미가동 시 `""` degrade. 동일한 `schema_source` seam에 드롭인한다.
 
 ## Graphify (B9, 스텁)
 

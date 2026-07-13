@@ -161,6 +161,7 @@ class RepoPatch(BaseModel):
     incremental_review_on: int | None = None
     static_context_path: str | None = None
     jira_project_keys: str | None = None
+    db_schema_path: str | None = None
 
 
 @app.patch("/api/repos/{rid}")

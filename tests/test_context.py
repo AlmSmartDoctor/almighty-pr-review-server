@@ -463,6 +463,231 @@ def test_registry_includes_db_schema_provider():
     assert any(isinstance(p, DBSchemaProvider) for p in c.providers)
 
 
+def test_parse_changed_files_extracts_paths():
+    from server.context.base import parse_changed_files
+
+    diff = (
+        "diff --git a/src/models/user.py b/src/models/user.py\n"
+        "@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/docs/readme.md b/docs/readme.md\n"
+        "diff --git a/src/models/user.py b/src/models/user.py\n"  # 중복
+    )
+    assert parse_changed_files(diff) == ("src/models/user.py", "docs/readme.md")
+
+
+def test_parse_changed_files_handles_quoted_nonascii_header():
+    from server.context.base import parse_changed_files
+
+    # git core.quotepath: 비ASCII 경로는 "b/…"로 인용(octal escape) — ASCII 세그먼트는 보존
+    diff = (
+        r'diff --git "a/\355\225\234/order.py" "b/\355\225\234/order.py"'
+        + "\n@@ -1 +1 @@\n"
+    )
+    files = parse_changed_files(diff)
+    assert len(files) == 1 and "order.py" in files[0]
+
+
+_SCHEMA = """
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  name TEXT
+);
+
+CREATE TABLE orders (
+  id INTEGER PRIMARY KEY,
+  amount DECIMAL(10,2)
+);
+
+CREATE TABLE `accounts` (
+  id INT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+CREATE TABLE order_items (
+  id INTEGER PRIMARY KEY,
+  order_id INTEGER
+);
+"""
+
+
+def _schema_source(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    (tmp_path / "schema.sql").write_text(_SCHEMA, encoding="utf-8")
+    return file_schema_source(path=str(tmp_path / "schema.sql"), root=str(tmp_path))
+
+
+def test_file_schema_source_selects_only_related_tables(tmp_path):
+    src = _schema_source(tmp_path)
+    out = src(_req(changed_files=("src/models/user.py",)))
+    assert "CREATE TABLE users" in out
+    assert "orders" not in out and "accounts" not in out
+
+
+def test_file_schema_source_preserves_inner_parens(tmp_path):
+    src = _schema_source(tmp_path)
+    out = src(_req(changed_files=("app/order_service.rb",)))
+    assert "CREATE TABLE orders" in out and "DECIMAL(10,2)" in out and ");" in out
+
+
+def test_file_schema_source_parses_mysqldump_engine_tail(tmp_path):
+    src = _schema_source(tmp_path)
+    out = src(_req(changed_files=("lib/account.js",)))
+    assert "CREATE TABLE `accounts`" in out and "ENGINE=InnoDB" in out
+
+
+def test_file_schema_source_matches_multiword_snake_case_table(tmp_path):
+    src = _schema_source(tmp_path)
+    out = src(_req(changed_files=("app/models/order_item.rb",)))
+    assert "CREATE TABLE order_items" in out  # order_items ⊆ {order,item,rb}
+
+
+def test_file_schema_source_matches_camelcase_file(tmp_path):
+    src = _schema_source(tmp_path)
+    out = src(_req(changed_files=("src/models/OrderItem.ts",)))
+    assert "CREATE TABLE order_items" in out  # OrderItem→{order,item} 분해
+
+
+def test_file_schema_source_empty_without_changed_files(tmp_path):
+    src = _schema_source(tmp_path)
+    assert src(_req()) == ""  # 신호 없음 → 전체 덤프 금지
+
+
+def test_file_schema_source_confined_to_root(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    outside = tmp_path / "outside.sql"
+    outside.write_text(_SCHEMA, encoding="utf-8")
+    root = tmp_path / "repo"
+    root.mkdir()
+    src = file_schema_source(path=str(outside), root=str(root))
+    assert src(_req(changed_files=("users.py",))) == ""  # root 밖 → degrade
+
+
+def test_file_schema_source_degrades_when_missing(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    src = file_schema_source(path=str(tmp_path / "nope.sql"), root=str(tmp_path))
+    assert src(_req(changed_files=("users.py",))) == ""
+
+
+def test_registry_db_schema_source_wired_from_path(tmp_path):
+    from server.context.registry import build_context_provider
+    from server.context.db_schema_provider import DBSchemaProvider
+
+    (tmp_path / "schema.sql").write_text(_SCHEMA, encoding="utf-8")
+    repo = {
+        "context_db_schema_on": 1,
+        "db_schema_path": str(tmp_path / "schema.sql"),
+        "local_path": str(tmp_path),
+    }
+    c = build_context_provider(repo, {"context_db_schema_on": 0})
+    dbp = next(p for p in c.providers if isinstance(p, DBSchemaProvider))
+    r = dbp.fetch(_req(changed_files=("src/models/user.py",)))
+    assert r.status == "ok" and "CREATE TABLE users" in r.text
+    assert dbp.fetch(_req(changed_files=("unrelated/thing.py",))).status == "empty"
+
+
+def test_file_schema_source_resolves_relative_to_root(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    (tmp_path / "db").mkdir()
+    (tmp_path / "db" / "structure.sql").write_text(_SCHEMA, encoding="utf-8")
+    # 문서/UI 계약대로 레포-상대 경로 → root 기준으로 해석돼야 한다(서버 CWD 아님)
+    src = file_schema_source(path="db/structure.sql", root=str(tmp_path))
+    assert "CREATE TABLE users" in src(_req(changed_files=("src/models/user.py",)))
+
+
+def test_file_schema_source_ignores_commented_out_table(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    schema = (
+        "-- CREATE TABLE legacy_users (id INT, secret TEXT);\n"
+        "CREATE TABLE users (id INT);\n"
+    )
+    (tmp_path / "s.sql").write_text(schema, encoding="utf-8")
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    out = src(_req(changed_files=("app/legacy_user.rb",)))
+    assert "secret" not in out  # 주석 처리된 legacy_users는 미주입
+    assert "CREATE TABLE users" in out  # 실 테이블 users는 user 토큰으로 주입
+
+
+def test_file_schema_source_string_literals_dont_corrupt(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    schema = (
+        "CREATE TABLE emojis ( face TEXT DEFAULT ':)' );\n"
+        "CREATE TABLE users ( id INT );\n"
+        "CREATE TABLE notes (id INT) COMMENT='has ; semicolon';\n"
+    )
+    (tmp_path / "s.sql").write_text(schema, encoding="utf-8")
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    emoji_out = src(_req(changed_files=("app/emoji.rb",)))
+    # ':)' 안의 ')'가 users를 삼키지 않는다(라인 지향), DEFAULT는 보존
+    assert "CREATE TABLE emojis" in emoji_out and "CREATE TABLE users" not in emoji_out
+    assert ":)" in emoji_out
+    # COMMENT 문자열 안의 ';'로 조기 종료되지 않는다
+    assert "has ; semicolon" in src(_req(changed_files=("app/note.rb",)))
+
+
+def test_file_schema_source_inline_comment_semicolon(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    # 컬럼 라인의 인라인 '-- …;' 주석 안 ';'로 조기 종료되지 않는다(뒤 컬럼/닫는 ')' 보존)
+    schema = "CREATE TABLE orders (\n  id INT, -- see ticket #123;\n  total INT\n);\n"
+    (tmp_path / "s.sql").write_text(schema, encoding="utf-8")
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    out = src(_req(changed_files=("app/models/order.rb",)))
+    assert "total INT" in out and out.rstrip().endswith(";")
+
+
+def test_file_schema_source_closing_paren_on_column_line(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    # 닫는 ')'가 마지막 컬럼 라인에 붙는 포맷(';'로 끝남)도 문장 경계로 인식해 다음 테이블 분리
+    schema = "CREATE TABLE a (\n  id INT,\n  name TEXT);\nCREATE TABLE b (id INT);\n"
+    (tmp_path / "s.sql").write_text(schema, encoding="utf-8")
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    out = src(_req(changed_files=("app/b.rb",)))
+    assert "CREATE TABLE b" in out and "CREATE TABLE a" not in out
+
+
+def test_file_schema_source_postgres_backslash_default(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    # standard_conforming_strings(pg_dump 기본) 문자열이 백슬래시로 끝나도
+    # 뒷 CREATE TABLE을 삼키지 않는다(dialect 이스케이프 가정 없음)
+    schema = (
+        "CREATE TABLE files (sep TEXT DEFAULT 'C:\\');\nCREATE TABLE users (id INT);\n"
+    )
+    (tmp_path / "s.sql").write_text(schema, encoding="utf-8")
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    assert "CREATE TABLE users" in src(_req(changed_files=("app/user.rb",)))
+
+
+def test_file_schema_source_dollar_quoted_default(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    # Postgres dollar-quoted 리터럴 내부의 ')'/';'로 문장이 절단되지 않는다
+    schema = (
+        "CREATE TABLE widgets (\n  note TEXT DEFAULT $$a) ; b$$,\n  name TEXT\n);\n"
+    )
+    (tmp_path / "s.sql").write_text(schema, encoding="utf-8")
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    out = src(_req(changed_files=("app/widget.rb",)))
+    assert "name TEXT" in out and out.rstrip().endswith(";")
+
+
+def test_file_schema_source_extracts_quoted_qualified_name(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    (tmp_path / "s.sql").write_text(
+        'CREATE TABLE "public"."orders" (\n  id INTEGER\n);\n', encoding="utf-8"
+    )
+    src = file_schema_source(path=str(tmp_path / "s.sql"), root=str(tmp_path))
+    # 스키마-한정 인용명에서 테이블명(orders)만 추출 → order.rb로 매칭
+    assert "orders" in src(_req(changed_files=("app/order.rb",)))
+
+
 def test_graphify_provider_always_skipped():
     from server.context.graphify_provider import GraphifyProvider
 
