@@ -83,8 +83,15 @@ def build_context_provider(repo, settings):
     if _effective(repo, settings, "context_graphify_on"):
         try:
             from server.context.graphify_provider import GraphifyProvider
+            from server.context.graphify_source import file_project_source
 
-            providers.append(GraphifyProvider())
+            graphify_path = _ref(repo, "graphify_path")
+            source = (
+                file_project_source(path=graphify_path, root=_ref(repo, "local_path"))
+                if graphify_path
+                else None
+            )
+            providers.append(GraphifyProvider(graph_source=source))
         except Exception as e:  # never raise
             print(f"[context] graphify provider skipped: {redact_secrets(str(e))}")
     return CompositeContextProvider(providers)

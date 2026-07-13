@@ -1,3 +1,4 @@
+import os
 import re
 import secrets
 from dataclasses import dataclass
@@ -56,6 +57,23 @@ def redact_secrets(text: str) -> str:
         if secret:
             text = text.replace(secret, "[redacted]")
     return text
+
+
+def read_confined(path: str, root: str, limit: int) -> "str | None":
+    """path를 root 기준으로 해석하고 root 하위로 realpath 봉쇄(B-INV-9) 후 최대 limit 바이트 읽기.
+    상대경로=root 기준(문서/UI 계약), 절대경로는 join이 그대로 두어 봉쇄가 걸린다.
+    경계 밖/미도달/오류 → None(호출자가 self-degrade). file-source provider들의 공용 리더."""
+    if not path or not root:
+        return None
+    try:
+        real = os.path.realpath(os.path.join(root, path))
+        root_real = os.path.realpath(root)
+        if real != root_real and not real.startswith(root_real + os.sep):
+            return None
+        with open(real, encoding="utf-8") as f:
+            return f.read(limit)
+    except (OSError, ValueError):
+        return None
 
 
 _CONTEXT_PREAMBLE = (

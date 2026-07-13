@@ -234,12 +234,14 @@ def test_repo_context_settings_roundtrip(db):
         static_context_path="/x/ctx.md",
         jira_project_keys="PROJ,ABC",
         db_schema_path="db/structure.sql",
+        graphify_path="docs/PROJECT.md",
     )
     r = repo_repo.get(db, rid)
     assert r["context_static_on"] == 1
     assert r["static_context_path"] == "/x/ctx.md"
     assert r["jira_project_keys"] == "PROJ,ABC"
     assert r["db_schema_path"] == "db/structure.sql"
+    assert r["graphify_path"] == "docs/PROJECT.md"
 
 
 def test_verify_singles_toggle_roundtrip(db):

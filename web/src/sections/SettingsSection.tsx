@@ -61,6 +61,7 @@ type Repo = {
   static_context_path?: string | null;
   jira_project_keys?: string | null;
   db_schema_path?: string | null;
+  graphify_path?: string | null;
 };
 
 const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
@@ -433,6 +434,17 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
             value={repo.db_schema_path ?? ""}
             onChange={(e) => onLocalChange({ db_schema_path: e.target.value })}
             onBlur={(e) => onPatch({ db_schema_path: e.target.value })}
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="w-12 shrink-0">프로젝트</span>
+          <Input
+            aria-label={`${repo.full_name} 프로젝트 문서 경로`}
+            className="h-7 min-w-0 text-[11px]"
+            placeholder="레포 내 PROJECT.md 경로"
+            value={repo.graphify_path ?? ""}
+            onChange={(e) => onLocalChange({ graphify_path: e.target.value })}
+            onBlur={(e) => onPatch({ graphify_path: e.target.value })}
           />
         </label>
       </div>

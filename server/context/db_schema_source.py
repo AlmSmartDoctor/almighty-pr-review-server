@@ -1,5 +1,6 @@
-import os
 import re
+
+from server.context.base import read_confined
 
 _MAX_TABLES = 20  # 한 PR이 끌어올 수 있는 테이블 DDL 수 상한(fan-out 캡)
 _MAX_SCHEMA_BYTES = 2_000_000  # 스키마 덤프 읽기 상한(부모 프로세스 메모리 보호)
@@ -60,29 +61,12 @@ def _parse_tables(ddl: str):
     return tables
 
 
-def _read_confined(path: str, root: str):
-    """path를 root 기준으로 해석하고 root 하위로 realpath 봉쇄(B-INV-9).
-    상대경로=레포 root 기준(문서/UI 계약), 절대경로는 join이 그대로 두어 봉쇄가 걸린다.
-    경계 밖/미도달/오류 → None(self-degrade)."""
-    if not path or not root:
-        return None
-    try:
-        real = os.path.realpath(os.path.join(root, path))
-        root_real = os.path.realpath(root)
-        if real != root_real and not real.startswith(root_real + os.sep):
-            return None
-        with open(real, encoding="utf-8") as f:
-            return f.read(_MAX_SCHEMA_BYTES)
-    except (OSError, ValueError):
-        return None
-
-
 def file_schema_source(*, path: str, root: str):
     """레포에 체크인된 DDL 덤프에서 변경 파일 관련 테이블의 DDL만 골라주는
     schema_source(req)->str 콜백을 만든다. 실패/무매칭/무신호는 ""로 degrade."""
 
     def source(req) -> str:
-        ddl = _read_confined(path, root)
+        ddl = read_confined(path, root, _MAX_SCHEMA_BYTES)
         if not ddl:
             return ""
         file_tokens = [_tokens(str(f)) for f in getattr(req, "changed_files", ()) or ()]

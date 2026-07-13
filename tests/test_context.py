@@ -688,11 +688,30 @@ def test_file_schema_source_extracts_quoted_qualified_name(tmp_path):
     assert "orders" in src(_req(changed_files=("app/order.rb",)))
 
 
-def test_graphify_provider_always_skipped():
+def test_graphify_provider_renders_injected_source():
+    from server.context.graphify_provider import GraphifyProvider
+
+    r = GraphifyProvider(graph_source=lambda req: "# 프로젝트 개요\n진행중").fetch(
+        _req()
+    )
+    assert r.status == "ok" and "프로젝트 개요" in r.text
+
+
+def test_graphify_provider_skipped_without_source():
     from server.context.graphify_provider import GraphifyProvider
 
     r = GraphifyProvider().fetch(_req())
     assert r.status == "skipped" and r.text == ""
+
+
+def test_graphify_provider_degrades_on_source_error():
+    from server.context.graphify_provider import GraphifyProvider
+
+    def boom(req):
+        raise RuntimeError("boom")
+
+    r = GraphifyProvider(graph_source=boom).fetch(_req())
+    assert r.status == "empty" and r.text == ""
 
 
 def test_registry_includes_graphify_provider():
@@ -701,3 +720,59 @@ def test_registry_includes_graphify_provider():
 
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
     assert any(isinstance(p, GraphifyProvider) for p in c.providers)
+
+
+def test_file_project_source_injects_whole_doc_regardless_of_changed_files(tmp_path):
+    from server.context.graphify_source import file_project_source
+
+    (tmp_path / "PROJECT.md").write_text(
+        "# 로드맵\n- M1 완료\n- M2 진행중", encoding="utf-8"
+    )
+    src = file_project_source(path=str(tmp_path / "PROJECT.md"), root=str(tmp_path))
+    # 변경 파일과 무관하게 문서 전체 주입(빈 changed_files·무관 파일 모두)
+    assert "로드맵" in src(_req())
+    assert "M2 진행중" in src(_req(changed_files=("unrelated/x.py",)))
+
+
+def test_file_project_source_confined_to_root(tmp_path):
+    from server.context.graphify_source import file_project_source
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("TOP SECRET", encoding="utf-8")
+    root = tmp_path / "repo"
+    root.mkdir()
+    src = file_project_source(path=str(outside), root=str(root))
+    assert src(_req()) == ""  # root 밖 → degrade
+
+
+def test_file_project_source_degrades_when_missing(tmp_path):
+    from server.context.graphify_source import file_project_source
+
+    src = file_project_source(path=str(tmp_path / "nope.md"), root=str(tmp_path))
+    assert src(_req()) == ""
+
+
+def test_file_project_source_resolves_relative_to_root(tmp_path):
+    from server.context.graphify_source import file_project_source
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "PROJECT.md").write_text("상대경로 해석", encoding="utf-8")
+    src = file_project_source(path="docs/PROJECT.md", root=str(tmp_path))
+    assert "상대경로 해석" in src(_req())
+
+
+def test_registry_graphify_source_wired_from_path(tmp_path):
+    from server.context.registry import build_context_provider
+    from server.context.graphify_provider import GraphifyProvider
+
+    (tmp_path / "PROJECT.md").write_text("프로젝트 현황 X", encoding="utf-8")
+    repo = {
+        "context_graphify_on": 1,
+        "graphify_path": str(tmp_path / "PROJECT.md"),
+        "local_path": str(tmp_path),
+    }
+    c = build_context_provider(repo, {"context_graphify_on": 0})
+    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    assert (
+        gp.fetch(_req()).status == "ok" and "프로젝트 현황 X" in gp.fetch(_req()).text
+    )

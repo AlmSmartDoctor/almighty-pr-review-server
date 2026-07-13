@@ -70,6 +70,7 @@ def test_patch_repo_context_settings(tmp_path):
             "static_context_path": "/x/ctx.md",
             "jira_project_keys": "PROJ",
             "db_schema_path": "db/structure.sql",
+            "graphify_path": "docs/PROJECT.md",
         },
     )
     assert r.status_code == 200
@@ -78,6 +79,7 @@ def test_patch_repo_context_settings(tmp_path):
     assert body["static_context_path"] == "/x/ctx.md"
     assert body["jira_project_keys"] == "PROJ"
     assert body["db_schema_path"] == "db/structure.sql"
+    assert body["graphify_path"] == "docs/PROJECT.md"
 
 
 def test_patch_verify_singles_toggle(tmp_path):
