@@ -208,3 +208,70 @@ def test_patch_status_only_preserves_edited_text(tmp_path):
     row = finding_repo.get(conn, fid)
     assert row["status"] == "approved"
     assert row["edited_text"] == "fixed wording"
+
+
+def test_run_context_endpoint_redacts_secret_across_sinks(tmp_path, monkeypatch):
+    import asyncio
+    from contextlib import contextmanager
+    from server import config
+    from server.context.base import ContextResult
+    from server.models import Finding
+    from server.pipeline import review_pr, PipelineDeps
+    from server.repos import repo_repo, pr_repo, review_repo
+
+    monkeypatch.setattr(config, "JIRA_API_TOKEN", "tok-LEAK")
+    client, conn = _client(tmp_path)
+
+    @contextmanager
+    def fake_wt(repo, sha, pr_number=None):
+        yield "/tmp/fake-wt"
+
+    class OneAdapter:
+        vendor = "claude"
+
+        async def review(self, **kw):
+            return [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+
+    class DirectErrCtx:
+        def __init__(self):
+            self.results = [
+                ContextResult(
+                    provider="jira",
+                    status="error",
+                    error="auth failed with tok-LEAK in header",
+                )
+            ]
+
+        def gather(self, *, req):
+            return ""
+
+    ctx = DirectErrCtx()
+    rid = repo_repo.add(conn, full_name="acme/api", local_path="/tmp/x")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=50,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_wt,
+        adapters=[OneAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=ctx,
+    )
+    run_id = asyncio.run(review_pr(conn, pr_id=pid, trigger="manual", deps=deps))
+
+    # sink 3: HTTP endpoint response
+    r = client.get(f"/api/runs/{run_id}/context")
+    assert r.status_code == 200
+    assert "tok-LEAK" not in r.text
+    # sink 2: persisted meta
+    stored = review_repo.get_run(conn, run_id)
+    assert "tok-LEAK" not in (stored["context_meta"] or "")
+    assert "[redacted]" in stored["context_meta"]

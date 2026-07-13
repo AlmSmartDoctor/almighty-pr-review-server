@@ -178,3 +178,31 @@ def test_static_rejects_symlink_escape(tmp_path):
     assert (
         r.status == "error" and "SECRET" not in r.text
     )  # realpath가 심볼릭 링크 해석 → 차단
+
+
+def test_auth_env_keys_excludes_provider_secrets():
+    # B-INV-2: 격리 워커 env allowlist에 프로바이더 secret이 절대 없어야 함
+    from server.review.harness import HarnessProfile
+
+    for k in (
+        "ALMIGHTY_JIRA_API_TOKEN",
+        "ALMIGHTY_JIRA_EMAIL",
+        "ALMIGHTY_JIRA_BASE_URL",
+        "JIRA_API_TOKEN",
+        "DB_PASSWORD",
+        "GRAPHIFY_TOKEN",
+    ):
+        assert k not in HarnessProfile.AUTH_ENV_KEYS
+
+
+def test_static_provider_does_not_write_to_root(tmp_path):
+    # B-INV-9: provider는 read-only — worktree/root에 캐시·temp를 쓰지 않음
+    import os
+    from server.context.static_provider import StaticContextProvider
+
+    (tmp_path / "ctx.md").write_text("hello")
+    before = set(os.listdir(tmp_path))
+    StaticContextProvider(path=str(tmp_path / "ctx.md"), root=str(tmp_path)).fetch(
+        _req()
+    )
+    assert set(os.listdir(tmp_path)) == before
