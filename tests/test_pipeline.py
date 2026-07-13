@@ -378,6 +378,45 @@ def test_pipeline_passes_head_ref_and_body_to_context_request(db):
     assert spy.captured_req.body == "Closes PROJ-1"
 
 
+def test_pipeline_normalizes_null_head_ref_and_body(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=23,
+        title="t",
+        author="a",
+        head_sha="s23",
+        base_ref="main",
+        url="u",
+    )
+    # 마이그레이션 이전 행 재현: nullable 컬럼이 NULL로 남아 있음
+    db.execute("UPDATE pull_request SET head_ref=NULL, body=NULL WHERE id=?", (pid,))
+    db.commit()
+
+    class SpyCtx:
+        def __init__(self):
+            self.results = []
+            self.captured_req = None
+
+        def gather(self, *, req):
+            self.captured_req = req
+            return ""
+
+    spy = SpyCtx()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=spy,
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert spy.captured_req.head_ref == ""
+    assert spy.captured_req.body == ""
+
+
 def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
     import json
     from server.repos import settings_repo

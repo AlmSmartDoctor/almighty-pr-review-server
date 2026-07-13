@@ -123,9 +123,9 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         pr_number=pr["number"],
         title=pr["title"] or "",
         author=pr["author"] or "",
-        head_ref=pr["head_ref"] if "head_ref" in pr.keys() else "",
+        head_ref=(pr["head_ref"] if "head_ref" in pr.keys() else "") or "",
         base_ref=pr["base_ref"] or "",
-        body=pr["body"] if "body" in pr.keys() else "",
+        body=(pr["body"] if "body" in pr.keys() else "") or "",
     )
     degraded = False
     context_results = []
