@@ -1,7 +1,8 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -180,6 +181,15 @@ def run_vendor_results(run_id: int, conn=Depends(get_conn)):
     # ★개정 (codex v6 [MEDIUM]): 실패 벤더 노출용. 프론트 ReviewSection이
     # status='failed' 벤더에 배지를 띄워 부분 실패를 사용자에게 알린다.
     return [dict(v) for v in review_repo.list_vendor_results(conn, run_id)]
+
+
+@app.get("/api/runs/{run_id}/context")
+def run_context(run_id: int, conn=Depends(get_conn)):
+    run = review_repo.get_run(conn, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    meta = json.loads(run["context_meta"]) if run["context_meta"] else None
+    return {"text": run["context_text"] or "", "meta": meta}
 
 
 class FindingPatch(BaseModel):

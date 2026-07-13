@@ -85,6 +85,61 @@ def test_update_finding_status(tmp_path):
     assert finding_repo.get(conn, fid)["status"] == "approved"
 
 
+def test_run_context_returns_text_and_meta(tmp_path):
+    client, conn = _client(tmp_path)
+    from server.repos import repo_repo, pr_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=30,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+    review_repo.set_context(conn, run_id, text="ctx", meta={"sources": []})
+    r = client.get(f"/api/runs/{run_id}/context")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["text"] == "ctx" and body["meta"] == {"sources": []}
+
+
+def test_run_context_404_for_missing_run(tmp_path):
+    client, _ = _client(tmp_path)
+    r = client.get("/api/runs/99999/context")
+    assert r.status_code == 404
+
+
+def test_run_context_empty_when_unstored(tmp_path):
+    client, conn = _client(tmp_path)
+    from server.repos import repo_repo, pr_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=31,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+    r = client.get(f"/api/runs/{run_id}/context")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["text"] == "" and body["meta"] is None
+
+
 def test_patch_status_only_preserves_edited_text(tmp_path):
     """status-only PATCH가 기존 edited_text를 NULL로 덮지 않아야 한다(데이터 손실 방지)."""
     client, conn = _client(tmp_path)
