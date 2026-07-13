@@ -25,6 +25,9 @@ def _validate_base_url(base_url: str) -> str:
     if p.scheme != "https" or not p.hostname:
         raise JiraError("jira base_url must be https with a host")
     host = p.hostname
+    # NOTE: obfuscated IPv4 encodings (decimal/octal/hex, inet_aton shorthand) and
+    # RFC6598 are NOT covered — base_url is operator-set env, not attacker input.
+    # Revisit (resolve+check) only if base_url ever comes from a less-trusted source.
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -84,12 +87,19 @@ class JiraClient:
                 self._redact(f"jira HTTP {resp.status_code}"),
                 http_status=resp.status_code,
             )
-        data = resp.json()
-        fields = data.get("fields", {}) or {}
-        summary = (fields.get("summary") or "")[: config.MAX_CONTEXT_CHARS_PER_SOURCE]
-        description = _adf_to_text(fields.get("description"))[
-            : config.MAX_CONTEXT_CHARS_PER_SOURCE
-        ]
+        try:
+            data = resp.json()
+            fields = data.get("fields", {}) or {}
+            summary = (fields.get("summary") or "")[
+                : config.MAX_CONTEXT_CHARS_PER_SOURCE
+            ]
+            description = _adf_to_text(fields.get("description"))[
+                : config.MAX_CONTEXT_CHARS_PER_SOURCE
+            ]
+        except Exception as e:  # non-JSON/non-dict body → redacted, structured
+            raise JiraError(
+                self._redact(f"malformed jira response: {type(e).__name__}: {e}")
+            ) from None
         return {"key": key, "summary": summary, "description": description}
 
 

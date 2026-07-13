@@ -119,6 +119,38 @@ def test_strict_key_rejected_without_calling_http():
     assert http.calls == []
 
 
+class RaisingJsonResponse:
+    def __init__(self, status_code, exc):
+        self.status_code = status_code
+        self._exc = exc
+
+    def json(self):
+        raise self._exc
+
+
+def test_get_issue_non_json_200_raises_structured_redacted():
+    http = FakeHttp(
+        RaisingJsonResponse(200, ValueError("Expecting value: <html> tok-secret"))
+    )
+    client = _client(http)
+    try:
+        client.get_issue("PROJ-1")
+        raise AssertionError("expected JiraError")
+    except jira_client.JiraError as e:
+        assert "tok-secret" not in str(e)
+        assert "[redacted]" in str(e)
+
+
+def test_get_issue_non_dict_json_raises():
+    http = FakeHttp(FakeResponse(200, ["x"]))
+    client = _client(http)
+    try:
+        client.get_issue("PROJ-1")
+        raise AssertionError("expected JiraError")
+    except jira_client.JiraError:
+        pass
+
+
 def test_summary_is_truncated_to_size_cap():
     long_summary = "x" * (config.MAX_CONTEXT_CHARS_PER_SOURCE + 500)
     http = FakeHttp(
