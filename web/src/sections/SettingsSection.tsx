@@ -88,6 +88,29 @@ export function SettingsSection({ load, loadRepos }: {
       .catch(() => setErr("전역 설정 저장에 실패했습니다."));
   };
 
+  const saveContext = () => {
+    setErr("");
+    setStatus("");
+    api.patchSettings({
+      context_static_on: draft.context_static_on ?? 0,
+      context_jira_on: draft.context_jira_on ?? 0,
+      context_db_schema_on: draft.context_db_schema_on ?? 0,
+      context_graphify_on: draft.context_graphify_on ?? 0,
+    })
+      .then((s) => {
+        setSettings(s);
+        setDraft((d) => (d ? {
+          ...d,
+          context_static_on: s.context_static_on,
+          context_jira_on: s.context_jira_on,
+          context_db_schema_on: s.context_db_schema_on,
+          context_graphify_on: s.context_graphify_on,
+        } : s));
+        setStatus("외부 컨텍스트 설정을 저장했습니다.");
+      })
+      .catch(() => setErr("외부 컨텍스트 설정 저장에 실패했습니다."));
+  };
+
   const patchRepo = (repo: Repo, patch: Partial<Repo>) => {
     const prev = repos;
     setErr("");
@@ -167,7 +190,7 @@ export function SettingsSection({ load, loadRepos }: {
                       <ToggleCell label="Codex" checked={r.vendor_codex_on !== 0} onChange={(v) => patchRepo(r, { vendor_codex_on: v })} />
                       <ToggleCell label="병합" checked={!!r.merge_enabled} onChange={(v) => patchRepo(r, { merge_enabled: v })} />
                       <ToggleCell label="auto-post" checked={!!r.auto_post} onChange={(v) => patchRepo(r, { auto_post: v })} />
-                      <ToggleCell label={`${r.full_name} 컨텍스트`} checked={!!r.context_static_on} onChange={(v) => patchRepo(r, { context_static_on: v })} />
+                      <ToggleCell label={`${r.full_name} 컨텍스트`} checked={r.context_static_on != null ? !!r.context_static_on : !!settings.context_static_on} onChange={(v) => patchRepo(r, { context_static_on: v })} />
                       <TableCell>
                         <div className="w-28">
                           <NativeSelect value={r.harness_name ?? "default"} className="h-8" onChange={(e) => patchRepo(r, { harness_name: e.target.value })}>
@@ -278,7 +301,7 @@ export function SettingsSection({ load, loadRepos }: {
             </Field>
           </div>
           <div className="mt-5">
-            <Button onClick={saveSettings} disabled={!dirty}><Save /> 컨텍스트 저장</Button>
+            <Button onClick={saveContext} disabled={!dirty}><Save /> 컨텍스트 저장</Button>
           </div>
         </CardContent>
       </Card>

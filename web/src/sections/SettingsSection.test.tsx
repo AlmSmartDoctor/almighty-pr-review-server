@@ -112,7 +112,7 @@ test("renders external context toggles", async () => {
   expect(screen.queryByPlaceholderText(/토큰|token|url/i)).toBeNull();
 });
 
-test("toggles static context and saves via the context save button", async () => {
+test("context save patches only the four context fields", async () => {
   const patchSettings = vi
     .spyOn(api, "patchSettings")
     .mockResolvedValue({ ...contextSettings, context_static_on: 1 });
@@ -122,10 +122,12 @@ test("toggles static context and saves via the context save button", async () =>
   fireEvent.click(toggle);
   fireEvent.click(screen.getByRole("button", { name: "컨텍스트 저장" }));
 
-  await waitFor(() =>
-    expect(patchSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ context_static_on: 1 }),
-    ),
+  await waitFor(() => expect(patchSettings).toHaveBeenCalledTimes(1));
+  expect(Object.keys(patchSettings.mock.calls[0][0]).sort()).toEqual([
+    "context_db_schema_on", "context_graphify_on", "context_jira_on", "context_static_on",
+  ]);
+  expect(patchSettings.mock.calls[0][0]).toEqual(
+    expect.objectContaining({ context_static_on: 1 }),
   );
 });
 
@@ -139,4 +141,14 @@ test("toggles per-repo static context", async () => {
   fireEvent.click(toggle);
 
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_static_on: 1 }));
+});
+
+test("per-repo toggle reflects the inherited global default when NULL", async () => {
+  render(<SettingsSection
+    load={async () => ({ ...contextSettings, context_static_on: 1 })}
+    loadRepos={async () => [
+      { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 },
+    ]} />);
+
+  expect(await screen.findByRole("switch", { name: "acme/api 컨텍스트" })).toBeChecked();
 });
