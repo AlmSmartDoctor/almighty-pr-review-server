@@ -673,6 +673,115 @@ def test_pipeline_verify_degrades_when_verifier_raises(db):
     assert f["verify_status"] is None and f["confidence"] == 0.8
 
 
+class PromptCapturingAdapter:
+    vendor = "claude"
+
+    def __init__(self):
+        self.prompt = None
+
+    async def review(self, *, prompt, **kw):
+        self.prompt = prompt
+        return []
+
+
+def _incremental_deps(cap, *, full="FULL-DIFF", compare=None):
+    return PipelineDeps(
+        gh_diff=lambda repo, n: full,
+        gh_compare_diff=compare,
+        worktree=fake_worktree,
+        adapters=[cap],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+
+
+def _prior_done_run(db, pid, sha):
+    from server.repos import review_repo
+
+    r = review_repo.create_run(
+        db, pr_id=pid, head_sha=sha, trigger="auto", effort="medium"
+    )
+    review_repo.finish_run(db, r, "done")
+
+
+def test_incremental_uses_compare_diff_delta_and_records_base_sha(db):
+    from server.repos import review_repo
+
+    rid, pid = _seed_pr(db, number=60, head_sha="head2")
+    repo_repo.update(db, rid, incremental_review_on=1)
+    _prior_done_run(db, pid, "base1")
+    cap = PromptCapturingAdapter()
+    seen = {}
+    deps = _incremental_deps(
+        cap,
+        compare=lambda repo, base, head: seen.update(base=base, head=head)
+        or "DELTA-DIFF",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert seen == {"base": "base1", "head": "head2"}
+    assert "DELTA-DIFF" in cap.prompt and "FULL-DIFF" not in cap.prompt
+    assert review_repo.get_run(db, run_id)["base_sha"] == "base1"
+
+
+def test_incremental_falls_back_to_full_when_no_prior_done_run(db):
+    from server.repos import review_repo
+
+    rid, pid = _seed_pr(db, number=61, head_sha="head2")
+    repo_repo.update(db, rid, incremental_review_on=1)
+    cap = PromptCapturingAdapter()
+    deps = _incremental_deps(
+        cap, compare=lambda *a: (_ for _ in ()).throw(AssertionError("불필요 호출"))
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert "FULL-DIFF" in cap.prompt
+    assert review_repo.get_run(db, run_id)["base_sha"] is None
+
+
+def test_incremental_empty_delta_falls_back_to_full(db):
+    from server.repos import review_repo
+
+    rid, pid = _seed_pr(db, number=62, head_sha="head2")
+    repo_repo.update(db, rid, incremental_review_on=1)
+    _prior_done_run(db, pid, "base1")
+    cap = PromptCapturingAdapter()
+    deps = _incremental_deps(cap, compare=lambda repo, base, head: "   \n")
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert "FULL-DIFF" in cap.prompt
+    assert review_repo.get_run(db, run_id)["base_sha"] is None
+
+
+def test_incremental_compare_error_degrades_to_full(db):
+    from server.repos import review_repo
+
+    rid, pid = _seed_pr(db, number=63, head_sha="head2")
+    repo_repo.update(db, rid, incremental_review_on=1)
+    _prior_done_run(db, pid, "base1")
+
+    def boom(repo, base, head):
+        raise RuntimeError("compare 404")
+
+    cap = PromptCapturingAdapter()
+    deps = _incremental_deps(cap, compare=boom)
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert "FULL-DIFF" in cap.prompt
+    assert review_repo.get_run(db, run_id)["status"] == "done"  # 리뷰 차단 안 함
+    assert review_repo.get_run(db, run_id)["base_sha"] is None
+
+
+def test_incremental_off_by_default_uses_full_even_with_prior_run(db):
+    from server.repos import review_repo
+
+    _, pid = _seed_pr(db, number=64, head_sha="head2")  # incremental 미설정=off
+    _prior_done_run(db, pid, "base1")
+    cap = PromptCapturingAdapter()
+    deps = _incremental_deps(
+        cap, compare=lambda *a: (_ for _ in ()).throw(AssertionError("불필요 호출"))
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert "FULL-DIFF" in cap.prompt
+    assert review_repo.get_run(db, run_id)["base_sha"] is None
+
+
 def test_build_prompt_empty_no_block():
     out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "")
     assert "## 외부 컨텍스트" not in out and "DIFF" in out

@@ -12,6 +12,7 @@ ALLOWED = {
     "context_db_schema_on",
     "context_graphify_on",
     "verify_singles_on",
+    "incremental_review_on",
 }
 
 

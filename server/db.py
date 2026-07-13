@@ -160,6 +160,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # 반박 패스 결과(감사·트리아지) — finding당 verdict + 근거.
     _ensure_column(conn, "finding", "verify_status", "TEXT")
     _ensure_column(conn, "finding", "verify_rationale", "TEXT")
+    # 증분 리뷰 토글 — 전역 기본 + per-repo override(NULL=상속). 켜면 재리뷰가
+    # 직전 완료(done) 런 이후의 델타만 리뷰. review_run.base_sha=델타 기준 sha(NULL=전체).
+    _ensure_column(
+        conn, "app_settings", "incremental_review_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(conn, "repo", "incremental_review_on", "INTEGER")
+    _ensure_column(conn, "review_run", "base_sha", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(

@@ -46,6 +46,7 @@ class PipelineDeps:
     repo_local_path: str
     context: object = field(default_factory=NoOpContextProvider)
     pool: RunnerPool = None  # ★개정: 벤더 병렬 실행 세마포어(없으면 생성)
+    gh_compare_diff: Callable = None  # (repo, base, head)->diff; None=증분 미지원
     verify: object = (
         None  # async (targets, VerifyContext) -> list[Verdict]; None=미배선
     )
@@ -84,7 +85,10 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
     # sync subprocess(gh/prescreen)를 to_thread로 오프로드 → 이벤트루프 비블록
-    diff = await asyncio.to_thread(deps.gh_diff, repo["full_name"], pr["number"])
+    # 증분 리뷰가 켜지고 직전 완료 런이 있으면 그 이후 델타만, 아니면 전체 PR diff.
+    diff = await _resolve_diff(
+        conn, run_id=run_id, deps=deps, repo=repo, pr=pr, settings=settings
+    )
 
     # 2. Pre-screen
     complexity, score, reason = await asyncio.to_thread(
@@ -274,6 +278,35 @@ def _persist(conn, run_id, items):
             verify_status=getattr(f, "verify_status", None),
             verify_rationale=getattr(f, "verify_rationale", None),
         )
+
+
+async def _resolve_diff(conn, *, run_id, deps, repo, pr, settings) -> str:
+    """증분 리뷰 델타 vs 전체 PR diff를 결정해 반환. 증분이 켜지고 직전 완료(done)
+    런이 있으면 base...head 델타를 쓰고 review_run.base_sha에 기록한다. compare 실패·
+    빈 델타·심 미배선은 전체 diff로 degrade(리뷰를 절대 차단하지 않음)."""
+    full = repo["full_name"]
+    head = pr["head_sha"]
+    base_sha = None
+    if _effective(repo, settings, "incremental_review_on") and deps.gh_compare_diff:
+        prior = review_repo.last_done_head_sha(conn, pr["id"])
+        if prior and prior != head:
+            base_sha = prior
+    if base_sha:
+        try:
+            diff = await asyncio.to_thread(deps.gh_compare_diff, full, base_sha, head)
+        except Exception as e:
+            print(
+                f"[pipeline] incremental compare degraded → full: "
+                f"{redact_secrets(f'{type(e).__name__}: {e}')}"
+            )
+            base_sha = None
+            diff = ""
+        if base_sha and not diff.strip():  # 빈 델타 = 기준선 이상 → 보수적으로 전체
+            base_sha = None
+        if base_sha:
+            review_repo.set_base_sha(conn, run_id, base_sha)
+            return diff
+    return await asyncio.to_thread(deps.gh_diff, full, pr["number"])
 
 
 async def _verify_singles(deps, merged, *, repo, pr, diff, harness) -> None:

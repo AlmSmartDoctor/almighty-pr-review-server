@@ -102,6 +102,29 @@ def test_patch_verify_singles_toggle(tmp_path):
     )
 
 
+def test_patch_incremental_review_toggle(tmp_path):
+    client, _ = _client(tmp_path)
+    assert (
+        client.patch("/api/settings", json={"incremental_review_on": 1}).json()[
+            "incremental_review_on"
+        ]
+        == 1
+    )
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    assert (
+        client.patch(
+            f"/api/repos/{created['id']}", json={"incremental_review_on": 0}
+        ).json()["incremental_review_on"]
+        == 0
+    )
+    assert (
+        client.patch(
+            f"/api/repos/{created['id']}", json={"incremental_review_on": None}
+        ).json()["incremental_review_on"]
+        is None
+    )
+
+
 def test_patch_repo_can_restore_context_toggle_inheritance(tmp_path):
     client, _ = _client(tmp_path)
     created = client.post("/api/repos", json={"full_name": "acme/api"}).json()

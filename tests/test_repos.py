@@ -242,6 +242,64 @@ def test_verify_singles_toggle_roundtrip(db):
     assert repo_repo.get(db, rid)["verify_singles_on"] == 0
 
 
+def test_incremental_toggle_roundtrip(db):
+    settings_repo.update(db, incremental_review_on=1)
+    assert settings_repo.get(db)["incremental_review_on"] == 1
+    rid = repo_repo.add(db, full_name="acme/api")
+    assert repo_repo.get(db, rid)["incremental_review_on"] is None  # NULL=상속
+    repo_repo.update(db, rid, incremental_review_on=0)
+    assert repo_repo.get(db, rid)["incremental_review_on"] == 0
+
+
+def test_last_done_head_sha_only_counts_done_runs(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=8,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    assert review_repo.last_done_head_sha(db, pid) is None  # 아직 done 없음
+    r1 = review_repo.create_run(
+        db, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    review_repo.finish_run(db, r1, "done")
+    r2 = review_repo.create_run(
+        db, pr_id=pid, head_sha="s2", trigger="auto", effort="medium"
+    )
+    review_repo.finish_run(db, r2, "canceled")  # skip → 기준선 아님
+    assert review_repo.last_done_head_sha(db, pid) == "s1"
+    r3 = review_repo.create_run(
+        db, pr_id=pid, head_sha="s3", trigger="auto", effort="medium"
+    )
+    review_repo.finish_run(db, r3, "done")
+    assert review_repo.last_done_head_sha(db, pid) == "s3"
+
+
+def test_set_base_sha_roundtrip(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=8,
+        title="t",
+        author="a",
+        head_sha="s9",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        db, pr_id=pid, head_sha="s9", trigger="manual", effort="medium"
+    )
+    assert review_repo.get_run(db, run_id)["base_sha"] is None
+    review_repo.set_base_sha(db, run_id, "prevsha")
+    assert review_repo.get_run(db, run_id)["base_sha"] == "prevsha"
+
+
 def test_finding_persists_verify_columns(db):
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(

@@ -60,6 +60,16 @@ def test_diff_returns_text():
     assert "diff --git" in client.diff("acme/api", 7)
 
 
+def test_compare_diff_uses_three_dot_range_and_diff_media_type():
+    runner = FakeRunner({("gh", "api"): "diff --git a b\n+delta"})
+    client = gh.GhClient(runner=runner)
+    out = client.compare_diff("acme/api", "base1", "head2")
+    assert "delta" in out
+    argv = runner.calls[0][0]
+    assert "/repos/acme/api/compare/base1...head2" in argv
+    assert "Accept: application/vnd.github.diff" in argv
+
+
 def test_post_comment_returns_id_and_url():
     runner = FakeRunner(
         {

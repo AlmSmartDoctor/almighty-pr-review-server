@@ -29,6 +29,7 @@ type Settings = {
   codex_model: string;
   prescreen_gate_threshold: string;
   verify_singles_on?: number;
+  incremental_review_on?: number;
   context_static_on?: number;
   context_jira_on?: number;
   context_db_schema_on?: number;
@@ -288,6 +289,10 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
             <Field title="고위험 단독 지적 검증" help="한 벤더만 낸 critical/high 지적을 다른 벤더로 반박 검증하고, 반박되면 신뢰도를 낮춤">
               <Switch aria-label="고위험 단독 지적 검증" checked={!!draft.verify_singles_on}
                       onCheckedChange={(v) => setDraft({ ...draft, verify_singles_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="증분 리뷰" help="재리뷰 시 직전 완료된 리뷰 이후의 변경분만 리뷰(전체 재리뷰 대신). 큰 PR의 후속 커밋에서 시간·비용 절감">
+              <Switch aria-label="증분 리뷰" checked={!!draft.incremental_review_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, incremental_review_on: v ? 1 : 0 })} />
             </Field>
             <Field title="사전 스크리닝 모델" help="diff만 보고 변경 복잡도를 평가">
               <div className="w-40">

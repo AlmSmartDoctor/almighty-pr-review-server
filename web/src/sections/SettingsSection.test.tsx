@@ -61,6 +61,23 @@ test("toggles high-severity single verification and saves it", async () => {
   );
 });
 
+test("toggles incremental review and saves it", async () => {
+  const patchSettings = vi
+    .spyOn(api, "patchSettings")
+    .mockResolvedValue({ ...settings, incremental_review_on: 1 });
+  render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+
+  const toggle = await screen.findByRole("switch", { name: "증분 리뷰" });
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  await waitFor(() =>
+    expect(patchSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ incremental_review_on: 1 }),
+    ),
+  );
+});
+
 test("selects a codex model and saves it", async () => {
   const patchSettings = vi
     .spyOn(api, "patchSettings")

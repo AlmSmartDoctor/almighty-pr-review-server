@@ -131,6 +131,21 @@ class GhClient:
             ["gh", "pr", "diff", str(number), "--repo", repo], kind="diff"
         )
 
+    def compare_diff(self, repo: str, base_sha: str, head_sha: str) -> str:
+        """base...head(three-dot: merge-base→head) 구간의 통합 diff.
+        증분 리뷰용 — 직전 완료 리뷰 이후 추가된 변경만 얻는다. force-push로 base가
+        조상이 아니면 merge-base 기준이라 과대 포함(누락 없음, 안전)."""
+        return self._call(
+            [
+                "gh",
+                "api",
+                f"/repos/{repo}/compare/{base_sha}...{head_sha}",
+                "-H",
+                "Accept: application/vnd.github.diff",
+            ],
+            kind="compare_diff",
+        )
+
     def preflight_user(self) -> dict:
         out = self._call(
             ["gh", "api", "user", "--jq", "{login: .login}"],

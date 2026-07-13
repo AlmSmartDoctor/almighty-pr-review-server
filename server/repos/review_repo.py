@@ -12,6 +12,23 @@ def create_run(conn, *, pr_id, head_sha, trigger, effort, merge_enabled=0) -> in
     return cur.lastrowid
 
 
+def last_done_head_sha(conn, pr_id):
+    """직전에 실제로 벤더 리뷰까지 완료(done)된 런의 head_sha. 증분 델타 기준선.
+    prescreen auto-skip은 canceled로 마감되므로 done만 보면 '실제 리뷰된 sha'가 된다
+    (last_reviewed_sha는 skip에도 전진하므로 기준선으로 부적합)."""
+    row = conn.execute(
+        "SELECT head_sha FROM review_run WHERE pr_id=? AND status='done' "
+        "ORDER BY id DESC LIMIT 1",
+        (pr_id,),
+    ).fetchone()
+    return row["head_sha"] if row else None
+
+
+def set_base_sha(conn, run_id, base_sha):
+    conn.execute("UPDATE review_run SET base_sha=? WHERE id=?", (base_sha, run_id))
+    conn.commit()
+
+
 def finish_run(conn, run_id, status, error=None):
     conn.execute(
         "UPDATE review_run SET status=?, error=?, finished_at=datetime('now') "

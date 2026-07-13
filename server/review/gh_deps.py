@@ -28,6 +28,7 @@ def build_deps(repo, settings) -> PipelineDeps:
     adapters = [ClaudeAdapter(), CodexAdapter()]
     return PipelineDeps(
         gh_diff=gh.diff,
+        gh_compare_diff=gh.compare_diff,
         worktree=prepared_worktree,
         adapters=adapters,
         prescreen=_prescreen_tuple,

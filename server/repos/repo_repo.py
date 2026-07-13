@@ -37,6 +37,7 @@ ALLOWED = {
     "static_context_path",
     "jira_project_keys",
     "verify_singles_on",
+    "incremental_review_on",
 }
 
 
