@@ -34,6 +34,12 @@ type Settings = {
   context_graphify_on?: number;
 };
 
+type ContextToggleKey =
+  | "context_static_on"
+  | "context_jira_on"
+  | "context_db_schema_on"
+  | "context_graphify_on";
+
 type Repo = {
   id: number;
   full_name: string;
@@ -46,8 +52,18 @@ type Repo = {
   merge_enabled?: number;
   auto_post?: number;
   harness_name?: string;
-  context_static_on?: number;
+  context_static_on?: number | null;
+  context_jira_on?: number | null;
+  context_db_schema_on?: number | null;
+  context_graphify_on?: number | null;
 };
+
+const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
+  { key: "context_static_on", label: "Static" },
+  { key: "context_jira_on", label: "Jira" },
+  { key: "context_db_schema_on", label: "DB" },
+  { key: "context_graphify_on", label: "Graphify" },
+];
 
 const EFFORTS = ["low", "medium", "high", "xhigh"];
 const MODELS = ["opus", "sonnet", "haiku", "fable"];
@@ -140,7 +156,7 @@ export function SettingsSection({ load, loadRepos }: {
           {repos.length === 0 ? (
             <StatusLine className="pt-1">등록된 레포가 없습니다.</StatusLine>
           ) : (
-            <div className="mt-4 overflow-hidden rounded-lg border border-border">
+            <div className="mt-4 overflow-x-auto rounded-lg border border-border">
               <Table>
                 <TableHeader>
                   <TableRow className="bg-secondary/60 hover:bg-secondary/60">
@@ -153,7 +169,7 @@ export function SettingsSection({ load, loadRepos }: {
                     <TableHead className="text-center">Codex</TableHead>
                     <TableHead className="text-center">병합</TableHead>
                     <TableHead className="text-center">auto-post</TableHead>
-                    <TableHead className="text-center">컨텍스트</TableHead>
+                    <TableHead>컨텍스트 오버라이드</TableHead>
                     <TableHead>하네스</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -190,7 +206,7 @@ export function SettingsSection({ load, loadRepos }: {
                       <ToggleCell label="Codex" checked={r.vendor_codex_on !== 0} onChange={(v) => patchRepo(r, { vendor_codex_on: v })} />
                       <ToggleCell label="병합" checked={!!r.merge_enabled} onChange={(v) => patchRepo(r, { merge_enabled: v })} />
                       <ToggleCell label="auto-post" checked={!!r.auto_post} onChange={(v) => patchRepo(r, { auto_post: v })} />
-                      <ToggleCell label={`${r.full_name} 컨텍스트`} checked={r.context_static_on != null ? !!r.context_static_on : !!settings.context_static_on} onChange={(v) => patchRepo(r, { context_static_on: v })} />
+                      <ContextOverrideCell repo={r} settings={settings} onPatch={(patch) => patchRepo(r, patch)} />
                       <TableCell>
                         <div className="w-28">
                           <NativeSelect value={r.harness_name ?? "default"} className="h-8" onChange={(e) => patchRepo(r, { harness_name: e.target.value })}>
@@ -316,6 +332,41 @@ function ToggleCell({ label, checked, onChange }: {
     <TableCell className="text-center">
       <div className="flex justify-center">
         <Switch aria-label={label} checked={checked} onCheckedChange={(v) => onChange(v ? 1 : 0)} />
+      </div>
+    </TableCell>
+  );
+}
+
+function ContextOverrideCell({ repo, settings, onPatch }: {
+  repo: Repo;
+  settings: Settings;
+  onPatch: (patch: Partial<Repo>) => void;
+}) {
+  return (
+    <TableCell className="min-w-[260px]">
+      <div className="grid grid-cols-2 gap-1.5">
+        {CONTEXT_TOGGLES.map(({ key, label }) => {
+          const value = repo[key];
+          const inherited = settings[key] ? "켜짐" : "꺼짐";
+          return (
+            <label key={key} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span className="w-12 shrink-0">{label}</span>
+              <NativeSelect
+                aria-label={`${repo.full_name} ${label} 컨텍스트`}
+                className="h-7 min-w-0 text-[11px]"
+                value={value == null ? "inherit" : String(value)}
+                onChange={(e) => {
+                  const next = e.target.value === "inherit" ? null : Number(e.target.value);
+                  onPatch({ [key]: next });
+                }}
+              >
+                <option value="inherit">상속 ({inherited})</option>
+                <option value="1">켜짐</option>
+                <option value="0">꺼짐</option>
+              </NativeSelect>
+            </label>
+          );
+        })}
       </div>
     </TableCell>
   );

@@ -7,8 +7,9 @@
 ## Jira (첫 외부 소스, B8에서 구현)
 
 - 헤드리스 접근 = 전용 **Jira Cloud API 토큰**(email + API token, HTTP Basic 인증).
-- 엔드포인트: `GET {base}/rest/api/3/issue/{ISSUE-KEY}?fields=summary,description,<AC필드>` (AC 필드명은 인스턴스별 커스텀 필드 → B8에서 확정).
+- 엔드포인트: `GET {base}/rest/api/3/issue/{ISSUE-KEY}?fields=summary,description,<AC필드>`. 수용기준 필드는 인스턴스별 `ALMIGHTY_JIRA_ACCEPTANCE_CRITERIA_FIELD=customfield_<숫자>`로 선택하며 미설정 시 생략한다.
 - 자격증명은 **env-only**: `ALMIGHTY_JIRA_BASE_URL`, `ALMIGHTY_JIRA_EMAIL`, `ALMIGHTY_JIRA_API_TOKEN`. **base_url·토큰을 DB에 저장하지 않는다**(SSRF 표면을 env로 한정).
+- base URL은 `https://<org>.atlassian.net`만 허용한다. 레포별 `jira_project_keys`는 유효한 non-empty allowlist가 필수이며, Jira 서비스 계정도 같은 프로젝트에만 최소 권한을 부여한다. 빈 allowlist에서는 프로바이더를 등록하지 않고 HTTP 호출을 하지 않는다.
 - **금지: atlassian MCP OAuth 재사용.** 이유: 이 서버의 벤더 하네스는 mcpOAuth(atlassian/datadog/github)를 제외한다(참조: `docs/vendor-cli-contract.md`). Jira 접근은 반드시 전용 API 토큰을 쓴다.
 - 이슈키 추출은 PR의 head_ref → title → body 순으로 정규식 `[A-Z][A-Z0-9]+-\d+` (base_ref는 파싱하지 않는다).
 

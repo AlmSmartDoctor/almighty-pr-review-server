@@ -7,9 +7,10 @@ from server.context import jira_client
 
 
 class FakeResponse:
-    def __init__(self, status_code, data):
+    def __init__(self, status_code, data, *, content=None):
         self.status_code = status_code
         self._data = data
+        self.content = content
 
     def json(self):
         return self._data
@@ -30,9 +31,41 @@ class FakeHttp:
         return self.response
 
 
-def _client(http, base_url="https://acme.atlassian.net"):
+class FakeStreamResponse:
+    def __init__(self, chunks, *, status_code=200, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._chunks = chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+
+class FakeStreamingHttp:
+    def __init__(self, response):
+        self.response = response
+
+    def stream(self, method, url, **kwargs):
+        return self.response
+
+
+def _client(
+    http,
+    base_url="https://acme.atlassian.net",
+    acceptance_criteria_field="",
+):
     return jira_client.JiraClient(
-        base_url=base_url, email="me@acme.com", token="tok-secret", http=http
+        base_url=base_url,
+        email="me@acme.com",
+        token="tok-secret",
+        http=http,
+        acceptance_criteria_field=acceptance_criteria_field,
     )
 
 
@@ -49,6 +82,7 @@ def test_get_issue_happy_parse():
         "key": "PROJ-1",
         "summary": "로그인 버그",
         "description": "재현 절차...",
+        "acceptance_criteria": "",
     }
     url, kw = http.calls[0]
     assert url.endswith("/rest/api/3/issue/PROJ-1")
@@ -66,6 +100,35 @@ def test_get_issue_adf_description_flattens_to_text():
     client = _client(http)
     result = client.get_issue("PROJ-1")
     assert "hello" in result["description"]
+
+
+def test_get_issue_fetches_acceptance_criteria_custom_field():
+    http = FakeHttp(
+        FakeResponse(
+            200,
+            {
+                "fields": {
+                    "summary": "s",
+                    "description": "d",
+                    "customfield_12345": {
+                        "type": "doc",
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "must pass"}],
+                            }
+                        ],
+                    },
+                }
+            },
+        )
+    )
+    result = _client(http, acceptance_criteria_field="customfield_12345").get_issue(
+        "PROJ-1"
+    )
+
+    assert result["acceptance_criteria"] == "must pass"
+    assert "customfield_12345" in http.calls[0][1]["params"]["fields"]
 
 
 def test_http_error_is_redacted_and_structured():
@@ -100,6 +163,8 @@ def test_ssrf_rejected_at_fetch_not_construction():
         "https://localhost",
         "https://foo.local",
         "https://foo.internal",
+        "https://127.0.0.1.nip.io",
+        "https://evil.example.com",
     ):
         http = FakeHttp(FakeResponse(200, {"fields": {}}))
         client = _client(http, base_url=base_url)  # construction must not raise
@@ -163,6 +228,22 @@ def test_summary_is_truncated_to_size_cap():
     client = _client(http)
     result = client.get_issue("PROJ-1")
     assert len(result["summary"]) == config.MAX_CONTEXT_CHARS_PER_SOURCE
+
+
+def test_response_body_is_rejected_before_json_parse_when_too_large(monkeypatch):
+    monkeypatch.setattr(jira_client, "_MAX_RESPONSE_BYTES", 32)
+    http = FakeHttp(FakeResponse(200, {}, content=b"x" * 33))
+
+    with pytest.raises(jira_client.JiraError, match="response too large"):
+        _client(http).get_issue("PROJ-1")
+
+
+def test_streaming_response_stops_when_byte_cap_is_exceeded(monkeypatch):
+    monkeypatch.setattr(jira_client, "_MAX_RESPONSE_BYTES", 8)
+    http = FakeStreamingHttp(FakeStreamResponse([b"1234", b"56789"]))
+
+    with pytest.raises(jira_client.JiraError, match="response too large"):
+        _client(http).get_issue("PROJ-1")
 
 
 @pytest.mark.skipif(

@@ -17,9 +17,15 @@ class JiraContextProvider:
         self._project_keys = tuple(project_keys)
 
     def fetch(self, req: ContextRequest) -> ContextResult:
+        if not self._project_keys:
+            return ContextResult(
+                provider=self.name,
+                status="skipped",
+                text="",
+                error="jira project allowlist required",
+            )
         keys = extract_keys(req)
-        if self._project_keys:
-            keys = [k for k in keys if k.split("-")[0] in self._project_keys]
+        keys = [k for k in keys if k.split("-")[0] in self._project_keys]
         if not keys:
             return ContextResult(provider=self.name, status="empty", text="")
         blocks = []
@@ -27,9 +33,11 @@ class JiraContextProvider:
             try:
                 issue = self._client.get_issue(key)
                 body = issue.get("description") or ""
-                blocks.append(
-                    f"**{issue['key']}: {issue.get('summary', '')}**\n\n{body}".rstrip()
-                )
+                acceptance = issue.get("acceptance_criteria") or ""
+                block = f"**{issue['key']}: {issue.get('summary', '')}**\n\n{body}"
+                if acceptance:
+                    block += f"\n\n**Acceptance criteria**\n\n{acceptance}"
+                blocks.append(block.rstrip())
             except Exception:  # per-key degrade; error 세부는 노출 안 함(B-INV-4)
                 continue
         if not blocks:

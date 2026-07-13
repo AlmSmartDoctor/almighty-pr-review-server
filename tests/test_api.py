@@ -78,6 +78,21 @@ def test_patch_repo_context_settings(tmp_path):
     assert body["jira_project_keys"] == "PROJ"
 
 
+def test_patch_repo_can_restore_context_toggle_inheritance(tmp_path):
+    client, _ = _client(tmp_path)
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    client.patch(
+        f"/api/repos/{created['id']}", json={"context_jira_on": 0}
+    ).raise_for_status()
+
+    r = client.patch(
+        f"/api/repos/{created['id']}", json={"context_jira_on": None}
+    )
+
+    assert r.status_code == 200
+    assert r.json()["context_jira_on"] is None
+
+
 def test_update_finding_status(tmp_path):
     client, conn = _client(tmp_path)
     from server.repos import repo_repo, pr_repo, finding_repo, review_repo

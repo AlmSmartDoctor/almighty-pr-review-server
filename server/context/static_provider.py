@@ -1,5 +1,6 @@
 import os
 
+from server import config
 from server.context.base import ContextRequest, ContextResult
 
 
@@ -25,7 +26,7 @@ class StaticContextProvider:
                     error="path outside allowed root",
                 )
             with open(real, encoding="utf-8") as f:
-                content = f.read()
+                content = f.read(config.MAX_CONTEXT_CHARS_PER_SOURCE + 1)
         except (OSError, ValueError, TypeError):
             # 파일 없음/권한/None root 등 → best-effort degrade
             return ContextResult(provider=self.name, status="empty", text="")

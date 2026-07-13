@@ -26,5 +26,24 @@ class CompositeContextProvider:
                     status="error",
                     error=self._redact(f"{type(e).__name__}: {e}"),
                 )
+            r = ContextResult(
+                provider=self._redact(r.provider),
+                status=self._redact(r.status),
+                text=self._redact(r.text or ""),
+                meta=_redact_value(r.meta, self._redact),
+                error=self._redact(r.error) if r.error else None,
+            )
             self.results.append(r)
         return render_context(self.results)
+
+
+def _redact_value(value, redactor):
+    if isinstance(value, str):
+        return redactor(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v, redactor) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v, redactor) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v, redactor) for v in value)
+    return value

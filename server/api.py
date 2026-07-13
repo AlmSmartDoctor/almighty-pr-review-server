@@ -151,7 +151,16 @@ class RepoPatch(BaseModel):
 
 @app.patch("/api/repos/{rid}")
 def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
-    repo_repo.update(conn, rid, **body.model_dump(exclude_none=True))
+    fields = body.model_dump(exclude_none=True)
+    for key in (
+        "context_static_on",
+        "context_jira_on",
+        "context_db_schema_on",
+        "context_graphify_on",
+    ):
+        if key in body.model_fields_set and getattr(body, key) is None:
+            fields[key] = None
+    repo_repo.update(conn, rid, **fields)
     return dict(repo_repo.get(conn, rid))
 
 

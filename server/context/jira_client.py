@@ -1,11 +1,13 @@
-import ipaddress
+import json
 import re
 from urllib.parse import urlparse
 
 from server import config
 
 _HTTP_TIMEOUT_SEC = 10
+_MAX_RESPONSE_BYTES = 1_048_576
 _KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+")
+_AC_FIELD_RE = re.compile(r"customfield_\d+")
 
 
 class JiraError(RuntimeError):
@@ -15,51 +17,83 @@ class JiraError(RuntimeError):
 
 
 def _validate_base_url(base_url: str) -> str:
-    """B-INV-7: fetch-time SSRF guard. base_url은 operator가 설정하는 env(공격자 입력 아님) —
-    유일한 공격자-유래 입력은 issue key(아래에서 별도 엄격 검증)이므로, DNS 조회 없는
-    denylist로 충분하며 테스트를 오프라인/결정적으로 유지할 수 있다.
-    https 스킴을 강제하고, host가 IP 리터럴이면 private/loopback/link-local/reserved/
-    multicast/unspecified를 차단(127.0.0.1, 10/8, 192.168/16, 169.254.169.254 메타데이터 등),
-    host가 이름이면 localhost/*.local/*.internal을 차단한다. DNS는 resolve하지 않는다."""
-    p = urlparse(base_url)
-    if p.scheme != "https" or not p.hostname:
-        raise JiraError("jira base_url must be https with a host")
-    host = p.hostname
-    # NOTE: obfuscated IPv4 encodings (decimal/octal/hex, inet_aton shorthand) and
-    # RFC6598 are NOT covered — base_url is operator-set env, not attacker input.
-    # Revisit (resolve+check) only if base_url ever comes from a less-trusted source.
+    """B-INV-7: fetch-time SSRF guard.
+    Jira Cloud의 canonical *.atlassian.net HTTPS origin만 허용해 DNS alias/rebinding과
+    userinfo·포트·경로를 통한 대상 우회를 차단한다."""
     try:
-        ip = ipaddress.ip_address(host)
+        p = urlparse(base_url)
+        port = p.port
     except ValueError:
-        ip = None
-    if ip is not None:
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise JiraError("jira base_url host not allowed")
-    elif host == "localhost" or host.endswith(".local") or host.endswith(".internal"):
+        raise JiraError("jira base_url is invalid") from None
+    host = (p.hostname or "").lower()
+    if (
+        p.scheme != "https"
+        or not host.endswith(".atlassian.net")
+        or host == "atlassian.net"
+        or port not in (None, 443)
+        or p.username is not None
+        or p.password is not None
+        or p.path not in ("", "/")
+        or p.query
+        or p.fragment
+    ):
         raise JiraError("jira base_url host not allowed")
     return base_url.rstrip("/")
+
+
+class _BufferedResponse:
+    def __init__(self, status_code: int, content: bytes):
+        self.status_code = status_code
+        self.content = content
+
+    def json(self):
+        return json.loads(self.content)
 
 
 class JiraClient:
     """gh.py 규율을 미러: 주입 http로 테스트 가능, 에러는 구조화+redact.
     자격은 env-only(config), 생성은 절대 raise 안 함(검증은 get_issue 시점)."""
 
-    def __init__(self, *, base_url: str, email: str, token: str, http=None):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        email: str,
+        token: str,
+        http=None,
+        acceptance_criteria_field: str = "",
+    ):
         self._base_url = base_url
         self._email = email
         self._token = token
+        self._acceptance_criteria_field = acceptance_criteria_field
         if http is None:
             import httpx  # lazy: httpx는 런타임 의존
 
             http = httpx
         self._http = http
+
+    def _get(self, url: str, **kwargs):
+        stream = getattr(self._http, "stream", None)
+        if stream is None:
+            response = self._http.get(url, **kwargs)
+            content = getattr(response, "content", None)
+            if content is not None and len(content) > _MAX_RESPONSE_BYTES:
+                raise JiraError("jira response too large")
+            return response
+
+        with stream("GET", url, follow_redirects=False, **kwargs) as response:
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > _MAX_RESPONSE_BYTES:
+                raise JiraError("jira response too large")
+            if response.status_code >= 400:
+                return _BufferedResponse(response.status_code, b"")
+            content = bytearray()
+            for chunk in response.iter_bytes():
+                if len(content) + len(chunk) > _MAX_RESPONSE_BYTES:
+                    raise JiraError("jira response too large")
+                content.extend(chunk)
+            return _BufferedResponse(response.status_code, bytes(content))
 
     def _redact(self, text: str) -> str:
         out = text or ""
@@ -72,11 +106,17 @@ class JiraClient:
         base = _validate_base_url(self._base_url)  # SSRF at fetch
         if not _KEY_RE.fullmatch(key):  # strict key
             raise JiraError(f"invalid jira key: {key!r}")
+        ac_field = self._acceptance_criteria_field
+        if ac_field and not _AC_FIELD_RE.fullmatch(ac_field):
+            raise JiraError("invalid jira acceptance criteria field")
         url = f"{base}/rest/api/3/issue/{key}"
+        requested_fields = ["summary", "description"]
+        if ac_field:
+            requested_fields.append(ac_field)
         try:
-            resp = self._http.get(
+            resp = self._get(
                 url,
-                params={"fields": "summary,description"},
+                params={"fields": ",".join(requested_fields)},
                 auth=(self._email, self._token),
                 timeout=_HTTP_TIMEOUT_SEC,
             )
@@ -96,11 +136,23 @@ class JiraClient:
             description = _adf_to_text(fields.get("description"))[
                 : config.MAX_CONTEXT_CHARS_PER_SOURCE
             ]
+            acceptance_criteria = (
+                _adf_to_text(fields.get(ac_field))[
+                    : config.MAX_CONTEXT_CHARS_PER_SOURCE
+                ]
+                if ac_field
+                else ""
+            )
         except Exception as e:  # non-JSON/non-dict body → redacted, structured
             raise JiraError(
                 self._redact(f"malformed jira response: {type(e).__name__}: {e}")
             ) from None
-        return {"key": key, "summary": summary, "description": description}
+        return {
+            "key": key,
+            "summary": summary,
+            "description": description,
+            "acceptance_criteria": acceptance_criteria,
+        }
 
 
 def _adf_to_text(node) -> str:

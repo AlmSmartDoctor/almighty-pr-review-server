@@ -42,6 +42,30 @@ def test_composite_degrades_and_redacts():
     )
 
 
+def test_composite_redacts_returned_text_and_error(monkeypatch):
+    from server import config
+
+    monkeypatch.setattr(config, "JIRA_API_TOKEN", "tok-RETURNED")
+
+    class ReturnedResult:
+        name = "returned"
+
+        def fetch(self, req):
+            return ContextResult(
+                provider=self.name,
+                status="ok",
+                text="body tok-RETURNED",
+                error="error tok-RETURNED",
+            )
+
+    c = CompositeContextProvider([ReturnedResult()])
+    rendered = c.gather(req=_req())
+
+    assert "tok-RETURNED" not in rendered
+    assert "tok-RETURNED" not in c.results[0].text
+    assert "tok-RETURNED" not in (c.results[0].error or "")
+
+
 def test_redact_secrets_masks_configured_token(monkeypatch):
     from server import config
     from server.context.base import redact_secrets
@@ -122,6 +146,20 @@ def test_static_degrades_when_missing(tmp_path):
     assert r.text == ""
 
 
+def test_static_limits_file_read_to_source_cap(tmp_path, monkeypatch):
+    from server import config
+    from server.context.static_provider import StaticContextProvider
+
+    monkeypatch.setattr(config, "MAX_CONTEXT_CHARS_PER_SOURCE", 32)
+    (tmp_path / "large.md").write_text("x" * 10_000)
+
+    r = StaticContextProvider(
+        path=str(tmp_path / "large.md"), root=str(tmp_path)
+    ).fetch(_req())
+
+    assert len(r.text) <= config.MAX_CONTEXT_CHARS_PER_SOURCE + 1
+
+
 def test_render_wraps_external_text_as_data():
     from server.context.base import render_context, ContextResult
 
@@ -170,7 +208,9 @@ def test_render_caps_total(monkeypatch):
 def test_render_fence_nonce_is_unpredictable():
     from server.context.base import render_context, ContextResult
 
-    r = lambda: render_context([ContextResult(provider="x", status="ok", text="a")])
+    def r():
+        return render_context([ContextResult(provider="x", status="ok", text="a")])
+
     assert r() != r()  # 매 렌더 nonce가 달라 종료 펜스를 예측/위조 불가
 
 
@@ -213,6 +253,7 @@ def test_auth_env_keys_excludes_provider_secrets():
         "ALMIGHTY_JIRA_API_TOKEN",
         "ALMIGHTY_JIRA_EMAIL",
         "ALMIGHTY_JIRA_BASE_URL",
+        "ALMIGHTY_JIRA_ACCEPTANCE_CRITERIA_FIELD",
         "JIRA_API_TOKEN",
         "DB_PASSWORD",
         "GRAPHIFY_TOKEN",
@@ -299,7 +340,9 @@ def test_jira_provider_renders_markdown():
             }
         }
     )
-    r = JiraContextProvider(client=fake).fetch(_req(head_ref="feature/PROJ-1"))
+    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
+        _req(head_ref="feature/PROJ-1")
+    )
     assert r.status == "ok"
     assert "PROJ-1" in r.text and "로그인 버그" in r.text
 
@@ -308,8 +351,20 @@ def test_jira_provider_empty_when_no_keys():
     from server.context.jira_provider import JiraContextProvider
 
     fake = _FakeJira()
-    r = JiraContextProvider(client=fake).fetch(_req())
+    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(_req())
     assert r.status == "empty" and r.text == ""
+    assert fake.calls == []
+
+
+def test_jira_provider_requires_project_allowlist():
+    from server.context.jira_provider import JiraContextProvider
+
+    fake = _FakeJira(
+        issues={"HR-1": {"key": "HR-1", "summary": "secret", "description": "x"}}
+    )
+    r = JiraContextProvider(client=fake).fetch(_req(title="HR-1"))
+
+    assert r.status == "skipped" and r.text == ""
     assert fake.calls == []
 
 
@@ -317,7 +372,9 @@ def test_jira_provider_error_when_all_keys_fail():
     from server.context.jira_provider import JiraContextProvider
 
     fake = _FakeJira(exc=RuntimeError("boom"))
-    r = JiraContextProvider(client=fake).fetch(_req(head_ref="feature/PROJ-1"))
+    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
+        _req(head_ref="feature/PROJ-1")
+    )
     assert r.status == "error" and r.text == ""
     assert "boom" not in (r.error or "")
 
@@ -344,9 +401,32 @@ def test_jira_provider_caps_outbound_calls():
     keys = [f"PROJ-{i}" for i in range(1, 7)]  # 6 distinct keys
     issues = {k: {"key": k, "summary": "s", "description": ""} for k in keys}
     fake = _FakeJira(issues=issues)
-    r = JiraContextProvider(client=fake).fetch(_req(body=" ".join(keys)))
+    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
+        _req(body=" ".join(keys))
+    )
     assert r.status == "ok"
     assert len(fake.calls) <= 5
+
+
+def test_jira_provider_renders_acceptance_criteria():
+    from server.context.jira_provider import JiraContextProvider
+
+    fake = _FakeJira(
+        issues={
+            "PROJ-1": {
+                "key": "PROJ-1",
+                "summary": "로그인 버그",
+                "description": "본문",
+                "acceptance_criteria": "로그인 성공",
+            }
+        }
+    )
+    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
+        _req(title="PROJ-1")
+    )
+
+    assert "Acceptance criteria" in r.text
+    assert "로그인 성공" in r.text
 
 
 def test_db_schema_provider_renders_injected_source():

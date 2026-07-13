@@ -244,6 +244,43 @@ def test_pipeline_degrades_when_context_gather_raises(db):
     assert meta.get("degraded") is True and meta["sources"] == []
 
 
+def test_pipeline_degrades_when_context_gather_times_out(db, monkeypatch):
+    import json
+    import time
+
+    monkeypatch.setattr("server.pipeline.CONTEXT_GATHER_TIMEOUT_SEC", 0.01)
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=13,
+        title="t",
+        author="a",
+        head_sha="s13",
+        base_ref="main",
+        url="u",
+    )
+
+    class SlowContext:
+        def gather(self, *, req):
+            time.sleep(0.05)
+            return "too late"
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=SlowContext(),
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    run = review_repo.get_run(db, run_id)
+    assert run["status"] == "done" and run["context_text"] == ""
+    assert json.loads(run["context_meta"])["degraded"] is True
+
+
 def test_pipeline_redacts_error_in_persisted_meta(db, monkeypatch):
     import json
     from server import config

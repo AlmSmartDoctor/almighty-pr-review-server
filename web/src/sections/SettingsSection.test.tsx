@@ -131,24 +131,37 @@ test("context save patches only the four context fields", async () => {
   );
 });
 
-test("toggles per-repo static context", async () => {
-  const patchRepo = vi.spyOn(api, "patchRepo").mockResolvedValue({});
+test("sets per-repo provider overrides independently", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, context_static_on: 0 };
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
+    async (_id, patch) => ({ ...repo, ...patch }),
+  );
   render(<SettingsSection load={async () => settings} loadRepos={async () => [
-    { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, context_static_on: 0 },
+    repo,
   ]} />);
 
-  const toggle = await screen.findByRole("switch", { name: "acme/api 컨텍스트" });
-  fireEvent.click(toggle);
+  const staticOverride = await screen.findByRole("combobox", { name: "acme/api Static 컨텍스트" });
+  fireEvent.change(staticOverride, { target: { value: "1" } });
 
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_static_on: 1 }));
+
+  const jiraOverride = screen.getByRole("combobox", { name: "acme/api Jira 컨텍스트" });
+  fireEvent.change(jiraOverride, { target: { value: "0" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_jira_on: 0 }));
 });
 
-test("per-repo toggle reflects the inherited global default when NULL", async () => {
+test("per-repo provider override shows and restores inheritance", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, context_jira_on: 0 };
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
+    async (_id, patch) => ({ ...repo, ...patch }),
+  );
   render(<SettingsSection
-    load={async () => ({ ...contextSettings, context_static_on: 1 })}
-    loadRepos={async () => [
-      { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 },
-    ]} />);
+    load={async () => ({ ...contextSettings, context_jira_on: 1 })}
+    loadRepos={async () => [repo]} />);
 
-  expect(await screen.findByRole("switch", { name: "acme/api 컨텍스트" })).toBeChecked();
+  const override = await screen.findByRole("combobox", { name: "acme/api Jira 컨텍스트" });
+  expect(override).toHaveDisplayValue("꺼짐");
+
+  fireEvent.change(override, { target: { value: "inherit" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_jira_on: null }));
 });

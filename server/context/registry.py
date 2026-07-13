@@ -1,3 +1,5 @@
+import re
+
 from server import config
 from server.context.base import redact_secrets
 from server.context.composite import CompositeContextProvider
@@ -17,12 +19,17 @@ def _ref(repo, key):
 
 
 def _parse_keys(s):
-    return tuple(t for t in (s or "").replace(",", " ").split() if t)
+    return tuple(
+        t
+        for t in (s or "").replace(",", " ").split()
+        if re.fullmatch(r"[A-Z][A-Z0-9]+", t)
+    )
 
 
 def build_context_provider(repo, settings):
     """활성 프로바이더 조립. 생성은 절대 예외를 밖으로 던지지 않는다(B-INV-4/D6)."""
     providers = []
+    jira_project_keys = _parse_keys(_ref(repo, "jira_project_keys"))
     if _effective(repo, settings, "context_static_on") and _ref(
         repo, "static_context_path"
     ):
@@ -39,6 +46,7 @@ def build_context_provider(repo, settings):
         and config.JIRA_BASE_URL
         and config.JIRA_EMAIL
         and config.JIRA_API_TOKEN
+        and jira_project_keys
     ):
         try:
             from server.context.jira_client import JiraClient
@@ -48,11 +56,12 @@ def build_context_provider(repo, settings):
                 base_url=config.JIRA_BASE_URL,
                 email=config.JIRA_EMAIL,
                 token=config.JIRA_API_TOKEN,
+                acceptance_criteria_field=config.JIRA_ACCEPTANCE_CRITERIA_FIELD,
             )
             providers.append(
                 JiraContextProvider(
                     client=client,
-                    project_keys=_parse_keys(_ref(repo, "jira_project_keys")),
+                    project_keys=jira_project_keys,
                 )
             )
         except Exception as e:  # 생성 실패 = 드롭+redact 로그, never raise
