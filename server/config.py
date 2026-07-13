@@ -25,3 +25,6 @@ JIRA_API_TOKEN = os.environ.get("ALMIGHTY_JIRA_API_TOKEN", "")
 JIRA_ACCEPTANCE_CRITERIA_FIELD = os.environ.get(
     "ALMIGHTY_JIRA_ACCEPTANCE_CRITERIA_FIELD", ""
 )
+
+# GitHub 웹훅 공유 시크릿(env-only). 미설정이면 "" → 웹훅 수신 자체를 거부(503).
+GITHUB_WEBHOOK_SECRET = os.environ.get("ALMIGHTY_GITHUB_WEBHOOK_SECRET", "")

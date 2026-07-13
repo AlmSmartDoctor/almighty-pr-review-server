@@ -29,6 +29,22 @@ ALMIGHTY_E2E=1 ALMIGHTY_E2E_REPO=me/sandbox \
 ```
 특정 PR만 smoke하려면 작은 PR 기준으로 `ALMIGHTY_E2E_PR=2414`처럼 추가한다.
 
+## GitHub 웹훅 (푸시 트리거)
+
+폴링(pull) 대신 GitHub `pull_request` 웹훅(push)으로도 리뷰를 트리거할 수 있다. 폴러와 동일한 게이트를 그대로 적용한다: 등록·`enabled`·`trigger_mode=auto` 레포에 한해, 벤더가 켜져 있고 head sha가 새로우면 리뷰 job을 enqueue한다(폴링과 중복돼도 `UNIQUE(pr_id, head_sha)`로 한 번만 실행). `opened`/`synchronize`/`reopened` action만 대상이다.
+
+공유 시크릿은 **env-only**(sqlite 금지):
+```bash
+ALMIGHTY_GITHUB_WEBHOOK_SECRET=<GitHub 웹훅과 동일한 임의 시크릿>
+```
+GitHub 레포/조직 설정 → Webhooks → Add webhook:
+- **Payload URL**: `https://<서버 공개주소>/api/webhooks/github` (외부 노출을 위해 리버스 프록시/터널 필요)
+- **Content type**: `application/json`
+- **Secret**: 위 `ALMIGHTY_GITHUB_WEBHOOK_SECRET`와 동일 값
+- **Events**: "Let me select individual events" → **Pull requests**만 선택
+
+검증은 `X-Hub-Signature-256`(HMAC-SHA256, raw body 기준) 상수시간 비교다. 시크릿 미설정이면 수신 자체를 거부한다(503). 서명 불일치는 401, 대상 아님(다른 이벤트·action, 미등록/`manual` 레포)은 2xx로 무시한다.
+
 ## 외부 컨텍스트 / Jira 연동
 
 ### Static 컨텍스트 (외부 의존 0)

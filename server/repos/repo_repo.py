@@ -14,6 +14,13 @@ def get(conn: sqlite3.Connection, rid: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM repo WHERE id = ?", (rid,)).fetchone()
 
 
+def get_by_full_name(conn: sqlite3.Connection, full_name: str) -> sqlite3.Row | None:
+    # GitHub full_name은 대소문자 무시(정규 casing과 등록 casing이 달라도 매칭) → NOCASE.
+    return conn.execute(
+        "SELECT * FROM repo WHERE full_name = ? COLLATE NOCASE", (full_name,)
+    ).fetchone()
+
+
 def list_enabled(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM repo WHERE enabled = 1").fetchall()
 

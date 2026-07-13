@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -435,6 +435,49 @@ def trigger_review(pid: int, conn=Depends(get_conn)):
     pr = pr_repo.get(conn, pid)
     job_id = job_repo.enqueue_manual(conn, pr_id=pid, head_sha=pr["head_sha"])
     return {"job_id": job_id}
+
+
+@app.post("/api/webhooks/github")
+async def github_webhook(request: Request, conn=Depends(get_conn)):
+    """GitHub pull_request 웹훅 수신 → poller와 동일 로직으로 리뷰 job enqueue.
+    HMAC 검증(env-only 시크릿) 후 auto 레포·벤더·needs_review 게이트를 그대로 적용한다."""
+    from server.github.webhook import parse_pull_request_event, verify_signature
+
+    body = await request.body()
+    if not config.GITHUB_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="webhook secret not configured")
+    if not verify_signature(
+        config.GITHUB_WEBHOOK_SECRET, body, request.headers.get("X-Hub-Signature-256")
+    ):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    if request.headers.get("X-GitHub-Event") != "pull_request":
+        return {"status": "ignored"}  # ping/기타 이벤트
+    info = parse_pull_request_event(body)
+    if info is None:
+        return {"status": "ignored"}  # 리뷰 대상 action 아님/형태 불일치
+    repo = repo_repo.get_by_full_name(conn, info["full_name"])
+    if repo is None or not repo["enabled"] or repo["trigger_mode"] != "auto":
+        return {
+            "status": "ignored"
+        }  # 미등록/비활성/manual = 자동 리뷰 안 함(poller 동일)
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=repo["id"],
+        number=info["number"],
+        title=info["title"],
+        author=info["author"],
+        head_sha=info["head_sha"],
+        base_ref=info["base_ref"],
+        url=info["url"],
+        state=info["state"],
+        head_ref=info["head_ref"],
+        body=info["body"],
+    )
+    has_vendor = repo["vendor_claude_on"] or repo["vendor_codex_on"]
+    if has_vendor and pr_repo.needs_review(conn, pid):
+        job_repo.enqueue(conn, pr_id=pid, head_sha=info["head_sha"], trigger="auto")
+        return {"status": "enqueued", "pr": info["number"]}
+    return {"status": "skipped", "pr": info["number"]}
 
 
 @app.get("/api/harness")
