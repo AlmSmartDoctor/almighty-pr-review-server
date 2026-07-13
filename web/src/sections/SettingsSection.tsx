@@ -252,7 +252,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
         </CardHeader>
         <CardContent className="pt-1">
           <div className="divide-y divide-border">
-            <Field title="기본 effort" help="벤더 리뷰의 기본 reasoning 강도">
+            <Field title="기본 effort" help="새 레포에 적용되는 기본 reasoning 강도(레포별로 재정의 가능, codex에 반영)">
               <div className="w-40">
                 <NativeSelect value={draft.default_effort} onChange={(e) => setDraft({ ...draft, default_effort: e.target.value })}>
                   {EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}

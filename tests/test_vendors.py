@@ -108,6 +108,48 @@ def test_adapter_verify_parses_verdict(tmp_path):
     assert "CLAUDE_CONFIG_DIR" in runner.calls[0]["env"]  # 격리 env 유지
 
 
+def test_codex_adapter_passes_reasoning_effort(tmp_path):
+    hp = HarnessProfile.load("default")
+    hp.effort = "high"
+    runner = fake_runner(FAKE_OUT)
+    asyncio.run(
+        CodexAdapter(runner=runner).review(
+            prompt="리뷰해", workdir=tmp_path, harness=hp, runtime_dir=str(tmp_path)
+        )
+    )
+    args = runner.calls[0]["args"]
+    assert "-c" in args
+    assert "model_reasoning_effort=high" in args
+    assert args[-1] != "model_reasoning_effort=high"  # prompt는 positional 마지막
+
+
+def test_codex_adapter_omits_effort_when_unknown_value(tmp_path):
+    hp = HarnessProfile.load("default")
+    hp.effort = "turbo"  # codex enum 밖 → 플래그 생략(400 방지)
+    runner = fake_runner(FAKE_OUT)
+    asyncio.run(
+        CodexAdapter(runner=runner).review(
+            prompt="리뷰해", workdir=tmp_path, harness=hp, runtime_dir=str(tmp_path)
+        )
+    )
+    args = runner.calls[0]["args"]
+    assert not any(a.startswith("model_reasoning_effort=") for a in args)
+
+
+def test_claude_adapter_has_no_effort_flag(tmp_path):
+    hp = HarnessProfile.load("default")
+    hp.effort = "high"
+    runner = fake_runner(FAKE_OUT)
+    asyncio.run(
+        ClaudeAdapter(runner=runner).review(
+            prompt="리뷰해", workdir=tmp_path, harness=hp, runtime_dir=str(tmp_path)
+        )
+    )
+    args = runner.calls[0]["args"]
+    assert "-c" not in args
+    assert not any("reasoning_effort" in a for a in args)
+
+
 def test_default_runner_timeout_raises_vendor_timeout():
     with pytest.raises(VendorTimeout):
         asyncio.run(_default_runner(["sleep", "5"], timeout=0.2))

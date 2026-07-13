@@ -27,6 +27,7 @@ The spike proves the two properties that pull in opposite directions can hold
 | Structured output | `--output-format <text\|json\|stream-json>` (+ `--include-partial-messages`) | `--json` (JSONL events); `-o, --output-last-message <FILE>` (final message only); `--output-schema <FILE>` |
 | Config-dir env var | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` |
 | Model select | `--model <name>` | `-m, --model <name>` or `-c model=...` |
+| Reasoning effort | (none — effort = model choice) | `-c model_reasoning_effort=<none\|minimal\|low\|medium\|high\|xhigh>` |
 | Working dir | (runs in CWD; `--add-dir` to widen) | `-C, --cd <DIR>` |
 | Outside a git repo | n/a | `--skip-git-repo-check` (REQUIRED outside a repo) |
 | Skip global config natively | `--safe-mode` (disables CLAUDE.md/skills/plugins/hooks/MCP; **auth still works**) | `--ignore-user-config` (skip `$CODEX_HOME/config.toml`, auth still uses `CODEX_HOME`); `--ignore-rules` |
@@ -85,6 +86,14 @@ account without it, and NOT injecting `config.toml` is what keeps `danger-full-a
 `approval=never` / `project_doc_fallback_filenames=["CLAUDE.md"]` out of the runtime.
 (If a future adapter ever needs a model/provider setting, pass it via `-c key=value` /
 `--model`, never by copying the global `config.toml`.)
+
+**Reasoning effort (empirically verified, codex-cli 0.144.1):** `codex exec -c
+model_reasoning_effort=<value>` is the effort knob. A bad value is rejected by the API
+(`invalid_enum_value`) which enumerates the supported set: `none, minimal, low, medium,
+high, xhigh`. The adapter injects this from `HarnessProfile.effort` (driven per-repo by
+`repo.default_effort`) but ONLY when the value is in that set — an unknown value omits the
+flag so codex uses its default, never 400-failing the whole review. `claude` has NO
+reasoning/effort flag (see §1); for claude, effort = model choice.
 
 ### 2d. Minimal auth env allowlist
 

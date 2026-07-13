@@ -81,6 +81,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     # ★ 설정에서 고른 벤더별 모델로 하네스 기본값 덮어씀
     hp.model = settings["review_model"]  # Claude
     hp.codex_model = settings["codex_model"]  # Codex ("" = codex 자체 기본)
+    hp.effort = repo["default_effort"] or DEFAULT_EFFORT  # codex reasoning effort 구동
     prescreen_model = settings["prescreen_model"]
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 

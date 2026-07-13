@@ -87,7 +87,14 @@ class RepoIn(BaseModel):
 
 @app.post("/api/repos", status_code=201)
 def add_repo(body: RepoIn, conn=Depends(get_conn)):
-    rid = repo_repo.add(conn, full_name=body.full_name, local_path=body.local_path)
+    # 전역 기본 effort를 신규 레포에 seed(레포별로 재정의 가능). 이후 리뷰가
+    # repo.default_effort를 codex reasoning effort로 사용하므로 전역값이 실제로 작동.
+    rid = repo_repo.add(
+        conn,
+        full_name=body.full_name,
+        local_path=body.local_path,
+        default_effort=settings_repo.get(conn)["default_effort"],
+    )
     return dict(repo_repo.get(conn, rid))
 
 

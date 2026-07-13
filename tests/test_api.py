@@ -102,6 +102,13 @@ def test_patch_verify_singles_toggle(tmp_path):
     )
 
 
+def test_new_repo_seeds_default_effort_from_global(tmp_path):
+    client, _ = _client(tmp_path)
+    client.patch("/api/settings", json={"default_effort": "xhigh"}).raise_for_status()
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    assert created["default_effort"] == "xhigh"
+
+
 def test_patch_incremental_review_toggle(tmp_path):
     client, _ = _client(tmp_path)
     assert (

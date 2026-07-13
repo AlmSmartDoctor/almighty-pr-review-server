@@ -782,6 +782,32 @@ def test_incremental_off_by_default_uses_full_even_with_prior_run(db):
     assert review_repo.get_run(db, run_id)["base_sha"] is None
 
 
+def test_pipeline_injects_repo_effort_into_harness_seen_by_adapter(db):
+    rid, pid = _seed_pr(db, number=70, head_sha="s70")
+    repo_repo.update(db, rid, default_effort="high")
+
+    class EffortCapturingAdapter:
+        vendor = "codex"
+
+        def __init__(self):
+            self.effort = None
+
+        async def review(self, *, harness, **kw):
+            self.effort = harness.effort
+            return []
+
+    cap = EffortCapturingAdapter()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[cap],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert cap.effort == "high"
+
+
 def test_build_prompt_empty_no_block():
     out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "")
     assert "## 외부 컨텍스트" not in out and "DIFF" in out
