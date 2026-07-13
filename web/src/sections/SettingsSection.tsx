@@ -28,6 +28,10 @@ type Settings = {
   review_model: string;
   codex_model: string;
   prescreen_gate_threshold: string;
+  context_static_on?: number;
+  context_jira_on?: number;
+  context_db_schema_on?: number;
+  context_graphify_on?: number;
 };
 
 type Repo = {
@@ -42,6 +46,7 @@ type Repo = {
   merge_enabled?: number;
   auto_post?: number;
   harness_name?: string;
+  context_static_on?: number;
 };
 
 const EFFORTS = ["low", "medium", "high", "xhigh"];
@@ -125,6 +130,7 @@ export function SettingsSection({ load, loadRepos }: {
                     <TableHead className="text-center">Codex</TableHead>
                     <TableHead className="text-center">병합</TableHead>
                     <TableHead className="text-center">auto-post</TableHead>
+                    <TableHead className="text-center">컨텍스트</TableHead>
                     <TableHead>하네스</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -161,6 +167,7 @@ export function SettingsSection({ load, loadRepos }: {
                       <ToggleCell label="Codex" checked={r.vendor_codex_on !== 0} onChange={(v) => patchRepo(r, { vendor_codex_on: v })} />
                       <ToggleCell label="병합" checked={!!r.merge_enabled} onChange={(v) => patchRepo(r, { merge_enabled: v })} />
                       <ToggleCell label="auto-post" checked={!!r.auto_post} onChange={(v) => patchRepo(r, { auto_post: v })} />
+                      <ToggleCell label={`${r.full_name} 컨텍스트`} checked={!!r.context_static_on} onChange={(v) => patchRepo(r, { context_static_on: v })} />
                       <TableCell>
                         <div className="w-28">
                           <NativeSelect value={r.harness_name ?? "default"} className="h-8" onChange={(e) => patchRepo(r, { harness_name: e.target.value })}>
@@ -240,6 +247,38 @@ export function SettingsSection({ load, loadRepos }: {
             <Button variant="outline" onClick={() => { setDraft(settings); setStatus("변경을 되돌렸습니다."); }} disabled={!dirty}>
               <RotateCcw /> 되돌리기
             </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-5">
+        <CardHeader>
+          <CardTitle>외부 컨텍스트</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-1">
+          <StatusLine className="pb-2">
+            URL·토큰 등 자격 증명은 서버 환경 변수로만 설정됩니다. 이 화면에서는 소스 사용 여부만 켜고 끕니다.
+          </StatusLine>
+          <div className="divide-y divide-border">
+            <Field title="Static 컨텍스트" help="레포 내 지정 파일을 리뷰 프롬프트에 주입">
+              <Switch aria-label="Static 컨텍스트" checked={!!draft.context_static_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, context_static_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="Jira 연동" help="연동 예정 · 서버에 Jira 토큰 설정 필요">
+              <Switch aria-label="Jira 연동" checked={!!draft.context_jira_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, context_jira_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="사내 DB 스키마" help="연동 예정 · 서버에 DB 터널/자격 증명 설정 필요">
+              <Switch aria-label="사내 DB 스키마" checked={!!draft.context_db_schema_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, context_db_schema_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="코드 그래프" help="연동 예정 · 코드 그래프 인덱싱 파이프라인 필요">
+              <Switch aria-label="코드 그래프" checked={!!draft.context_graphify_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, context_graphify_on: v ? 1 : 0 })} />
+            </Field>
+          </div>
+          <div className="mt-5">
+            <Button onClick={saveSettings} disabled={!dirty}><Save /> 컨텍스트 저장</Button>
           </div>
         </CardContent>
       </Card>

@@ -10,6 +10,12 @@ const settings = {
   codex_model: "", prescreen_gate_threshold: "moderate",
 };
 
+const contextSettings = {
+  ...settings,
+  context_static_on: 0, context_jira_on: 0,
+  context_db_schema_on: 0, context_graphify_on: 0,
+};
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -95,4 +101,42 @@ test("adds a repository and refreshes the repository list", async () => {
     });
   });
   expect(await screen.findByText("acme/web")).toBeInTheDocument();
+});
+
+test("renders external context toggles", async () => {
+  render(<SettingsSection load={async () => contextSettings} loadRepos={async () => []} />);
+  expect(await screen.findByRole("switch", { name: "Static 컨텍스트" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Jira 연동" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "사내 DB 스키마" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "코드 그래프" })).toBeInTheDocument();
+  expect(screen.queryByPlaceholderText(/토큰|token|url/i)).toBeNull();
+});
+
+test("toggles static context and saves via the context save button", async () => {
+  const patchSettings = vi
+    .spyOn(api, "patchSettings")
+    .mockResolvedValue({ ...contextSettings, context_static_on: 1 });
+  render(<SettingsSection load={async () => contextSettings} loadRepos={async () => []} />);
+
+  const toggle = await screen.findByRole("switch", { name: "Static 컨텍스트" });
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "컨텍스트 저장" }));
+
+  await waitFor(() =>
+    expect(patchSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ context_static_on: 1 }),
+    ),
+  );
+});
+
+test("toggles per-repo static context", async () => {
+  const patchRepo = vi.spyOn(api, "patchRepo").mockResolvedValue({});
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [
+    { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, context_static_on: 0 },
+  ]} />);
+
+  const toggle = await screen.findByRole("switch", { name: "acme/api 컨텍스트" });
+  fireEvent.click(toggle);
+
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_static_on: 1 }));
 });
