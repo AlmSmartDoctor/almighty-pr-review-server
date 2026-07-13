@@ -74,15 +74,18 @@ const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark
 const optionsWith = (known: string[], current: string) =>
   current && !known.includes(current) ? [current, ...known] : known;
 
-export function SettingsSection({ load, loadRepos }: {
+export function SettingsSection({ load, loadRepos, loadHarnesses }: {
   load?: () => Promise<Settings>;
   loadRepos?: () => Promise<Repo[]>;
+  loadHarnesses?: () => Promise<string[]>;
 }) {
   const loader = load ?? api.settings;
   const repoLoader = loadRepos ?? api.repos;
+  const harnessLoader = loadHarnesses ?? api.harnesses;
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
+  const [harnessNames, setHarnessNames] = useState<string[]>([]);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
 
@@ -93,6 +96,9 @@ export function SettingsSection({ load, loadRepos }: {
     loader().then((s) => { setSettings(s); setDraft(s); }).catch(() => setErr("설정을 불러오지 못했습니다."));
   }, []);
   useEffect(() => { refreshRepos(); }, []);
+  useEffect(() => {
+    Promise.resolve().then(harnessLoader).then(setHarnessNames).catch(() => setHarnessNames([]));
+  }, []);
 
   if (!draft || !settings) return <p className="text-sm text-muted-foreground">불러오는 중...</p>;
 
@@ -216,8 +222,16 @@ export function SettingsSection({ load, loadRepos }: {
                       />
                       <TableCell>
                         <div className="w-28">
-                          <NativeSelect value={r.harness_name ?? "default"} className="h-8" onChange={(e) => patchRepo(r, { harness_name: e.target.value })}>
-                            <option value="default">default</option>
+                          <NativeSelect
+                            aria-label={`${r.full_name} 하네스`}
+                            value={r.harness_name ?? "default"}
+                            className="h-8"
+                            onChange={(e) => patchRepo(r, { harness_name: e.target.value })}
+                          >
+                            {(harnessNames.includes(r.harness_name ?? "default")
+                              ? harnessNames
+                              : [r.harness_name ?? "default", ...harnessNames]
+                            ).map((n) => <option key={n} value={n}>{n}</option>)}
                           </NativeSelect>
                         </div>
                       </TableCell>

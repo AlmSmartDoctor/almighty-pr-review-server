@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { api } from "../api";
 import { SettingsSection } from "./SettingsSection";
@@ -189,5 +189,22 @@ test("edits per-repo static_context_path and jira_project_keys", async () => {
   fireEvent.blur(keysInput);
   await waitFor(() =>
     expect(patchRepo).toHaveBeenCalledWith(7, { jira_project_keys: "PROJ,ABC" }),
+  );
+});
+
+test("repo harness select is populated from the harness list", async () => {
+  const patchRepo = vi.spyOn(api, "patchRepo").mockResolvedValue({});
+  render(<SettingsSection
+    load={async () => settings}
+    loadRepos={async () => [
+      { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, harness_name: "default" },
+    ]}
+    loadHarnesses={async () => ["default", "security-focus"]} />);
+
+  const sel = await screen.findByRole("combobox", { name: "acme/api 하네스" });
+  expect(within(sel).getByRole("option", { name: "security-focus" })).toBeInTheDocument();
+  fireEvent.change(sel, { target: { value: "security-focus" } });
+  await waitFor(() =>
+    expect(patchRepo).toHaveBeenCalledWith(7, { harness_name: "security-focus" }),
   );
 });
