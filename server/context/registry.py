@@ -57,4 +57,11 @@ def build_context_provider(repo, settings):
             )
         except Exception as e:  # 생성 실패 = 드롭+redact 로그, never raise
             print(f"[context] jira provider skipped: {redact_secrets(str(e))}")
+    if _effective(repo, settings, "context_db_schema_on"):
+        try:
+            from server.context.db_schema_provider import DBSchemaProvider
+
+            providers.append(DBSchemaProvider())
+        except Exception as e:  # never raise
+            print(f"[context] db_schema provider skipped: {redact_secrets(str(e))}")
     return CompositeContextProvider(providers)

@@ -16,6 +16,7 @@
 
 - `~/.claude/db-connections.yml`에 인라인 자격이 존재하나 (a) 다수 커넥션이 SSM 터널 게이트 뒤에 있고 (b) 프로덕션 RDS가 섞여 있으며 (c) "변경된 diff → 관련 테이블" 선택 규칙이 미정 → **B9로 유예**.
 - 접근 시엔 db-inspector 계열 **read-only** 경로만 사용하고 **프로덕션 RDS raw 접속 금지**. 터널 미가동 시 빈 컨텍스트로 degrade.
+- 인터페이스: `DBSchemaProvider`는 `schema_source(req) -> str`를 주입받는다 — 변경 파일(`req.changed_files`)로부터 관련 테이블의 DDL을 돌려주는 함수다. "변경 파일 경로 → 관련 테이블" 매핑 규칙과 read-only 접근 경로(db-inspector 스타일, **프로덕션 RDS raw 접속 없음**)의 구체 구현은 read-only DB 접근이 provisioning될 때까지 유예한다. 소스 미주입 시 `status="skipped"`; 주입된 소스가 실패/도달 불가하면 `status="empty"`, `text=""`로 degrade한다.
 
 ## Graphify (B9, 스텁)
 

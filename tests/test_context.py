@@ -347,3 +347,37 @@ def test_jira_provider_caps_outbound_calls():
     r = JiraContextProvider(client=fake).fetch(_req(body=" ".join(keys)))
     assert r.status == "ok"
     assert len(fake.calls) <= 5
+
+
+def test_db_schema_provider_renders_injected_source():
+    from server.context.db_schema_provider import DBSchemaProvider
+
+    r = DBSchemaProvider(schema_source=lambda req: "CREATE TABLE users (...);").fetch(
+        _req()
+    )
+    assert r.status == "ok" and "CREATE TABLE" in r.text
+
+
+def test_db_schema_provider_skipped_without_source():
+    from server.context.db_schema_provider import DBSchemaProvider
+
+    r = DBSchemaProvider().fetch(_req())
+    assert r.status == "skipped" and r.text == ""
+
+
+def test_db_schema_provider_degrades_on_source_error():
+    from server.context.db_schema_provider import DBSchemaProvider
+
+    def boom(req):
+        raise RuntimeError("boom")
+
+    r = DBSchemaProvider(schema_source=boom).fetch(_req())
+    assert r.status == "empty" and r.text == ""
+
+
+def test_registry_includes_db_schema_provider():
+    from server.context.registry import build_context_provider
+    from server.context.db_schema_provider import DBSchemaProvider
+
+    c = build_context_provider({"context_db_schema_on": 1}, {"context_db_schema_on": 0})
+    assert any(isinstance(p, DBSchemaProvider) for p in c.providers)
