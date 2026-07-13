@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,7 @@ from server.review.harness import HarnessProfile
 from server.review.merge import deterministic_merge
 from server.review.prescreen import (
     MAX_INLINE_DIFF_CHARS,
+    PRESCREEN_FALLBACK_REASON,
     PreScreenResult,
     diff_too_large_reason,
 )
@@ -91,10 +93,20 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         conn, run_id=run_id, deps=deps, repo=repo, pr=pr, settings=settings
     )
 
-    # 2. Pre-screen
-    complexity, score, reason = await asyncio.to_thread(
-        deps.prescreen, diff, prescreen_model
-    )
+    # 2. Pre-screen — 같은 (diff 내용, model) 직전 결과가 있으면 CLI 호출 재사용
+    # (retry·동일 sha 재리뷰의 중복 haiku 호출 절약; 벤더 리뷰는 그대로 재실행).
+    diff_hash = hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()
+    reused = prescreen_repo.find_reusable(conn, pr["id"], diff_hash, prescreen_model)
+    if reused is not None:
+        complexity, score, reason = (
+            reused["complexity"],
+            reused["score"],
+            reused["reason"],
+        )
+    else:
+        complexity, score, reason = await asyncio.to_thread(
+            deps.prescreen, diff, prescreen_model
+        )
     ps = PreScreenResult(complexity, score, reason)
     decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
     prescreen_repo.add(
@@ -107,6 +119,8 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         reason=reason,
         duration_ms=0,
         decided=decided,
+        # 파싱 실패 fallback은 비결정적 → 캐시 미등록(다음 런이 CLI 재시도해 self-heal).
+        diff_hash=None if reason == PRESCREEN_FALLBACK_REASON else diff_hash,
     )
     if decided == "skip" and repo["trigger_mode"] == "auto":
         review_repo.finish_run(conn, run_id, "canceled")

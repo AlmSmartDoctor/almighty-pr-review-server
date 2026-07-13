@@ -6,7 +6,7 @@ import pytest
 from server.models import Finding
 from server.pipeline import review_pr, PipelineDeps, PipelineError, _build_prompt
 from server.repos import repo_repo, pr_repo, finding_repo, review_repo
-from server.review.prescreen import MAX_INLINE_DIFF_CHARS
+from server.review.prescreen import MAX_INLINE_DIFF_CHARS, PRESCREEN_FALLBACK_REASON
 
 
 @pytest.fixture(autouse=True)
@@ -806,6 +806,81 @@ def test_pipeline_injects_repo_effort_into_harness_seen_by_adapter(db):
     )
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     assert cap.effort == "high"
+
+
+def test_prescreen_reused_across_reviews_of_identical_diff(db):
+    _, pid = _seed_pr(db, number=71, head_sha="s71")
+
+    class CountingPrescreen:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, diff, model):
+            self.calls += 1
+            return ("complex", 0.9, "핵심 로직")
+
+    counter = CountingPrescreen()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "SAME-DIFF",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=counter,
+        repo_local_path="/tmp/acme-api",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert counter.calls == 1  # 두 번째는 동일 diff → prescreen 재사용
+
+
+def test_prescreen_not_reused_when_diff_changes(db):
+    _, pid = _seed_pr(db, number=72, head_sha="s72")
+
+    class CountingPrescreen:
+        def __init__(self):
+            self.calls = 0
+            self.diff = "DIFF-A"
+
+        def __call__(self, diff, model):
+            self.calls += 1
+            return ("complex", 0.9, "핵심")
+
+    counter = CountingPrescreen()
+    diff_box = {"v": "DIFF-A"}
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff_box["v"],
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=counter,
+        repo_local_path="/tmp/acme-api",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    diff_box["v"] = "DIFF-B"  # diff 변경 → 캐시 미스
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert counter.calls == 2
+
+
+def test_prescreen_fallback_not_cached_so_next_run_retries(db):
+    _, pid = _seed_pr(db, number=73, head_sha="s73")
+
+    class CountingPrescreen:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, diff, model):
+            self.calls += 1
+            return ("moderate", 0.5, PRESCREEN_FALLBACK_REASON)
+
+    counter = CountingPrescreen()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "SAME-DIFF",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=counter,
+        repo_local_path="/tmp/acme-api",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert counter.calls == 2  # 파싱 실패는 캐시 안 됨 → 재시도(self-heal)
 
 
 def test_build_prompt_empty_no_block():

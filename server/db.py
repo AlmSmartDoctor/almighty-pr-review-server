@@ -167,6 +167,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "repo", "incremental_review_on", "INTEGER")
     _ensure_column(conn, "review_run", "base_sha", "TEXT")
+    # prescreen 결과 재사용 키 — diff 내용 해시(full/incremental 무관하게 정확).
+    _ensure_column(conn, "pre_screen", "diff_hash", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(

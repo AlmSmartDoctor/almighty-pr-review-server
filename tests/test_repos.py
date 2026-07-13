@@ -1,4 +1,11 @@
-from server.repos import repo_repo, pr_repo, finding_repo, settings_repo, review_repo
+from server.repos import (
+    repo_repo,
+    pr_repo,
+    finding_repo,
+    settings_repo,
+    review_repo,
+    prescreen_repo,
+)
 
 
 def test_add_and_get_repo(db):
@@ -298,6 +305,38 @@ def test_set_base_sha_roundtrip(db):
     assert review_repo.get_run(db, run_id)["base_sha"] is None
     review_repo.set_base_sha(db, run_id, "prevsha")
     assert review_repo.get_run(db, run_id)["base_sha"] == "prevsha"
+
+
+def test_prescreen_find_reusable_matches_diff_hash_and_model(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=8,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    prescreen_repo.add(
+        db,
+        pr_id=pid,
+        head_sha="s1",
+        model="haiku",
+        complexity="complex",
+        score=0.9,
+        reason="r",
+        duration_ms=0,
+        decided="review",
+        diff_hash="h1",
+    )
+    assert (
+        prescreen_repo.find_reusable(db, pid, "h1", "haiku")["complexity"] == "complex"
+    )
+    assert prescreen_repo.find_reusable(db, pid, "h2", "haiku") is None  # diff 다름
+    assert prescreen_repo.find_reusable(db, pid, "h1", "sonnet") is None  # model 다름
+    assert prescreen_repo.find_reusable(db, 999, "h1", "haiku") is None  # 다른 PR
 
 
 def test_finding_persists_verify_columns(db):

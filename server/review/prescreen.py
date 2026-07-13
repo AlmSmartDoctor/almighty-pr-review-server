@@ -6,6 +6,10 @@ from dataclasses import dataclass
 _ORDER = {"trivial": 0, "moderate": 1, "complex": 2}
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
+# CLI 출력이 파싱 불가일 때의 보수적 기본값. 비결정적 실패라 캐시 재사용 금지
+# (다음 런이 CLI를 재시도해 self-heal 하도록) — pipeline이 이 사유로 식별.
+PRESCREEN_FALLBACK_REASON = "사전평가 파싱 실패→기본 리뷰"
+
 
 @dataclass
 class PreScreenResult:
@@ -62,11 +66,10 @@ def prescreen(
                 )
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
-    return PreScreenResult("moderate", 0.5, "사전평가 파싱 실패→기본 리뷰")
+    return PreScreenResult("moderate", 0.5, PRESCREEN_FALLBACK_REASON)
 
 
 def diff_too_large_reason(diff: str) -> str:
     return (
-        f"diff too large for inline review: {len(diff)} chars "
-        f"> {MAX_INLINE_DIFF_CHARS}"
+        f"diff too large for inline review: {len(diff)} chars > {MAX_INLINE_DIFF_CHARS}"
     )
