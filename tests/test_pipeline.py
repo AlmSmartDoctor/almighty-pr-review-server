@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import pytest
 
 from server.models import Finding
-from server.pipeline import review_pr, PipelineDeps, PipelineError
+from server.pipeline import review_pr, PipelineDeps, PipelineError, _build_prompt
 from server.repos import repo_repo, pr_repo, finding_repo, review_repo
 from server.review.prescreen import MAX_INLINE_DIFF_CHARS
 
@@ -202,3 +202,47 @@ def test_pipeline_partial_success_one_vendor_fails(db):
     assert {f["vendor"] for f in fs} == {"codex"}  # 성공 벤더 finding만 영속화
     vr = {v["vendor"]: v["status"] for v in review_repo.list_vendor_results(db, run_id)}
     assert vr == {"claude": "failed", "codex": "done"}
+
+
+def test_pipeline_degrades_when_context_gather_raises(db):
+    # 외부 컨텍스트 수집이 터져도 리뷰는 계속(run=done). B-INV-4/8 degrade.
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=12,
+        title="t",
+        author="a",
+        head_sha="s12",
+        base_ref="main",
+        url="u",
+    )
+
+    class BoomContext:
+        def gather(self, *, req):
+            raise RuntimeError("provider exploded")
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=BoomContext(),
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert review_repo.get_run(db, run_id)["status"] == "done"
+
+
+def test_build_prompt_empty_no_block():
+    out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "")
+    assert "## 외부 컨텍스트" not in out and "DIFF" in out
+
+
+def test_build_prompt_with_block():
+    out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "### s\nhi")
+    assert "## 외부 컨텍스트" in out and "hi" in out

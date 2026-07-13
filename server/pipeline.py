@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from server.config import DEFAULT_EFFORT
+from server.config import DEFAULT_EFFORT, CONTEXT_GATHER_TIMEOUT_SEC
 from server.repos import (
     finding_repo,
     prescreen_repo,
@@ -20,6 +20,7 @@ from server.review.prescreen import (
     PreScreenResult,
     diff_too_large_reason,
 )
+from server.context.base import ContextRequest, redact_secrets
 from server.review.runner import RunnerPool
 from server.seams import NoOpContextProvider
 
@@ -115,8 +116,31 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         review_repo.finish_run(conn, run_id, "canceled", error="no vendor enabled")
         return
 
+    # 컨텍스트 수집(B-INV-1: 부모 프로세스·게이트 통과 후·worktree 이전).
+    # B-INV-8: to_thread+총 타임아웃, 실패/초과는 ''로 degrade → 리뷰 절대 차단 안 함.
+    req = ContextRequest(
+        repo=repo["full_name"],
+        pr_number=pr["number"],
+        title=pr["title"] or "",
+        author=pr["author"] or "",
+        head_ref=pr["head_ref"] if "head_ref" in pr.keys() else "",
+        base_ref=pr["base_ref"] or "",
+        body=pr["body"] if "body" in pr.keys() else "",
+    )
+    try:
+        context_text = await asyncio.wait_for(
+            asyncio.to_thread(deps.context.gather, req=req),
+            timeout=CONTEXT_GATHER_TIMEOUT_SEC,
+        )
+    except Exception as e:  # B-INV-4: best-effort degrade — 침묵 금지, redact 후 로그
+        context_text = ""
+        print(
+            f"[pipeline] context gather degraded: "
+            f"{redact_secrets(f'{type(e).__name__}: {e}')}"
+        )
+
     # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리
-    prompt = _build_prompt(pr, diff, deps.context)
+    prompt = _build_prompt(pr, diff, context_text)
     with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
@@ -214,9 +238,8 @@ def _persist(conn, run_id, items):
         )
 
 
-def _build_prompt(pr, diff, context) -> str:
-    ctx = context.gather(repo="", pr_number=pr["number"])  # v1 = ""
-    ctx_block = f"\n\n## 외부 컨텍스트\n{ctx}" if ctx else ""
+def _build_prompt(pr, diff, context_text: str) -> str:
+    ctx_block = f"\n\n## 외부 컨텍스트\n{context_text}" if context_text else ""
     return (
         f"# PR #{pr['number']}: {pr['title']}\n작성자: {pr['author']}\n"
         f"{ctx_block}\n\n## Diff\n```diff\n{diff}\n```\n"

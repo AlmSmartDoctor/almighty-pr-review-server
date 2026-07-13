@@ -80,7 +80,7 @@ def test_worker_records_failed_run_id_on_pipeline_error(db, monkeypatch):
         raise PipelineError(run_id, "all vendors failed → rate limit")
 
     # ★개정 (codex v6 [LOW]): build_deps는 real 호출을 피해 monkeypatch(환경 비의존).
-    monkeypatch.setattr("server.worker.build_deps", lambda repo: None)
+    monkeypatch.setattr("server.worker.build_deps", lambda repo, settings: None)
     monkeypatch.setattr("server.worker.review_pr", boom)
     asyncio.run(run_one_job(db, worker_id="w1"))
     j = db.execute("SELECT * FROM review_job WHERE pr_id=?", (pid,)).fetchone()

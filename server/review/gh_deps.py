@@ -1,5 +1,6 @@
 import tempfile
 
+from server.context.registry import build_context_provider
 from server.github.gh import GhClient
 from server.pipeline import PipelineDeps
 from server.review.harness import HarnessProfile
@@ -8,7 +9,7 @@ from server.review.vendors import ClaudeAdapter, CodexAdapter
 from server.review.worktree import prepared_worktree
 
 
-def build_deps(repo) -> PipelineDeps:
+def build_deps(repo, settings) -> PipelineDeps:
     if not repo["local_path"]:
         raise ValueError(f"repo {repo['full_name']}에 local_path 미설정")
     gh = GhClient()
@@ -29,4 +30,5 @@ def build_deps(repo) -> PipelineDeps:
         adapters=[ClaudeAdapter(), CodexAdapter()],
         prescreen=_prescreen_tuple,
         repo_local_path=repo["local_path"],
+        context=build_context_provider(repo, settings),
     )

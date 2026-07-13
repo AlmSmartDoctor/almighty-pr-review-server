@@ -1,7 +1,7 @@
 import asyncio
 
 from server.pipeline import PipelineError, review_pr
-from server.repos import job_repo, pr_repo, repo_repo
+from server.repos import job_repo, pr_repo, repo_repo, settings_repo
 from server.review.gh_deps import build_deps  # Task 7.2에서 정의
 
 _RETRYABLE = ("rate limit", "rate_limit", "429", "overloaded", "timeout", "timed out")
@@ -20,7 +20,8 @@ async def run_one_job(conn, *, worker_id: str) -> bool:
     try:
         pr = pr_repo.get(conn, job["pr_id"])
         repo = repo_repo.get(conn, pr["repo_id"])
-        deps = build_deps(repo)
+        settings = settings_repo.get(conn)
+        deps = build_deps(repo, settings)
         run_id = await review_pr(
             conn, pr_id=job["pr_id"], trigger=job["trigger"], deps=deps
         )
