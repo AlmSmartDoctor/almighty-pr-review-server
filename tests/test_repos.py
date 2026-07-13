@@ -99,6 +99,35 @@ def test_settings_singleton_update(db):
     assert settings_repo.get(db)["concurrency_limit"] == 4
 
 
+def test_set_context_persists_text_and_meta(db):
+    import json
+    from server.repos import review_repo
+
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=20,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        db, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+    review_repo.set_context(
+        db,
+        run_id,
+        text="ctx body",
+        meta={"sources": [{"provider": "static", "status": "ok"}]},
+    )
+    run = review_repo.get_run(db, run_id)
+    assert run["context_text"] == "ctx body"
+    assert json.loads(run["context_meta"])["sources"][0]["provider"] == "static"
+
+
 def test_set_status_preserves_edited_text(db):
     from server.repos import repo_repo, pr_repo, finding_repo
 

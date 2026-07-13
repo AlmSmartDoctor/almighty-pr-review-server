@@ -128,6 +128,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
     )
     _ensure_column(conn, "app_settings", "codex_model", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "review_run", "context_text", "TEXT")
+    _ensure_column(conn, "review_run", "context_meta", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(

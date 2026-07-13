@@ -238,6 +238,53 @@ def test_pipeline_degrades_when_context_gather_raises(db):
     assert review_repo.get_run(db, run_id)["status"] == "done"
 
 
+def test_pipeline_persists_gathered_context(db):
+    import json
+    from server.context.base import ContextResult
+
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=21,
+        title="t",
+        author="a",
+        head_sha="s21",
+        base_ref="main",
+        url="u",
+    )
+
+    class FakeCtx:
+        def __init__(self):
+            self.results = [
+                ContextResult(provider="static", status="ok", text="hello ctx")
+            ]
+
+        def gather(self, *, req):
+            return "hello ctx"
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=FakeCtx(),
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    run = review_repo.get_run(db, run_id)
+    assert run["context_text"] == "hello ctx"
+    meta = json.loads(run["context_meta"])
+    assert (
+        meta["sources"][0]["provider"] == "static"
+        and meta["sources"][0]["status"] == "ok"
+    )
+
+
 def test_build_prompt_empty_no_block():
     out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "")
     assert "## 외부 컨텍스트" not in out and "DIFF" in out

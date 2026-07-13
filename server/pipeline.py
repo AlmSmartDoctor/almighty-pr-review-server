@@ -139,6 +139,21 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
             f"{redact_secrets(f'{type(e).__name__}: {e}')}"
         )
 
+    # 런당 외부 컨텍스트 감사 저장(원문 + 소스별 meta). r.error는 Composite에서 이미 redact.
+    results = getattr(deps.context, "results", [])
+    context_meta = {
+        "sources": [
+            {
+                "provider": r.provider,
+                "status": r.status,
+                "chars": len(r.text or ""),
+                "error": r.error,
+            }
+            for r in results
+        ]
+    }
+    review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
+
     # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리
     prompt = _build_prompt(pr, diff, context_text)
     with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:

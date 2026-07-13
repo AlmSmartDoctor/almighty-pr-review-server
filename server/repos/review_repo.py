@@ -1,3 +1,6 @@
+import json
+
+
 def create_run(conn, *, pr_id, head_sha, trigger, effort, merge_enabled=0) -> int:
     cur = conn.execute(
         """INSERT INTO review_run
@@ -14,6 +17,14 @@ def finish_run(conn, run_id, status, error=None):
         "UPDATE review_run SET status=?, error=?, finished_at=datetime('now') "
         "WHERE id=?",
         (status, error, run_id),
+    )
+    conn.commit()
+
+
+def set_context(conn, run_id, *, text, meta):
+    conn.execute(
+        "UPDATE review_run SET context_text=?, context_meta=? WHERE id=?",
+        (text, json.dumps(meta), run_id),
     )
     conn.commit()
 
