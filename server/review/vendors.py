@@ -60,6 +60,21 @@ class _BaseAdapter:
         )
         return parse_findings(out, vendor=self.vendor)
 
+    async def verify(
+        self, *, prompt: str, workdir: Path, harness: HarnessProfile, runtime_dir: str
+    ):
+        from server.review.verify import VERIFY_SCHEMA_HINT, parse_verdict
+
+        full = f"{harness.system_prompt}\n\n{prompt}\n\n{VERIFY_SCHEMA_HINT}"
+        env = harness.isolated_env(runtime_dir=runtime_dir)
+        out = await self._run(
+            self._build_argv(full, harness),
+            env=env,
+            cwd=str(workdir),
+            timeout=self._timeout,
+        )
+        return parse_verdict(out)
+
 
 class ClaudeAdapter(_BaseAdapter):
     vendor = "claude"

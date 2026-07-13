@@ -21,7 +21,9 @@ from server.review.prescreen import (
     diff_too_large_reason,
 )
 from server.context.base import ContextRequest, redact_secrets
+from server.context.registry import _effective
 from server.review.runner import RunnerPool
+from server.review.verify import VerifyContext
 from server.seams import NoOpContextProvider
 
 
@@ -44,6 +46,9 @@ class PipelineDeps:
     repo_local_path: str
     context: object = field(default_factory=NoOpContextProvider)
     pool: RunnerPool = None  # ★개정: 벤더 병렬 실행 세마포어(없으면 생성)
+    verify: object = (
+        None  # async (targets, VerifyContext) -> list[Verdict]; None=미배선
+    )
 
 
 async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> int:
@@ -209,9 +214,20 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     if succeeded == 0:
         raise RuntimeError("all vendors failed → " + "; ".join(errors))
 
-    # 5. (옵션) Merge — vendor_result_id를 MergedFinding 위임으로 복원
+    # 5. consensus 태깅 + (옵션) 고위험 SINGLE 반박 검증
+    # merge 표시나 verify 중 하나라도 필요할 때만 태깅(둘 다 off면 원본 그대로 저장).
+    verify_on = bool(_effective(repo, settings, "verify_singles_on")) and deps.verify
+    merged = (
+        deterministic_merge([f for _, f in all_findings])
+        if (repo["merge_enabled"] or verify_on)
+        else None
+    )
+    if verify_on and merged:
+        await _verify_singles(deps, merged, repo=repo, pr=pr, diff=diff, harness=hp)
+
+    # 6. Persist — merge 표시 옵션이면 병합본, 아니면 원본. verify 주석은 공유 Finding에
+    # 부착돼 있어 어느 경로로 저장해도 반영된다(MergedFinding은 .finding에 위임).
     if repo["merge_enabled"]:
-        merged = deterministic_merge([f for _, f in all_findings])
         _persist(
             conn, run_id, [(getattr(m, "vendor_result_id", None), m) for m in merged]
         )
@@ -255,7 +271,41 @@ def _persist(conn, run_id, items):
             confidence=f.confidence,
             consensus=getattr(f, "consensus", "single"),
             consensus_group_id=getattr(f, "consensus_group_id", None),
+            verify_status=getattr(f, "verify_status", None),
+            verify_rationale=getattr(f, "verify_rationale", None),
         )
+
+
+async def _verify_singles(deps, merged, *, repo, pr, diff, harness) -> None:
+    """고위험(critical/high) SINGLE finding을 다른 벤더로 반박 검증. verdict를 공유
+    Finding에 부착하고, 반박된 건은 confidence를 반감한다(삭제하지 않음).
+    검증 자체가 리뷰를 절대 차단하지 않도록 실패는 통째로 degrade(B-INV-4/8)."""
+    targets = [
+        m
+        for m in merged
+        if m.consensus == "single" and m.severity in ("critical", "high")
+    ]
+    if not targets:
+        return
+    ctx = VerifyContext(
+        diff=diff,
+        repo_local_path=deps.repo_local_path,
+        head_sha=pr["head_sha"],
+        pr_number=pr["number"],
+        harness=harness,
+    )
+    try:
+        verdicts = await deps.verify(targets, ctx)
+    except Exception as e:
+        print(
+            f"[pipeline] verify degraded: {redact_secrets(f'{type(e).__name__}: {e}')}"
+        )
+        return
+    for m, v in zip(targets, verdicts):
+        m.finding.verify_status = "refuted" if v.refuted else "confirmed"
+        m.finding.verify_rationale = v.rationale
+        if v.refuted:
+            m.finding.confidence = round(m.finding.confidence * 0.5, 3)
 
 
 def _build_prompt(pr, diff, context_text: str) -> str:

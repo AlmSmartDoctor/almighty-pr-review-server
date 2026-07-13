@@ -28,6 +28,7 @@ type Settings = {
   review_model: string;
   codex_model: string;
   prescreen_gate_threshold: string;
+  verify_singles_on?: number;
   context_static_on?: number;
   context_jira_on?: number;
   context_db_schema_on?: number;
@@ -283,6 +284,10 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
             <Field title="승인 게이트" help="켜면 내가 승인한 findings만 GitHub에 포스팅">
               <Switch aria-label="승인 게이트" checked={!!draft.approval_gate_on}
                       onCheckedChange={(v) => setDraft({ ...draft, approval_gate_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="고위험 단독 지적 검증" help="한 벤더만 낸 critical/high 지적을 다른 벤더로 반박 검증하고, 반박되면 신뢰도를 낮춤">
+              <Switch aria-label="고위험 단독 지적 검증" checked={!!draft.verify_singles_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, verify_singles_on: v ? 1 : 0 })} />
             </Field>
             <Field title="사전 스크리닝 모델" help="diff만 보고 변경 복잡도를 평가">
               <div className="w-40">

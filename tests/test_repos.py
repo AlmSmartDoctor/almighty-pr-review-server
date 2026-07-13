@@ -1,4 +1,4 @@
-from server.repos import repo_repo, pr_repo, finding_repo, settings_repo
+from server.repos import repo_repo, pr_repo, finding_repo, settings_repo, review_repo
 
 
 def test_add_and_get_repo(db):
@@ -231,3 +231,46 @@ def test_repo_context_settings_roundtrip(db):
     assert r["context_static_on"] == 1
     assert r["static_context_path"] == "/x/ctx.md"
     assert r["jira_project_keys"] == "PROJ,ABC"
+
+
+def test_verify_singles_toggle_roundtrip(db):
+    settings_repo.update(db, verify_singles_on=1)
+    assert settings_repo.get(db)["verify_singles_on"] == 1
+    rid = repo_repo.add(db, full_name="acme/api")
+    assert repo_repo.get(db, rid)["verify_singles_on"] is None  # 기본 NULL = 상속
+    repo_repo.update(db, rid, verify_singles_on=0)
+    assert repo_repo.get(db, rid)["verify_singles_on"] == 0
+
+
+def test_finding_persists_verify_columns(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=9,
+        title="t",
+        author="a",
+        head_sha="s9",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        db, pr_id=pid, head_sha="s9", trigger="manual", effort="medium"
+    )
+    fid = finding_repo.add(
+        db,
+        run_id=run_id,
+        vendor="claude",
+        file="a.py",
+        line=1,
+        severity="high",
+        category="bug",
+        claim="c",
+        rationale="r",
+        confidence=0.4,
+        verify_status="refuted",
+        verify_rationale="오탐",
+    )
+    f = finding_repo.get(db, fid)
+    assert f["verify_status"] == "refuted"
+    assert f["verify_rationale"] == "오탐"

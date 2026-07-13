@@ -152,6 +152,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "repo", "context_graphify_on", "INTEGER")
     _ensure_column(conn, "repo", "static_context_path", "TEXT")
     _ensure_column(conn, "repo", "jira_project_keys", "TEXT")
+    # 고위험 SINGLE finding 반박 패스 토글 — 전역 기본 + per-repo override(NULL=상속).
+    _ensure_column(
+        conn, "app_settings", "verify_singles_on", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(conn, "repo", "verify_singles_on", "INTEGER")
+    # 반박 패스 결과(감사·트리아지) — finding당 verdict + 근거.
+    _ensure_column(conn, "finding", "verify_status", "TEXT")
+    _ensure_column(conn, "finding", "verify_rationale", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(

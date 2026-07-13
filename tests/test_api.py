@@ -78,6 +78,30 @@ def test_patch_repo_context_settings(tmp_path):
     assert body["jira_project_keys"] == "PROJ"
 
 
+def test_patch_verify_singles_toggle(tmp_path):
+    client, _ = _client(tmp_path)
+    assert (
+        client.patch("/api/settings", json={"verify_singles_on": 1}).json()[
+            "verify_singles_on"
+        ]
+        == 1
+    )
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    assert (
+        client.patch(
+            f"/api/repos/{created['id']}", json={"verify_singles_on": 0}
+        ).json()["verify_singles_on"]
+        == 0
+    )
+    # None으로 상속 복원
+    assert (
+        client.patch(
+            f"/api/repos/{created['id']}", json={"verify_singles_on": None}
+        ).json()["verify_singles_on"]
+        is None
+    )
+
+
 def test_patch_repo_can_restore_context_toggle_inheritance(tmp_path):
     client, _ = _client(tmp_path)
     created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
@@ -85,9 +109,7 @@ def test_patch_repo_can_restore_context_toggle_inheritance(tmp_path):
         f"/api/repos/{created['id']}", json={"context_jira_on": 0}
     ).raise_for_status()
 
-    r = client.patch(
-        f"/api/repos/{created['id']}", json={"context_jira_on": None}
-    )
+    r = client.patch(f"/api/repos/{created['id']}", json={"context_jira_on": None})
 
     assert r.status_code == 200
     assert r.json()["context_jira_on"] is None

@@ -150,6 +150,7 @@ class RepoPatch(BaseModel):
     context_jira_on: int | None = None
     context_db_schema_on: int | None = None
     context_graphify_on: int | None = None
+    verify_singles_on: int | None = None
     static_context_path: str | None = None
     jira_project_keys: str | None = None
 
@@ -162,6 +163,7 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         "context_jira_on",
         "context_db_schema_on",
         "context_graphify_on",
+        "verify_singles_on",
     ):
         if key in body.model_fields_set and getattr(body, key) is None:
             fields[key] = None
@@ -187,6 +189,7 @@ class SettingsPatch(BaseModel):
     context_jira_on: int | None = None
     context_db_schema_on: int | None = None
     context_graphify_on: int | None = None
+    verify_singles_on: int | None = None
 
 
 @app.patch("/api/settings")

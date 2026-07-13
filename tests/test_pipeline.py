@@ -509,6 +509,170 @@ def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
     )
 
 
+class FakeVerify:
+    def __init__(self, verdicts):
+        self._verdicts = verdicts
+        self.calls = []
+
+    async def __call__(self, targets, ctx):
+        self.calls.append((list(targets), ctx))
+        return self._verdicts[: len(targets)]
+
+
+def _seed_pr(db, *, number, head_sha, merge_enabled=0, verify_singles_on=None):
+    rid = repo_repo.add(db, full_name="acme/api")
+    fields = {"merge_enabled": merge_enabled}
+    if verify_singles_on is not None:
+        fields["verify_singles_on"] = verify_singles_on
+    repo_repo.update(db, rid, **fields)
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=number,
+        title="t",
+        author="a",
+        head_sha=head_sha,
+        base_ref="main",
+        url="u",
+    )
+    return rid, pid
+
+
+def test_pipeline_verifies_high_severity_single_and_halves_confidence_on_refute(db):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=50, head_sha="s50", verify_singles_on=1)
+    verify = FakeVerify([Verdict(refuted=True, rationale="오탐")])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            ),
+            FakeAdapter(
+                "codex", [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+            ),
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    # 고위험 SINGLE 하나만 검증 대상
+    assert len(verify.calls) == 1
+    targets = verify.calls[0][0]
+    assert len(targets) == 1 and targets[0].file == "a.py"
+
+    fs = {f["file"]: f for f in finding_repo.list_for_run(db, run_id)}
+    assert fs["a.py"]["verify_status"] == "refuted"
+    assert fs["a.py"]["verify_rationale"] == "오탐"
+    assert fs["a.py"]["confidence"] == 0.4  # 0.8 * 0.5
+    # 저위험은 검증 대상 아님 → verdict 미부착, confidence 유지
+    assert fs["b.py"]["verify_status"] is None
+    assert fs["b.py"]["confidence"] == 0.4
+
+
+def test_pipeline_verify_confirmed_keeps_confidence(db):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=51, head_sha="s51", verify_singles_on=1)
+    verify = FakeVerify([Verdict(refuted=False, rationale="실제 버그")])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude",
+                [Finding("claude", "a.py", 1, "critical", "bug", "c", "r", 0.9)],
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    f = finding_repo.list_for_run(db, run_id)[0]
+    assert f["verify_status"] == "confirmed"
+    assert f["confidence"] == 0.9
+
+
+def test_pipeline_verify_skips_consensus_findings(db):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=52, head_sha="s52", verify_singles_on=1)
+    verify = FakeVerify([Verdict(refuted=True, rationale="x")])
+    # 양 벤더가 같은 위치·카테고리 → CONSENSUS → 검증 대상 아님
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            ),
+            FakeAdapter(
+                "codex", [Finding("codex", "a.py", 2, "high", "bug", "c2", "r2", 0.7)]
+            ),
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert verify.calls[0][0] == [] if verify.calls else True
+    for f in finding_repo.list_for_run(db, run_id):
+        assert f["verify_status"] is None
+
+
+def test_pipeline_verify_disabled_by_default_not_called(db):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=53, head_sha="s53")  # verify_singles_on 미설정=off
+    verify = FakeVerify([Verdict(refuted=True, rationale="x")])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert verify.calls == []
+    f = finding_repo.list_for_run(db, run_id)[0]
+    assert f["verify_status"] is None and f["confidence"] == 0.8
+
+
+def test_pipeline_verify_degrades_when_verifier_raises(db):
+    _, pid = _seed_pr(db, number=54, head_sha="s54", verify_singles_on=1)
+
+    async def boom(targets, ctx):
+        raise RuntimeError("verifier down")
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=boom,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    run = review_repo.get_run(db, run_id)
+    assert run["status"] == "done"  # 검증 실패가 리뷰를 막지 않음
+    f = finding_repo.list_for_run(db, run_id)[0]
+    assert f["verify_status"] is None and f["confidence"] == 0.8
+
+
 def test_build_prompt_empty_no_block():
     out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "")
     assert "## 외부 컨텍스트" not in out and "DIFF" in out

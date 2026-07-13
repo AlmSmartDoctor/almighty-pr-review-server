@@ -91,6 +91,23 @@ def test_codex_adapter_passes_model_when_set(tmp_path):
     assert args[-1] != "gpt-5.4"  # prompt는 positional로 항상 마지막
 
 
+def test_adapter_verify_parses_verdict(tmp_path):
+    hp = HarnessProfile.load("default")
+    runner = fake_runner('검토\n```json\n{"refuted":true,"rationale":"오탐"}\n```')
+    adapter = ClaudeAdapter(runner=runner)
+    v = asyncio.run(
+        adapter.verify(
+            prompt="검증해",
+            workdir=tmp_path,
+            harness=hp,
+            runtime_dir=str(tmp_path / "rt"),
+        )
+    )
+    assert v.refuted is True
+    assert v.rationale == "오탐"
+    assert "CLAUDE_CONFIG_DIR" in runner.calls[0]["env"]  # 격리 env 유지
+
+
 def test_default_runner_timeout_raises_vendor_timeout():
     with pytest.raises(VendorTimeout):
         asyncio.run(_default_runner(["sleep", "5"], timeout=0.2))

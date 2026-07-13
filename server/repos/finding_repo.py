@@ -13,13 +13,15 @@ def add(
     vendor_result_id=None,
     consensus="single",
     consensus_group_id=None,
+    verify_status=None,
+    verify_rationale=None,
 ) -> int:
     cur = conn.execute(
         """INSERT INTO finding
            (run_id, vendor_result_id, vendor, file, line, severity, category,
             claim, rationale, confidence, consensus, consensus_group_id,
-            created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))""",
+            verify_status, verify_rationale, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))""",
         (
             run_id,
             vendor_result_id,
@@ -33,6 +35,8 @@ def add(
             confidence,
             consensus,
             consensus_group_id,
+            verify_status,
+            verify_rationale,
         ),
     )
     conn.commit()

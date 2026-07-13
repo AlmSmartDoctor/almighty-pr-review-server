@@ -44,6 +44,23 @@ test("selects a review model and saves it", async () => {
   );
 });
 
+test("toggles high-severity single verification and saves it", async () => {
+  const patchSettings = vi
+    .spyOn(api, "patchSettings")
+    .mockResolvedValue({ ...settings, verify_singles_on: 1 });
+  render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+
+  const toggle = await screen.findByRole("switch", { name: "고위험 단독 지적 검증" });
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  await waitFor(() =>
+    expect(patchSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ verify_singles_on: 1 }),
+    ),
+  );
+});
+
 test("selects a codex model and saves it", async () => {
   const patchSettings = vi
     .spyOn(api, "patchSettings")

@@ -11,6 +11,7 @@ ALLOWED = {
     "context_jira_on",
     "context_db_schema_on",
     "context_graphify_on",
+    "verify_singles_on",
 }
 
 

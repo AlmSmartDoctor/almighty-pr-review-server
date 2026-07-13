@@ -6,6 +6,7 @@ from server.pipeline import PipelineDeps
 from server.review.harness import HarnessProfile
 from server.review.prescreen import prescreen
 from server.review.vendors import ClaudeAdapter, CodexAdapter
+from server.review.verify import make_verifier
 from server.review.worktree import prepared_worktree
 
 
@@ -24,11 +25,13 @@ def build_deps(repo, settings) -> PipelineDeps:
             )
         return (r.complexity, r.score, r.reason)
 
+    adapters = [ClaudeAdapter(), CodexAdapter()]
     return PipelineDeps(
         gh_diff=gh.diff,
         worktree=prepared_worktree,
-        adapters=[ClaudeAdapter(), CodexAdapter()],
+        adapters=adapters,
         prescreen=_prescreen_tuple,
         repo_local_path=repo["local_path"],
         context=build_context_provider(repo, settings),
+        verify=make_verifier(adapters, prepared_worktree),
     )
