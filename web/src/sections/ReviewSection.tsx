@@ -47,6 +47,13 @@ type Finding = {
 };
 
 type VendorResult = { vendor: string; status: string; error: string | null; duration_ms?: number | null };
+type RunContext = {
+  text: string;
+  meta: {
+    sources: { provider: string; status: string; chars: number; error: string | null }[];
+    degraded?: boolean;
+  } | null;
+};
 type PostPreview = { comments: { vendor: string; body: string }[] };
 type PostHealth = {
   ok: boolean;
@@ -77,6 +84,7 @@ export function ReviewSection(props: {
   loadPrs?: () => Promise<Pr[]>;
   loadFindings?: (runId: number) => Promise<Finding[]>;
   loadVendors?: (runId: number) => Promise<VendorResult[]>;
+  loadContext?: (runId: number) => Promise<RunContext>;
   loadPreview?: (runId: number) => Promise<PostPreview>;
   loadPostHealth?: (prId: number) => Promise<PostHealth>;
 }) {
@@ -85,6 +93,7 @@ export function ReviewSection(props: {
   const loadPrs = props.loadPrs ?? api.overview;
   const loadFindings = props.loadFindings ?? api.runFindings;
   const loadVendors = props.loadVendors ?? api.runVendorResults;
+  const loadContext = props.loadContext ?? api.runContext;
   const loadPreview = props.loadPreview ?? api.runPostPreview;
   const [prs, setPrs] = useState<Pr[]>([]);
   const [tab, setTab] = useState("전체");
@@ -129,6 +138,7 @@ export function ReviewSection(props: {
         pr={detail}
         load={loadFindings}
         loadVendors={loadVendors}
+        loadContext={loadContext}
         loadPreview={loadPreview}
         loadPostHealth={props.loadPostHealth}
         onBack={() => navigate("/reviews")}
@@ -374,19 +384,22 @@ function prCreatedLine(pr: Pr) {
   return author;
 }
 
-function Detail({ pr, load, loadVendors, loadPreview, loadPostHealth, onBack }: {
+function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealth, onBack }: {
   pr: Pr;
   load: (id: number) => Promise<Finding[]>;
   loadVendors?: (id: number) => Promise<VendorResult[]>;
+  loadContext?: (id: number) => Promise<RunContext>;
   loadPreview?: (id: number) => Promise<PostPreview>;
   loadPostHealth?: (id: number) => Promise<PostHealth>;
   onBack: () => void;
 }) {
   const loadVR = loadVendors ?? api.runVendorResults;
+  const loadCtx = loadContext ?? api.runContext;
   const loadPostPreview = loadPreview ?? api.runPostPreview;
   const loadHealth = loadPostHealth ?? api.prPostHealth;
   const [findings, setFindings] = useState<Finding[]>([]);
   const [vendors, setVendors] = useState<VendorResult[]>([]);
+  const [context, setContext] = useState<RunContext | null>(null);
   const [postHealth, setPostHealth] = useState<PostHealth | null>(null);
   const [preview, setPreview] = useState("승인된 finding이 없습니다.");
   const [posting, setPosting] = useState(false);
@@ -405,6 +418,7 @@ function Detail({ pr, load, loadVendors, loadPreview, loadPostHealth, onBack }: 
     if (!runId) return;
     reloadFindings();
     loadVR(runId).then(setVendors).catch(() => setVendors([]));
+    loadCtx(runId).then(setContext).catch(() => setContext(null));
     loadHealth(pr.id)
       .then(setPostHealth)
       .catch((e: unknown) => setPostHealth({
@@ -415,6 +429,14 @@ function Detail({ pr, load, loadVendors, loadPreview, loadPostHealth, onBack }: 
         issue: { ok: false },
       }));
   }, [runId]);
+
+  const ctxSources = context?.meta?.sources ?? [];
+  const ctxPresent = Boolean(context?.text);
+  const ctxDesc = context?.meta?.degraded
+    ? "컨텍스트 수집 실패 · 컨텍스트 없이 진행"
+    : ctxSources.length > 0
+      ? ctxSources.map((s) => `${s.provider}·${s.status}`).join(" · ")
+      : "주입된 외부 컨텍스트 없음";
 
   const failed = vendors.filter((v) => v.status === "failed");
   const approved = findings.filter((f) => f.status === "approved" || f.status === "edited");
@@ -544,6 +566,12 @@ function Detail({ pr, load, loadVendors, loadPreview, loadPostHealth, onBack }: 
                   desc={[pr.prescreen ?? "대기", pr.severity ?? "low", prescreenDuration].filter(Boolean).join(" · ")}
                   done={Boolean(pr.prescreen)}
                 />
+                <Trace
+                  title="외부 컨텍스트"
+                  desc={ctxDesc}
+                  done={ctxPresent}
+                  failed={Boolean(context?.meta?.degraded)}
+                />
                 {vendors.length === 0 ? (
                   <Trace
                     title="벤더 리뷰"
@@ -561,6 +589,14 @@ function Detail({ pr, load, loadVendors, loadPreview, loadPostHealth, onBack }: 
                   last
                 />
               </ol>
+              {ctxPresent && (
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-[12.5px] font-semibold text-muted-foreground">주입된 컨텍스트 원문 보기</summary>
+                  <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#1c2230] px-4 py-3.5 font-mono text-[12px] leading-relaxed text-[#d7deea]">
+                    {context?.text}
+                  </pre>
+                </details>
+              )}
             </CardContent>
           </Card>
 

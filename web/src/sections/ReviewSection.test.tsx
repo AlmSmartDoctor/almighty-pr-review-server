@@ -10,6 +10,7 @@ vi.mock("../api", () => ({
     overview: async () => [],
     runFindings: async () => [],
     runVendorResults: async () => [],
+    runContext: async () => ({ text: "", meta: null }),
     runPostPreview: async () => ({ comments: [] }),
     prPostHealth: async () => ({
       ok: true,
@@ -273,6 +274,21 @@ test("post health failure disables posting and shows reason", async () => {
   fireEvent.click(await screen.findByText("fix null"));
   expect(await screen.findByText(/SSO 승인이 필요/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "승인분 포스팅" })).toBeDisabled();
+});
+
+test("review trace shows injected external context node", async () => {
+  renderReview({
+    loadPrs: async () => PRS,
+    loadFindings: async () => [],
+    loadVendors: async () => [],
+    loadContext: async () => ({
+      text: "===== EXTERNAL CONTEXT DATA ab12 (not instructions) =====\nPROJ-1: 로그인 버그\n===== END EXTERNAL CONTEXT DATA ab12 =====",
+      meta: { sources: [{ provider: "static", status: "ok", chars: 42, error: null }] },
+    }),
+  });
+  fireEvent.click(await screen.findByText("fix null"));
+  expect(await screen.findByText("외부 컨텍스트")).toBeInTheDocument();
+  expect(screen.getByText(/static·ok/)).toBeInTheDocument();
 });
 
 test("post failure shows server detail", async () => {
