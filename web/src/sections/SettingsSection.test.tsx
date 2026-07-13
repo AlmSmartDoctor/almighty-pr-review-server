@@ -165,3 +165,29 @@ test("per-repo provider override shows and restores inheritance", async () => {
   fireEvent.change(override, { target: { value: "inherit" } });
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_jira_on: null }));
 });
+
+test("edits per-repo static_context_path and jira_project_keys", async () => {
+  const repo = {
+    id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1,
+    static_context_path: "docs/old.md", jira_project_keys: null,
+  };
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
+    async (_id, patch) => ({ ...repo, ...patch }),
+  );
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  const pathInput = await screen.findByRole("textbox", { name: "acme/api Static 경로" });
+  expect(pathInput).toHaveDisplayValue("docs/old.md");
+  fireEvent.change(pathInput, { target: { value: "docs/context.md" } });
+  fireEvent.blur(pathInput);
+  await waitFor(() =>
+    expect(patchRepo).toHaveBeenCalledWith(7, { static_context_path: "docs/context.md" }),
+  );
+
+  const keysInput = screen.getByRole("textbox", { name: "acme/api Jira 프로젝트 키" });
+  fireEvent.change(keysInput, { target: { value: "PROJ,ABC" } });
+  fireEvent.blur(keysInput);
+  await waitFor(() =>
+    expect(patchRepo).toHaveBeenCalledWith(7, { jira_project_keys: "PROJ,ABC" }),
+  );
+});

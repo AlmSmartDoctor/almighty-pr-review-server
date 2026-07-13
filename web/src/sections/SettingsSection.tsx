@@ -56,6 +56,8 @@ type Repo = {
   context_jira_on?: number | null;
   context_db_schema_on?: number | null;
   context_graphify_on?: number | null;
+  static_context_path?: string | null;
+  jira_project_keys?: string | null;
 };
 
 const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
@@ -206,7 +208,12 @@ export function SettingsSection({ load, loadRepos }: {
                       <ToggleCell label="Codex" checked={r.vendor_codex_on !== 0} onChange={(v) => patchRepo(r, { vendor_codex_on: v })} />
                       <ToggleCell label="병합" checked={!!r.merge_enabled} onChange={(v) => patchRepo(r, { merge_enabled: v })} />
                       <ToggleCell label="auto-post" checked={!!r.auto_post} onChange={(v) => patchRepo(r, { auto_post: v })} />
-                      <ContextOverrideCell repo={r} settings={settings} onPatch={(patch) => patchRepo(r, patch)} />
+                      <ContextOverrideCell
+                        repo={r}
+                        settings={settings}
+                        onPatch={(patch) => patchRepo(r, patch)}
+                        onLocalChange={(patch) => setRepos((rs) => rs.map((x) => x.id === r.id ? { ...x, ...patch } : x))}
+                      />
                       <TableCell>
                         <div className="w-28">
                           <NativeSelect value={r.harness_name ?? "default"} className="h-8" onChange={(e) => patchRepo(r, { harness_name: e.target.value })}>
@@ -337,10 +344,11 @@ function ToggleCell({ label, checked, onChange }: {
   );
 }
 
-function ContextOverrideCell({ repo, settings, onPatch }: {
+function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
   repo: Repo;
   settings: Settings;
   onPatch: (patch: Partial<Repo>) => void;
+  onLocalChange: (patch: Partial<Repo>) => void;
 }) {
   return (
     <TableCell className="min-w-[260px]">
@@ -367,6 +375,30 @@ function ContextOverrideCell({ repo, settings, onPatch }: {
             </label>
           );
         })}
+      </div>
+      <div className="mt-1.5 space-y-1">
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="w-12 shrink-0">경로</span>
+          <Input
+            aria-label={`${repo.full_name} Static 경로`}
+            className="h-7 min-w-0 text-[11px]"
+            placeholder="레포 내 .md 경로"
+            value={repo.static_context_path ?? ""}
+            onChange={(e) => onLocalChange({ static_context_path: e.target.value })}
+            onBlur={(e) => onPatch({ static_context_path: e.target.value })}
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="w-12 shrink-0">Jira키</span>
+          <Input
+            aria-label={`${repo.full_name} Jira 프로젝트 키`}
+            className="h-7 min-w-0 text-[11px]"
+            placeholder="PROJ,ABC"
+            value={repo.jira_project_keys ?? ""}
+            onChange={(e) => onLocalChange({ jira_project_keys: e.target.value })}
+            onBlur={(e) => onPatch({ jira_project_keys: e.target.value })}
+          />
+        </label>
       </div>
     </TableCell>
   );

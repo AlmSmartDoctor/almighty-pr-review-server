@@ -30,7 +30,14 @@ ALMIGHTY_E2E=1 ALMIGHTY_E2E_REPO=me/sandbox \
 특정 PR만 smoke하려면 작은 PR 기준으로 `ALMIGHTY_E2E_PR=2414`처럼 추가한다.
 
 ## 외부 컨텍스트 / Jira 연동
-Jira 이슈를 리뷰 프롬프트에 주입하려면 필수 env 3개와 필요시 수용기준 필드를 설정한다(sqlite에는 절대 저장하지 않음, env-only):
+
+### Static 컨텍스트 (외부 의존 0)
+레포 내 지정한 `.md` 파일(설계 노트·리뷰 규약 등)을 리뷰 프롬프트의 `## 외부 컨텍스트`에 주입한다. 설정 화면 → 리뷰 대상 레포 테이블 → **컨텍스트 오버라이드** 셀에서:
+- `Static` 토글을 `켜짐`으로(또는 전역 `Static 컨텍스트` 기본값 상속)
+- `경로` 입력에 파일 경로를 넣는다. 경로는 레포의 `local_path` 하위로 제한된다(base-dir allowlist, 임의 절대경로 차단). 토글만 켜고 경로가 비어 있으면 프로바이더는 등록되지 않는다.
+
+### Jira 연동
+Jira 이슈를 리뷰 프롬프트에 주입하려면 필수 env 3개와 필요시 수용기준 필드를 설정한다(sqlite에는 절대 저장하지 않음, env-only). 레포별 `jira_project_keys`는 같은 오버라이드 셀의 `Jira키` 입력으로 설정한다:
 ```bash
 ALMIGHTY_JIRA_BASE_URL=https://<org>.atlassian.net
 ALMIGHTY_JIRA_EMAIL=<jira-account-email>
