@@ -127,31 +127,36 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         base_ref=pr["base_ref"] or "",
         body=pr["body"] if "body" in pr.keys() else "",
     )
+    degraded = False
+    context_results = []
     try:
         context_text = await asyncio.wait_for(
             asyncio.to_thread(deps.context.gather, req=req),
             timeout=CONTEXT_GATHER_TIMEOUT_SEC,
         )
-    except Exception as e:  # B-INV-4: best-effort degrade — 침묵 금지, redact 후 로그
+        context_results = getattr(deps.context, "results", [])
+    except Exception as e:  # B-INV-4/8: degrade — .results는 백그라운드 스레드가 변형 중일 수 있어 신뢰 안 함
         context_text = ""
+        degraded = True
         print(
             f"[pipeline] context gather degraded: "
             f"{redact_secrets(f'{type(e).__name__}: {e}')}"
         )
 
-    # 런당 외부 컨텍스트 감사 저장(원문 + 소스별 meta). r.error는 Composite에서 이미 redact.
-    results = getattr(deps.context, "results", [])
+    # 런당 외부 컨텍스트 감사 저장. error는 meta 조립에서도 redact(defense-in-depth, B-INV-4).
     context_meta = {
         "sources": [
             {
                 "provider": r.provider,
                 "status": r.status,
                 "chars": len(r.text or ""),
-                "error": r.error,
+                "error": redact_secrets(r.error) if r.error else None,
             }
-            for r in results
+            for r in context_results
         ]
     }
+    if degraded:
+        context_meta["degraded"] = True
     review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
 
     # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리

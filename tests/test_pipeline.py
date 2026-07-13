@@ -236,6 +236,61 @@ def test_pipeline_degrades_when_context_gather_raises(db):
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     assert review_repo.get_run(db, run_id)["status"] == "done"
+    import json
+
+    run = review_repo.get_run(db, run_id)
+    assert run["context_text"] == ""
+    meta = json.loads(run["context_meta"])
+    assert meta.get("degraded") is True and meta["sources"] == []
+
+
+def test_pipeline_redacts_error_in_persisted_meta(db, monkeypatch):
+    import json
+    from server import config
+    from server.context.base import ContextResult
+
+    monkeypatch.setattr(config, "JIRA_API_TOKEN", "tok-SEKRET")
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=22,
+        title="t",
+        author="a",
+        head_sha="s22",
+        base_ref="main",
+        url="u",
+    )
+
+    class DirectErrCtx:
+        def __init__(self):
+            self.results = [
+                ContextResult(
+                    provider="jira",
+                    status="error",
+                    error="failed with tok-SEKRET in body",
+                )
+            ]
+
+        def gather(self, *, req):
+            return ""
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=DirectErrCtx(),
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    meta = json.loads(review_repo.get_run(db, run_id)["context_meta"])
+    assert "tok-SEKRET" not in (meta["sources"][0]["error"] or "")
+    assert meta["sources"][0]["error"] == "failed with [redacted] in body"
 
 
 def test_pipeline_persists_gathered_context(db):
