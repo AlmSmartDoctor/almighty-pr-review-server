@@ -1224,6 +1224,106 @@ def test_registry_graphify_composes_open_findings_without_path(tmp_path, monkeyp
     assert r.status == "ok" and "미결 버그" in r.text
 
 
+# ── graphify 애그리게이터: 최근 오픈 PR 목록(동시 진행 작업 인지) ──────────────
+
+
+def test_summarize_open_prs_lists_number_title_author():
+    from server.context.server_data_source import summarize_open_prs
+
+    out = summarize_open_prs(
+        [
+            dict(number=238, title="refactor: worktree 격리", author="soyeon"),
+            dict(number=214, title="리포트 쿼리 최적화", author="mschoi"),
+        ]
+    )
+    assert "#238 refactor: worktree 격리 (soyeon)" in out
+    assert "#214 리포트 쿼리 최적화 (mschoi)" in out
+
+
+def test_summarize_open_prs_empty_and_null_fallbacks():
+    from server.context.server_data_source import summarize_open_prs
+
+    assert summarize_open_prs([]) == ""
+    out = summarize_open_prs([dict(number=3, title=None, author=None)])
+    assert "#3 (제목 없음) (?)" in out
+
+
+def _seed_pr(conn, full_name, number, *, title, author, state="open"):
+    from server.repos import repo_repo
+
+    existing = repo_repo.get_by_full_name(conn, full_name)
+    rid = existing["id"] if existing else repo_repo.add(conn, full_name=full_name)
+    conn.execute(
+        "INSERT INTO pull_request (repo_id, number, title, author, head_sha, state) "
+        "VALUES (?, ?, ?, ?, 'sha', ?)",
+        (rid, number, title, author, state),
+    )
+    conn.commit()
+
+
+def test_open_prs_source_lists_other_open_prs(tmp_path):
+    from server.context.server_data_source import open_prs_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_pr(conn, "acme/api", 5, title="feat: 결제 연동", author="jhkim")
+    _seed_pr(conn, "acme/api", 4, title="fix: 타임아웃", author="soyeon")
+    conn.close()
+    src = open_prs_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))
+    assert "#5 feat: 결제 연동 (jhkim)" in out
+    assert "#4 fix: 타임아웃 (soyeon)" in out
+
+
+def test_open_prs_source_excludes_current_and_closed(tmp_path):
+    from server.context.server_data_source import open_prs_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_pr(conn, "acme/api", 7, title="현재 리뷰 중", author="me")
+    _seed_pr(conn, "acme/api", 6, title="닫힌 PR", author="x", state="closed")
+    conn.close()
+    src = open_prs_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=7)) == ""  # 자기 제외 + 닫힌 제외
+
+
+def test_open_prs_source_scoped_case_insensitive(tmp_path):
+    from server.context.server_data_source import open_prs_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_pr(conn, "Acme/API", 3, title="이 레포 PR", author="a")
+    _seed_pr(conn, "other/repo", 3, title="다른레포 PR", author="b")
+    conn.close()
+    src = open_prs_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))  # 다른 casing 조회
+    assert "이 레포 PR" in out and "다른레포 PR" not in out
+
+
+def test_open_prs_source_empty_when_none(tmp_path):
+    from server.context.server_data_source import open_prs_source
+    from server.repos import repo_repo
+
+    conn = _feedback_db(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")  # 레포만, 오픈 PR 없음
+    conn.close()
+    src = open_prs_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=9)) == ""
+
+
+def test_registry_graphify_composes_open_prs(tmp_path, monkeypatch):
+    from server import config
+    from server.context.graphify_provider import GraphifyProvider
+    from server.context.registry import build_context_provider
+
+    conn = _feedback_db(tmp_path)
+    _seed_pr(conn, "acme/api", 5, title="feat: 검색 개선", author="jhkim")
+    conn.close()
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
+    # graphify_path·오픈 finding 없이 오픈 PR 목록만으로도 graphify가 산출(스택 검증)
+    c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
+    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    r = gp.fetch(_req(repo="acme/api", pr_number=9))
+    assert r.status == "ok" and "feat: 검색 개선" in r.text
+
+
 def test_db_feedback_source_excludes_pending(tmp_path):
     from server.context.feedback_source import db_feedback_source
 
