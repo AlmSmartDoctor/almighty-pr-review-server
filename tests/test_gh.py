@@ -52,6 +52,7 @@ def test_list_open_prs_parses_json():
     assert any("createdAt" in arg for arg in runner.calls[0][0])
     assert any("headRefName" in arg for arg in runner.calls[0][0])
     assert any("body" in arg for arg in runner.calls[0][0])
+    assert "--limit" in runner.calls[0][0]  # 재조정용 완전 오픈 셋 확보
 
 
 def test_diff_returns_text():

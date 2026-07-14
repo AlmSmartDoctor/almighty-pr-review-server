@@ -83,6 +83,92 @@ def test_poll_once_reenqueues_on_changed_sha(db):
     assert pr_repo.get(db, pid)["head_sha"] == "sha2"
 
 
+def test_poll_once_reconciles_dropped_pr_to_closed(db):
+    repo_repo.add(db, full_name="acme/api")
+    both = [
+        PrInfo(7, "t", "a", "s7", "main", "u", "open"),
+        PrInfo(8, "t", "a", "s8", "main", "u", "open"),
+    ]
+    poll_once(db, list_prs=lambda repo: both, enqueue=lambda pid: None)
+    # PR #8이 병합돼 다음 폴에서 gh --state open 목록에서 사라짐
+    poll_once(db, list_prs=lambda repo: [both[0]], enqueue=lambda pid: None)
+    rows = {
+        r["number"]: r["state"]
+        for r in db.execute("SELECT number, state FROM pull_request").fetchall()
+    }
+    assert rows == {7: "open", 8: "closed"}  # 사라진 #8만 closed로 재조정
+
+
+def test_poll_once_marks_dropped_closed_when_none_open(db):
+    repo_repo.add(db, full_name="acme/api")
+    poll_once(
+        db,
+        list_prs=lambda repo: [PrInfo(7, "t", "a", "s7", "main", "u", "open")],
+        enqueue=lambda pid: None,
+    )
+    poll_once(db, list_prs=lambda repo: [], enqueue=lambda pid: None)  # 전부 닫힘
+    assert pr_repo.get(db, 1)["state"] == "closed"
+
+
+def test_poll_once_does_not_close_pr_inserted_during_poll(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="s7",
+        base_ref="main",
+        url="u",
+    )  # 기존 열린 #7
+
+    def list_prs_inserting_6(repo):
+        # 폴 도중 웹훅이 #6를 open으로 삽입(gh 스냅샷·prev_open 모두에 없음)
+        pr_repo.upsert(
+            db,
+            repo_id=rid,
+            number=6,
+            title="t",
+            author="a",
+            head_sha="s6",
+            base_ref="main",
+            url="u",
+        )
+        return [PrInfo(7, "t", "a", "s7", "main", "u", "open")]
+
+    poll_once(db, list_prs=list_prs_inserting_6, enqueue=lambda pid: None)
+    states = {
+        r["number"]: r["state"]
+        for r in db.execute("SELECT number, state FROM pull_request").fetchall()
+    }
+    assert states == {6: "open", 7: "open"}  # 동시 삽입 #6는 오검-close되지 않음
+
+
+def test_poll_once_skips_reconcile_when_list_truncated(db, monkeypatch):
+    from server import config
+
+    monkeypatch.setattr(config, "POLL_OPEN_PR_LIMIT", 1)
+    rid = repo_repo.add(db, full_name="acme/api")
+    pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=8,
+        title="t",
+        author="a",
+        head_sha="s8",
+        base_ref="main",
+        url="u",
+    )  # 기존 열린 PR
+    # 폴이 상한(1)만큼 반환 → 셋이 잘렸을 수 있어 재조정 skip(오검-close 방지)
+    poll_once(
+        db,
+        list_prs=lambda repo: [PrInfo(7, "t", "a", "s7", "main", "u", "open")],
+        enqueue=lambda pid: None,
+    )
+    assert pr_repo.get(db, 1)["state"] == "open"  # #8 유지
+
+
 def test_poll_once_skips_manual_trigger_mode(db):
     rid = repo_repo.add(db, full_name="acme/api")
     repo_repo.update(db, rid, trigger_mode="manual")

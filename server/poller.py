@@ -1,5 +1,6 @@
 import asyncio
 
+from server import config
 from server.github.gh import GhClient
 from server.repos import pr_repo, repo_repo
 
@@ -14,7 +15,18 @@ def poll_once(conn, *, list_prs, enqueue) -> None:
         # PR은 오버뷰에 뜨되 리뷰 job은 안 쌓임 → 재감지 루프 차단 + 발견 유지.
         # 나중에 벤더를 켜면 needs_review가 여전히 true라 다음 폴링에 enqueue됨)
         has_vendor = repo["vendor_claude_on"] or repo["vendor_codex_on"]
-        for pr in list_prs(repo["full_name"]):
+        # 이 폴 이전에 DB가 열림으로 알던 PR 집합(list_prs 호출 전에 캡처) — 폴 도중
+        # 웹훅 등으로 삽입된 PR은 여기에 없어 재조정 대상에서 자연히 제외된다.
+        prev_open = {
+            r["number"]
+            for r in conn.execute(
+                "SELECT number FROM pull_request WHERE repo_id=? AND state='open'",
+                (repo["id"],),
+            ).fetchall()
+        }
+        open_prs = list_prs(repo["full_name"])
+        open_numbers = []
+        for pr in open_prs:
             pid = pr_repo.upsert(
                 conn,
                 repo_id=repo["id"],
@@ -29,8 +41,13 @@ def poll_once(conn, *, list_prs, enqueue) -> None:
                 head_ref=pr.head_ref,
                 body=pr.body,
             )
+            open_numbers.append(pr.number)
             if has_vendor and pr_repo.needs_review(conn, pid):
                 enqueue(pid)
+        # 병합/닫힌 PR 재조정: 이 폴 이전에 열려 있었으나 gh 오픈 목록에서 사라진 것만
+        # closed로. 목록이 상한에 걸려 잘렸으면(len==limit) 불완전한 셋이라 skip.
+        if len(open_prs) < config.POLL_OPEN_PR_LIMIT:
+            pr_repo.mark_closed(conn, repo["id"], prev_open - set(open_numbers))
         repo_repo.update(conn, repo["id"], last_polled_at=_now(conn))
 
 

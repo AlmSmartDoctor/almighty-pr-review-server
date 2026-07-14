@@ -64,3 +64,23 @@ def mark_reviewed(conn, pid, head_sha) -> None:
 def needs_review(conn, pid) -> bool:
     r = get(conn, pid)
     return r is not None and r["head_sha"] != r["last_reviewed_sha"]
+
+
+def mark_closed(conn, repo_id, numbers) -> int:
+    """주어진 PR 번호들 중 'open' 행을 'closed'로 재조정. 호출자는 '이 폴 이전에 열려
+    있었으나 gh 오픈 목록에서 사라진' 번호만 넘긴다(폴 도중 삽입된 PR은 애초에 집합에
+    없어 오검-close 방지). SQLite 변수 상한(999) 회피로 청크 처리."""
+    numbers = list(numbers)
+    total = 0
+    for i in range(0, len(numbers), 500):
+        chunk = numbers[i : i + 500]
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"UPDATE pull_request SET state='closed' "
+            f"WHERE repo_id=? AND state='open' AND number IN ({placeholders})",
+            (repo_id, *chunk),
+        )
+        total += cur.rowcount
+    if total:
+        conn.commit()
+    return total

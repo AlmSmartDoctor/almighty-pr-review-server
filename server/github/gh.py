@@ -3,6 +3,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from server import config
+
 
 @dataclass
 class PrInfo:
@@ -104,6 +106,8 @@ class GhClient:
                 repo,
                 "--state",
                 "open",
+                "--limit",
+                str(config.POLL_OPEN_PR_LIMIT),
                 "--json",
                 "number,title,author,headRefOid,baseRefName,url,state,createdAt,"
                 "headRefName,body",

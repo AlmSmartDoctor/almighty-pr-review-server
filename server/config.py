@@ -9,6 +9,9 @@ HARNESS_DIR = BASE_DIR / "harness"
 DEFAULT_EFFORT = "medium"
 DEFAULT_CONCURRENCY = 2
 DEFAULT_POLL_INTERVAL_SEC = 60
+# 폴러가 한 번에 조회하는 열린 PR 상한. 이 값 미만이 반환되면 완전한 오픈 셋으로
+# 간주해 사라진 PR을 closed로 재조정한다(상한에 걸리면 오검-close 방지로 재조정 skip).
+POLL_OPEN_PR_LIMIT = 200
 DEFAULT_PRESCREEN_MODEL = "haiku"
 DEFAULT_REVIEW_MODEL = "sonnet"
 DEFAULT_CODEX_MODEL = ""  # "" = codex CLI 자체 기본 모델
