@@ -127,3 +127,53 @@ def open_prs_source(*, db_path=None):
         return summarize_open_prs(rows)
 
     return source
+
+
+# 이 레포의 리뷰 실행 활동 — 처리량·최근성·실패 이력만(프로젝트 진행 맥락). finding 내용/심각도
+# 분포는 의도적으로 배제(#2 오픈 finding·#8 팀 피드백과 겹치지 않고 앵커링 위험 없음). 단일 집계 행.
+_ACTIVITY_QUERY = """
+SELECT
+  SUM(CASE WHEN rr.status='done' THEN 1 ELSE 0 END) AS done_runs,
+  COUNT(DISTINCT CASE WHEN rr.status='done' THEN rr.pr_id END) AS reviewed_prs,
+  MAX(CASE WHEN rr.status='done' THEN rr.finished_at END) AS last_done,
+  SUM(CASE WHEN rr.status='failed' THEN 1 ELSE 0 END) AS failed_runs
+FROM review_run rr
+JOIN pull_request p ON p.id = rr.pr_id
+JOIN repo r ON r.id = p.repo_id
+WHERE r.full_name = ? COLLATE NOCASE
+"""
+
+
+def summarize_activity(row) -> str:
+    """레포 리뷰 실행 활동 요약(순수 함수). 완료·실패 이력이 전무하면 ""(미주입)."""
+    done = (row["done_runs"] if row else 0) or 0
+    prs = (row["reviewed_prs"] if row else 0) or 0
+    failed = (row["failed_runs"] if row else 0) or 0
+    last = ((row["last_done"] if row else "") or "")[:16]
+    if not done and not failed:
+        return ""
+    lines = ["이 레포 리뷰 활동 현황 (프로젝트 진행 맥락):"]
+    if done:
+        tail = f", 마지막 리뷰 {last}" if last else ""
+        lines.append(f"- 완료된 리뷰 {done}건 (PR {prs}건){tail}")
+    else:
+        lines.append("- 아직 완료된 리뷰 없음")
+    if failed:
+        lines.append(f"- 리뷰 실패 이력 {failed}건")
+    return "\n".join(lines)
+
+
+def activity_source(*, db_path=None):
+    """이 레포 리뷰 실행 활동을 앱 DB에서 읽어 요약하는 graph_source(req)->str.
+    read-only 단일 집계 SELECT + short-lived 커넥션."""
+    path = db_path if db_path is not None else config.DB_PATH
+
+    def source(req) -> str:
+        conn = connect(path)
+        try:
+            row = conn.execute(_ACTIVITY_QUERY, (req.repo,)).fetchone()
+        finally:
+            conn.close()
+        return summarize_activity(row)
+
+    return source

@@ -1388,6 +1388,160 @@ def test_registry_graphify_composes_open_prs(tmp_path, monkeypatch):
     assert r.status == "ok" and "feat: 검색 개선" in r.text
 
 
+# ── graphify 애그리게이터: 리뷰 활동 현황(처리량·최근성·실패 이력) ──────────────
+
+
+def test_summarize_activity_reports_throughput_and_recency():
+    from server.context.server_data_source import summarize_activity
+
+    out = summarize_activity(
+        dict(
+            done_runs=5, reviewed_prs=3, last_done="2026-07-14 16:25:45", failed_runs=1
+        )
+    )
+    assert "완료된 리뷰 5건 (PR 3건)" in out
+    assert "마지막 리뷰 2026-07-14 16:25" in out  # 분 단위 절단(초 제거)
+    assert "리뷰 실패 이력 1건" in out
+
+
+def test_summarize_activity_empty_when_no_activity():
+    from server.context.server_data_source import summarize_activity
+
+    assert (
+        summarize_activity(
+            dict(done_runs=0, reviewed_prs=0, last_done=None, failed_runs=0)
+        )
+        == ""
+    )
+    # SUM이 zero-row에서 NULL을 돌려줘도 미주입
+    assert (
+        summarize_activity(
+            dict(done_runs=None, reviewed_prs=0, last_done=None, failed_runs=None)
+        )
+        == ""
+    )
+
+
+def test_summarize_activity_failed_only():
+    from server.context.server_data_source import summarize_activity
+
+    out = summarize_activity(
+        dict(done_runs=0, reviewed_prs=0, last_done=None, failed_runs=2)
+    )
+    assert "아직 완료된 리뷰 없음" in out
+    assert "리뷰 실패 이력 2건" in out
+
+
+def test_activity_source_counts_done_and_failed(tmp_path):
+    from server.context.server_data_source import activity_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(conn, "acme/api", 5, "done", [])
+    _seed_open_pr(conn, "acme/api", 6, "done", [])
+    _seed_open_pr(conn, "acme/api", 7, "failed", [])
+    conn.close()
+    src = activity_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))
+    assert "완료된 리뷰 2건 (PR 2건)" in out
+    assert "리뷰 실패 이력 1건" in out
+
+
+def test_activity_source_counts_runs_but_distinct_prs(tmp_path):
+    from server.context.server_data_source import activity_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(conn, "acme/api", 5, "done", [])
+    _seed_open_pr(conn, "acme/api", 5, "done", [])  # 같은 PR 재리뷰 → 런 2·PR 1
+    conn.close()
+    src = activity_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))
+    assert "완료된 리뷰 2건 (PR 1건)" in out
+
+
+def test_activity_source_last_done_and_repo_scoped(tmp_path):
+    from server.context.server_data_source import activity_source
+
+    conn = _feedback_db(tmp_path)
+    run = _seed_open_pr(conn, "Acme/API", 5, "done", [])  # 등록 casing
+    conn.execute(
+        "UPDATE review_run SET finished_at='2026-07-14 09:30:00' WHERE id=?", (run,)
+    )
+    _seed_open_pr(conn, "other/repo", 5, "done", [])  # 다른 레포 — 격리돼야 함
+    conn.commit()
+    conn.close()
+    src = activity_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))  # 다른 casing 조회
+    assert "완료된 리뷰 1건 (PR 1건)" in out  # other/repo 미포함
+    assert "마지막 리뷰 2026-07-14 09:30" in out
+
+
+def test_activity_source_empty_without_runs(tmp_path):
+    from server.context.server_data_source import activity_source
+    from server.repos import repo_repo
+
+    conn = _feedback_db(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")  # 레포만, 리뷰 런 없음
+    conn.close()
+    src = activity_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=9)) == ""
+
+
+def test_activity_source_discriminates_statuses_and_ignores_failed_finished_at(
+    tmp_path,
+):
+    from server.context.server_data_source import activity_source
+
+    conn = _feedback_db(tmp_path)
+    done = _seed_open_pr(conn, "acme/api", 5, "done", [])
+    failed = _seed_open_pr(conn, "acme/api", 6, "failed", [])
+    _seed_open_pr(conn, "acme/api", 7, "canceled", [])  # prescreen skip 등
+    _seed_open_pr(conn, "acme/api", 8, "running", [])
+    _seed_open_pr(conn, "acme/api", 9, "queued", [])
+    # done=09:30, failed=그보다 늦은 11:00 — last_done은 done 런만 봐야 한다.
+    conn.execute(
+        "UPDATE review_run SET finished_at='2026-07-14 09:30:00' WHERE id=?", (done,)
+    )
+    conn.execute(
+        "UPDATE review_run SET finished_at='2026-07-14 11:00:00' WHERE id=?", (failed,)
+    )
+    conn.commit()
+    conn.close()
+    src = activity_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=99))
+    assert "완료된 리뷰 1건 (PR 1건)" in out  # done만 — canceled/running/queued 제외
+    assert "마지막 리뷰 2026-07-14 09:30" in out  # failed의 11:00으로 오염되지 않음
+    assert "11:00" not in out
+    assert "리뷰 실패 이력 1건" in out  # failed만 — canceled/running/queued는 실패 아님
+
+
+def test_activity_source_empty_when_only_canceled_or_running(tmp_path):
+    from server.context.server_data_source import activity_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(conn, "acme/api", 5, "canceled", [])
+    _seed_open_pr(conn, "acme/api", 6, "running", [])
+    conn.close()
+    src = activity_source(db_path=str(tmp_path / "fb.db"))
+    # done·failed 전무 → 집계 행은 있으나 done=failed=0 → 미주입
+    assert src(_req(repo="acme/api", pr_number=99)) == ""
+
+
+def test_registry_graphify_composes_activity(tmp_path, monkeypatch):
+    from server import config
+    from server.context.graphify_provider import GraphifyProvider
+    from server.context.registry import build_context_provider
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(conn, "acme/api", 5, "done", [])  # finding·다른 PR 없음 — 활동만
+    conn.close()
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
+    c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
+    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    # 현재 PR=5 → open_findings·open_prs는 자기-제외로 "", 활동 소스만 산출
+    r = gp.fetch(_req(repo="acme/api", pr_number=5))
+    assert r.status == "ok" and "리뷰 활동 현황" in r.text
+
+
 def test_db_feedback_source_excludes_pending(tmp_path):
     from server.context.feedback_source import db_feedback_source
 

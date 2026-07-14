@@ -107,6 +107,7 @@ def build_context_provider(repo, settings):
             from server.context.graphify_provider import GraphifyProvider
             from server.context.graphify_source import file_project_source
             from server.context.server_data_source import (
+                activity_source,
                 open_findings_source,
                 open_prs_source,
             )
@@ -117,9 +118,12 @@ def build_context_provider(repo, settings):
                 if graphify_path
                 else None
             )
-            # 프로젝트 문서(있으면) + 다른 열린 PR의 미결 지적 + 오픈 PR 목록을 애그리게이트.
+            # 프로젝트 문서(있으면) + 다른 열린 PR의 미결 지적 + 오픈 PR 목록 + 리뷰 활동 현황.
             source = _compose_sources(
-                doc_source, open_findings_source(), open_prs_source()
+                doc_source,
+                open_findings_source(),
+                open_prs_source(),
+                activity_source(),
             )
             providers.append(GraphifyProvider(graph_source=source))
         except Exception as e:  # never raise
