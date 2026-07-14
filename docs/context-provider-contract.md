@@ -25,7 +25,8 @@
 리뷰 대상 레포와 관련된 정보(레포 개요 → DB 특징 → 전체 프로젝트 진행상황)를 **점진적으로** 담는 애그리게이터. `graph_source(req)->str` seam을 주입받아 렌더한다(소스 미주입=skipped, 실패=empty, NEVER raises).
 
 - **소스 #1 — 정적 프로젝트 문서(구현됨).** 레포별 비밀-아님 컬럼 `graphify_path`가 레포 안에 체크인된 프로젝트 문서(예: `docs/PROJECT.md` — 진행상황·아키텍처·도메인 개요)를 가리킨다. 경로는 `static_context_path`/`db_schema_path`와 동일하게 **레포 root 하위로 realpath 봉쇄**(임의 절대경로 exfil 차단, B-INV-9). 변경 파일과 무관하게 **문서 전체를 항상 주입**한다(DBSchema의 변경파일→테이블 필터링과 다름). 미설정이면 소스 미주입=skipped. per-source 캡은 downstream(`render_context`)이 처리한다.
-- **향후 증분(같은 seam에 스택):** 관련 DB 데이터 특징, 서버 보유 데이터(이 레포의 리뷰 이력·열린 finding·최근 PR) 요약 등을 같은 `graph_source` seam에 순차 추가한다.
+- **소스 #2 — 서버 보유 오픈 finding 요약(구현됨, `server_data_source.open_findings_source`).** 앱 DB에서 **다른 열린 PR의 미결(`pending`) 지적**을 레포 스코프로 읽어 카테고리별 건수 + 대표 예시로 요약 주입한다(중복 제기 방지·일관성 참고용). 각 PR의 **최신 `done` 런**만(옛 런의 대체된 pending 배제), 현재 리뷰 중인 PR은 자기-에코 방지로 제외, `state='open'`만, 레포명 `COLLATE NOCASE`. read-only SELECT + short-lived 커넥션, 없으면 `""`. 경로 설정 불필요(항상 활성) — `context_graphify_on`이 켜지면 문서(있으면)와 `_compose_sources`로 애그리게이트된다.
+- **향후 증분(같은 seam에 스택):** 관련 DB 데이터 특징, 리뷰 런 활동 요약, 최근 오픈 PR 목록 등을 같은 `graph_source` seam에 순차 추가한다.
 
 ## 자가 학습 — 팀 피드백 (서브프로젝트 C 1차)
 

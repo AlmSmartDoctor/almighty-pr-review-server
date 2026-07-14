@@ -761,10 +761,13 @@ def test_file_project_source_resolves_relative_to_root(tmp_path):
     assert "상대경로 해석" in src(_req())
 
 
-def test_registry_graphify_source_wired_from_path(tmp_path):
+def test_registry_graphify_source_wired_from_path(tmp_path, monkeypatch):
+    from server import config
     from server.context.registry import build_context_provider
     from server.context.graphify_provider import GraphifyProvider
 
+    _feedback_db(tmp_path).close()  # 미결 지적 없는 빈 앱 DB → open_findings ""
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
     (tmp_path / "PROJECT.md").write_text("프로젝트 현황 X", encoding="utf-8")
     repo = {
         "context_graphify_on": 1,
@@ -961,6 +964,264 @@ def test_db_feedback_source_empty_without_decisions(tmp_path):
     conn.close()
     src = db_feedback_source(db_path=str(tmp_path / "fb.db"))
     assert src(_req(repo="acme/api")) == ""
+
+
+# ── graphify 애그리게이터: 오픈 finding 요약(다른 열린 PR의 미결 지적) ──────────
+
+
+def test_compose_sources_joins_and_isolates():
+    from server.context.registry import _compose_sources
+
+    def boom(req):
+        raise RuntimeError("x")
+
+    assert _compose_sources(None, None) is None
+    combined = _compose_sources(lambda r: "A", boom, lambda r: "", lambda r: "B")
+    assert combined(_req()) == "A\n\nB"  # 빈/예외 소스 스킵, 나머지만 join
+
+
+def _of_rows(*tuples):
+    # (category, severity, claim, pr_number)
+    return [
+        dict(category=c, severity=s, claim=cl, pr_number=n) for c, s, cl, n in tuples
+    ]
+
+
+def test_summarize_open_findings_tallies_and_examples():
+    from server.context.server_data_source import summarize_open_findings
+
+    out = summarize_open_findings(
+        _of_rows(
+            ("correctness", "high", "널 역참조", 5),
+            ("correctness", "high", "경계 검사 누락", 5),
+            ("style", "low", "네이밍", 4),
+        )
+    )
+    assert "다른 열린 PR 2건" in out  # {5, 4}
+    assert "correctness: 2" in out and "style: 1" in out
+    assert "[high/correctness] 널 역참조" in out
+    assert "[low/style] 네이밍" in out
+
+
+def test_summarize_open_findings_empty_when_no_rows():
+    from server.context.server_data_source import summarize_open_findings
+
+    assert summarize_open_findings([]) == ""
+
+
+def test_summarize_open_findings_dedups_examples():
+    from server.context.server_data_source import summarize_open_findings
+
+    out = summarize_open_findings(_of_rows(*[("style", "low", "같은 지적", 3)] * 4))
+    assert "style: 4" in out
+    assert out.count("같은 지적") == 1  # 예시는 중복 제거
+
+
+def _seed_open_pr(conn, full_name, number, run_status, findings, *, state="open"):
+    """오픈 PR + 리뷰 런 + finding들. findings: [(category, severity, claim, status)].
+    repo·PR은 get-or-add(같은 number 재호출 시 같은 PR에 런 추가). 반환: run_id."""
+    from server.repos import finding_repo, repo_repo
+
+    existing = repo_repo.get_by_full_name(conn, full_name)
+    rid = existing["id"] if existing else repo_repo.add(conn, full_name=full_name)
+    row = conn.execute(
+        "SELECT id FROM pull_request WHERE repo_id=? AND number=?", (rid, number)
+    ).fetchone()
+    pr = (
+        row["id"]
+        if row
+        else conn.execute(
+            "INSERT INTO pull_request (repo_id, number, head_sha, state) "
+            "VALUES (?, ?, 'sha', ?)",
+            (rid, number, state),
+        ).lastrowid
+    )
+    run = conn.execute(
+        "INSERT INTO review_run (pr_id, head_sha, status) VALUES (?, 'sha', ?)",
+        (pr, run_status),
+    ).lastrowid
+    conn.commit()
+    for cat, sev, claim, status in findings:
+        fid = finding_repo.add(
+            conn,
+            run_id=run,
+            vendor="claude",
+            file="a.py",
+            line=1,
+            severity=sev,
+            category=cat,
+            claim=claim,
+            rationale="r",
+            confidence=0.9,
+        )
+        finding_repo.set_status(conn, fid, status)
+    return run
+
+
+def test_open_findings_source_reads_pending_from_open_prs(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(
+        conn,
+        "acme/api",
+        5,
+        "done",
+        [
+            ("correctness", "high", "널 역참조", "pending"),
+            ("style", "low", "네이밍", "pending"),
+        ],
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))  # 다른 PR에서 리뷰 중
+    assert "correctness: 1" in out and "style: 1" in out
+    assert "[high/correctness] 널 역참조" in out
+    assert "다른 열린 PR 1건" in out
+
+
+def test_open_findings_source_excludes_current_pr(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(
+        conn, "acme/api", 7, "done", [("correctness", "high", "자기 지적", "pending")]
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=7)) == ""  # 현재 PR=7 자기-에코 제외
+
+
+def test_open_findings_source_excludes_decided_and_non_done(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    # 결정된 지적(미결 아님)은 제외
+    _seed_open_pr(
+        conn,
+        "acme/api",
+        4,
+        "done",
+        [
+            ("style", "low", "결정된 지적", "dismissed"),
+            ("correctness", "high", "승인된 지적", "approved"),
+        ],
+    )
+    # 아직 안 끝난 런(running)의 pending도 제외
+    _seed_open_pr(
+        conn, "acme/api", 5, "running", [("perf", "high", "미완런 지적", "pending")]
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=9)) == ""
+
+
+def test_open_findings_source_dedups_reemitted_finding(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    # 전체 재리뷰가 같은 지적(같은 file/line/claim)을 다음 done 런에 다시 실어도 1건으로 합쳐진다.
+    _seed_open_pr(
+        conn, "acme/api", 6, "done", [("style", "low", "중복 지적", "pending")]
+    )
+    _seed_open_pr(
+        conn,
+        "acme/api",
+        6,
+        "done",
+        [
+            ("style", "low", "중복 지적", "pending"),  # 재발행 → dedup
+            ("correctness", "high", "새 지적", "pending"),
+        ],
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))
+    assert "style: 1" in out  # 재발행이 2건으로 부풀지 않음
+    assert out.count("중복 지적") == 1
+    assert "새 지적" in out and "correctness: 1" in out
+
+
+def test_open_findings_source_keeps_earlier_run_finding(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    # 증분 리뷰: 나중 done 런이 델타만 훑어 이전 런의 미결을 다시 싣지 않아도 그 미결은 보존.
+    # ("최신 done 런만" 필터였다면 '이전 런 미결'이 통째로 누락됨 — 회귀 방지)
+    _seed_open_pr(
+        conn, "acme/api", 6, "done", [("security", "high", "이전 런 미결", "pending")]
+    )
+    _seed_open_pr(
+        conn, "acme/api", 6, "done", [("style", "low", "나중 런 지적", "pending")]
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))
+    assert "이전 런 미결" in out and "나중 런 지적" in out
+    assert "security: 1" in out and "style: 1" in out
+
+
+def test_open_findings_source_case_insensitive_and_scoped(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(
+        conn, "Acme/API", 3, "done", [("style", "low", "이 레포 지적", "pending")]
+    )
+    _seed_open_pr(
+        conn, "other/repo", 3, "done", [("perf", "high", "다른레포 지적", "pending")]
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    out = src(_req(repo="acme/api", pr_number=9))  # 다른 casing 조회
+    assert "이 레포 지적" in out
+    assert "다른레포 지적" not in out and "perf" not in out
+
+
+def test_open_findings_source_excludes_closed_pr(tmp_path):
+    from server.context.server_data_source import open_findings_source
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(
+        conn,
+        "acme/api",
+        2,
+        "done",
+        [("style", "low", "닫힌PR 지적", "pending")],
+        state="closed",
+    )
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=9)) == ""
+
+
+def test_open_findings_source_empty_when_none(tmp_path):
+    from server.context.server_data_source import open_findings_source
+    from server.repos import repo_repo
+
+    conn = _feedback_db(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")  # 레포만, 오픈 미결 없음
+    conn.close()
+    src = open_findings_source(db_path=str(tmp_path / "fb.db"))
+    assert src(_req(repo="acme/api", pr_number=9)) == ""
+
+
+def test_registry_graphify_composes_open_findings_without_path(tmp_path, monkeypatch):
+    from server import config
+    from server.context.graphify_provider import GraphifyProvider
+    from server.context.registry import build_context_provider
+
+    conn = _feedback_db(tmp_path)
+    _seed_open_pr(
+        conn, "acme/api", 5, "done", [("correctness", "high", "미결 버그", "pending")]
+    )
+    conn.close()
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
+    # graphify_path 없음 — 오픈 finding 요약만으로 graphify가 산출(스택 검증)
+    c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
+    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    r = gp.fetch(_req(repo="acme/api", pr_number=9))
+    assert r.status == "ok" and "미결 버그" in r.text
 
 
 def test_db_feedback_source_excludes_pending(tmp_path):

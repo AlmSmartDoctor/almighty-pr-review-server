@@ -26,6 +26,28 @@ def _parse_keys(s):
     )
 
 
+def _compose_sources(*sources):
+    """None을 걸러 여러 graph_source(req)->str 를 하나로 합친다. 남는 게 없으면 None
+    (→ provider skipped). 각 소스는 독립 예외 격리 후 비어있지 않은 출력만 "\\n\\n"으로 잇는다
+    — 한 소스 실패가 다른 소스 기여를 죽이지 않는다."""
+    live = [s for s in sources if s is not None]
+    if not live:
+        return None
+
+    def combined(req) -> str:
+        parts = []
+        for s in live:
+            try:
+                out = s(req) or ""
+            except Exception:
+                out = ""
+            if out.strip():
+                parts.append(out)
+        return "\n\n".join(parts)
+
+    return combined
+
+
 def build_context_provider(repo, settings):
     """활성 프로바이더 조립. 생성은 절대 예외를 밖으로 던지지 않는다(B-INV-4/D6)."""
     providers = []
@@ -84,13 +106,16 @@ def build_context_provider(repo, settings):
         try:
             from server.context.graphify_provider import GraphifyProvider
             from server.context.graphify_source import file_project_source
+            from server.context.server_data_source import open_findings_source
 
             graphify_path = _ref(repo, "graphify_path")
-            source = (
+            doc_source = (
                 file_project_source(path=graphify_path, root=_ref(repo, "local_path"))
                 if graphify_path
                 else None
             )
+            # 프로젝트 문서(있으면) + 다른 열린 PR의 미결 지적 요약을 애그리게이트.
+            source = _compose_sources(doc_source, open_findings_source())
             providers.append(GraphifyProvider(graph_source=source))
         except Exception as e:  # never raise
             print(f"[context] graphify provider skipped: {redact_secrets(str(e))}")
