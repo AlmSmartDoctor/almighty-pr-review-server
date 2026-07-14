@@ -342,7 +342,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
               <Switch aria-label="Static 컨텍스트" checked={!!draft.context_static_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_static_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="Jira 연동" help="연동 예정 · 서버에 Jira 토큰 설정 필요">
+            <Field title="Jira 연동" help="PR이 참조하는 Jira 이슈(summary·수용기준)를 리뷰에 주입 · 서버 env에 전용 API 토큰 + 레포별 프로젝트키 필요">
               <Switch aria-label="Jira 연동" checked={!!draft.context_jira_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_jira_on: v ? 1 : 0 })} />
             </Field>
