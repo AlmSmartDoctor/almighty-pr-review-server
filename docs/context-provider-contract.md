@@ -31,11 +31,13 @@
 - **경로 설정 불필요(소스 #2·#3·#4는 항상 활성):** `context_graphify_on`이 켜지면 문서(있으면, 소스 #1) + 소스 #2 + 소스 #3 + 소스 #4를 `_compose_sources`(소스별 예외 격리 후 비어있지 않은 출력만 join)로 애그리게이트한다. 전부 비면 provider `empty`, NEVER raises(B-INV-4).
 - **향후 증분(같은 seam에 스택):** 관련 DB 데이터 특징(실접속 시 실데이터 특성) 등을 같은 `graph_source` seam에 순차 추가한다.
 
-## 자가 학습 — 팀 피드백 (서브프로젝트 C 1차)
+## 자가 학습 — 팀 피드백 (서브프로젝트 C)
 
-이 레포의 과거 리뷰에서 **사람이 finding에 내린 판단**(승인/기각/수정)을 요약해 이후 리뷰에 "팀이 이런 지적을 이렇게 판단해 왔다"는 보정 신호로 주입한다. 상세는 `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
+이 레포의 과거 리뷰에서 **사람이 finding에 내린 판단**(승인/기각/수정)을 요약해 이후 리뷰에 "팀이 이런 지적을 이렇게 판단해 왔다"는 보정 신호로 주입하고(1차), 사람이 열람하는 `/learn` 탭(2차)과 결정 이력 감사(3차)로 확장한다. 상세는 `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
 
 - **학습 코퍼스는 이미 DB에 있다.** 사람 결정은 `finding.status`(`approved|dismissed|edited|posted`) + `finding.edited_text`로 durable하게 저장되므로 별도 이벤트 저장소를 만들지 않고 finding 테이블을 **읽어서** 요약한다. `server/seams.py`의 `NullMemoryStore`(write-side 스텁)는 finding.status로 포착 안 되는 신호(Slack 반응 등)를 위한 후속 증분까지 배선하지 않는다.
+- **2차 — `/learn` 웹 탭(구현됨).** `feedback_source.feedback_stats`(순수, 최소 결정 게이트 없음) + `repo_feedback_stats`가 레포별 수용/수정/기각 통계를 만들고 `GET /api/learn`이 노출한다(결정 있는 레포만, 결정 많은 순). 프런트 `LearnSection`이 레포 탭 + 카테고리 표 + 대표 예시로 렌더한다.
+- **3차 — 결정 이력 감사(구현됨).** append-only `finding_decision`(id, finding_id, from_status, to_status, decided_at) 테이블에 `finding_repo.set_status`가 **상태가 실제로 바뀔 때만** 1행 append한다(무변경·미존재 finding은 스킵—FK 안전). `feedback_source.recent_decisions(conn, full_name)`가 이 이력을 조인해 레포별 **최근 사람 판단 이벤트**(`approved|dismissed|edited`만, `posted`·`pending` 제외, `fd.id DESC` 최근순, `LIMIT 10`)로 반환하고 `/api/learn`이 `recent_decisions`로 실어 `/learn` 탭 "최근 결정 활동" 타임라인에 표시한다. `decided_by`는 단일 계정 배포에서 가치가 낮아 미기록(team-mode 재개 시 추가).
 - **인터페이스:** `FeedbackContextProvider`(`name="team_feedback"`)는 `feedback_source(req) -> str`를 주입받는다. 소스 미주입=`skipped`, 실패=`empty`, 요약 텍스트 있으면 `ok`. NEVER raises.
 - **소스 #1 — 앱 DB 조회(구현됨).** `db_feedback_source(*, db_path=config.DB_PATH)`가 `finding → review_run → pull_request → repo`를 조인해 `repo.full_name = req.repo COLLATE NOCASE`로 **현재 레포 결정만** 집계한다(레포 간 격리). 판단 매핑: 기각=`dismissed`, 수정수용=`edited` 또는 `edited_text` 존재, 승인=그 외. `pending`(미결정) 제외. read-only SELECT + short-lived 커넥션(worker 진행 중에도 WAL 하 안전).
 - **캡·플로어:** `_MAX_DECISIONS=400`(최근순 스캔), `_MIN_DECISIONS=3`(미만이면 미주입), `_MAX_EXAMPLES=5`(기각/수정 대표 예시, claim 중복 제거), `_MAX_CLAIM_CHARS=160`. per-source·총합 캡과 nonce 펜스는 downstream `render_context`가 처리.

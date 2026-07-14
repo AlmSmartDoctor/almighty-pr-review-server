@@ -207,6 +207,69 @@ def test_set_status_preserves_edited_text(db):
     assert row["edited_text"] == "human text"
 
 
+def _seed_one_finding(db, number):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=number,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = db.execute(
+        "INSERT INTO review_run (pr_id, head_sha) VALUES (?, ?)", (pid, "s")
+    ).lastrowid
+    return finding_repo.add(
+        db,
+        run_id=run_id,
+        vendor="claude",
+        file="a.py",
+        line=1,
+        severity="high",
+        category="bug",
+        claim="c",
+        rationale="r",
+        confidence=0.8,
+    )
+
+
+def test_set_status_records_decision_audit(db):
+    fid = _seed_one_finding(db, 3)
+    finding_repo.set_status(db, fid, "approved")
+    finding_repo.set_status(db, fid, "approved")  # 무변경 → 감사 미기록
+    finding_repo.set_status(db, fid, "posted")
+    rows = db.execute(
+        "SELECT from_status, to_status FROM finding_decision "
+        "WHERE finding_id=? ORDER BY id",
+        (fid,),
+    ).fetchall()
+    assert [(r["from_status"], r["to_status"]) for r in rows] == [
+        ("pending", "approved"),
+        ("approved", "posted"),
+    ]  # 재-approved(무변경)은 스킵, from_status 정확
+
+
+def test_set_status_missing_finding_is_noop(db):
+    # 존재하지 않는 finding → FK 위반 없이 감사 미기록(prev None 가드)
+    finding_repo.set_status(db, 9999, "approved")
+    assert db.execute("SELECT COUNT(*) c FROM finding_decision").fetchone()["c"] == 0
+
+
+def test_set_status_edited_branch_records_decision_audit(db):
+    # edited_text 분기(사람 수정)도 감사 행 1개를 남겨야 함 — INSERT가 if/else 밖에 있음을 고정
+    fid = _seed_one_finding(db, 4)
+    finding_repo.set_status(db, fid, "edited", edited_text="human text")
+    rows = db.execute(
+        "SELECT from_status, to_status FROM finding_decision "
+        "WHERE finding_id=? ORDER BY id",
+        (fid,),
+    ).fetchall()
+    assert [(r["from_status"], r["to_status"]) for r in rows] == [("pending", "edited")]
+
+
 def test_settings_context_toggles_roundtrip(db):
     settings_repo.update(
         db,

@@ -57,11 +57,19 @@ _UNSET = object()
 
 
 def set_status(conn, fid, status, edited_text=_UNSET):
+    prev = conn.execute("SELECT status FROM finding WHERE id=?", (fid,)).fetchone()
     if edited_text is _UNSET:
         conn.execute("UPDATE finding SET status=? WHERE id=?", (status, fid))
     else:
         conn.execute(
             "UPDATE finding SET status=?, edited_text=? WHERE id=?",
             (status, edited_text, fid),
+        )
+    # 상태가 실제로 바뀔 때만 append-only 감사 행 기록(재편집 등 무변경·미존재 finding은 스킵).
+    if prev is not None and prev["status"] != status:
+        conn.execute(
+            "INSERT INTO finding_decision (finding_id, from_status, to_status, decided_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (fid, prev["status"], status),
         )
     conn.commit()

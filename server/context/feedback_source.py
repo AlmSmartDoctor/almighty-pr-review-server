@@ -118,6 +118,42 @@ def repo_feedback_stats(conn, full_name) -> dict:
     return feedback_stats(rows)
 
 
+_MAX_RECENT_DECISIONS = 10  # /learn '최근 결정 활동' 타임라인 표시 상한
+
+# finding_decision 감사 이력 → 최근 사람 판단 이벤트(시간순). posted(시스템 게시)·pending 제외.
+# fd.id DESC = 삽입 순(같은 초 decided_at 동률에도 안정적).
+_RECENT_DECISIONS_QUERY = """
+SELECT f.category AS category, f.claim AS claim,
+       fd.to_status AS verdict, fd.decided_at AS decided_at, p.number AS pr_number
+FROM finding_decision fd
+JOIN finding f ON f.id = fd.finding_id
+JOIN review_run rr ON rr.id = f.run_id
+JOIN pull_request p ON p.id = rr.pr_id
+JOIN repo r ON r.id = p.repo_id
+WHERE r.full_name = ? COLLATE NOCASE
+  AND fd.to_status IN ('approved', 'dismissed', 'edited')
+ORDER BY fd.id DESC
+LIMIT ?
+"""
+
+
+def recent_decisions(conn, full_name) -> list:
+    """이 레포의 최근 사람 판단 이벤트(감사 이력 기반, 최근순)를 /learn 표시용으로 반환."""
+    rows = conn.execute(
+        _RECENT_DECISIONS_QUERY, (full_name, _MAX_RECENT_DECISIONS)
+    ).fetchall()
+    return [
+        {
+            "category": (r["category"] or "").strip() or "기타",
+            "claim": _one_line(r["claim"]),
+            "verdict": r["verdict"],
+            "pr_number": r["pr_number"],
+            "decided_at": (r["decided_at"] or "")[:16],
+        }
+        for r in rows
+    ]
+
+
 def db_feedback_source(*, db_path=None):
     """이 레포의 과거 사람 판단을 앱 DB에서 읽어 요약하는 feedback_source(req)->str 를 만든다.
     read-only SELECT + short-lived 커넥션(worker 진행 중에도 WAL 하에서 안전)."""

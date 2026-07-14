@@ -12,6 +12,29 @@ const feedback = [
     ],
     rejected_examples: [{ category: "style", claim: "변수명 개선" }],
     edited_examples: [{ category: "style", claim: "주석 문구 다듬음" }],
+    recent_decisions: [
+      {
+        category: "correctness",
+        claim: "널 체크 누락",
+        verdict: "approved" as const,
+        pr_number: 12,
+        decided_at: "2026-07-14 10:20",
+      },
+      {
+        category: "style",
+        claim: "네이밍 트집",
+        verdict: "dismissed" as const,
+        pr_number: 11,
+        decided_at: "2026-07-14 09:05",
+      },
+      {
+        category: "bug",
+        claim: "수정한 지적",
+        verdict: "edited" as const,
+        pr_number: 10,
+        decided_at: "2026-07-14 08:40",
+      },
+    ],
   },
   {
     repo: "acme/web",
@@ -19,6 +42,7 @@ const feedback = [
     categories: [{ category: "perf", approved: 2, edited: 0, rejected: 0 }],
     rejected_examples: [],
     edited_examples: [],
+    recent_decisions: [],
   },
 ];
 
@@ -31,6 +55,18 @@ test("shows first repo tallies and examples on load", async () => {
   const table = screen.getByRole("table");
   expect(within(table).getByText("correctness")).toBeInTheDocument();
   expect(within(table).getByText("style")).toBeInTheDocument();
+});
+
+test("shows recent decision activity timeline", async () => {
+  render(<LearnSection load={async () => feedback} />);
+  await screen.findByText("최근 결정 활동");
+  expect(screen.getByText("널 체크 누락")).toBeInTheDocument();
+  expect(screen.getByText("네이밍 트집")).toBeInTheDocument();
+  expect(screen.getByText("2026-07-14 10:20")).toBeInTheDocument();
+  expect(screen.getByText("#12")).toBeInTheDocument();
+  // edited verdict → 수정 배지로 노출(승인/기각만 렌더되던 회귀 방지)
+  const editedRow = screen.getByText("수정한 지적").closest("li")!;
+  expect(within(editedRow).getByText("수정")).toBeInTheDocument();
 });
 
 test("switches repo tab and re-scopes the view", async () => {

@@ -149,14 +149,20 @@ def learn(conn=Depends(get_conn)):
     """레포별 팀 판단(수용·수정·기각) 집계 — /learn 탭이 열람하는 학습 신호.
     finding 사람 결정이 있는 레포만, 결정 수 많은 순으로 반환."""
     repos = conn.execute("SELECT full_name FROM repo ORDER BY full_name").fetchall()
-    out = [
-        {
-            "repo": r["full_name"],
-            **feedback_source.repo_feedback_stats(conn, r["full_name"]),
-        }
-        for r in repos
-    ]
-    out = [r for r in out if r["total"]]
+    out = []
+    for r in repos:
+        stats = feedback_source.repo_feedback_stats(conn, r["full_name"])
+        if not stats["total"]:
+            continue
+        out.append(
+            {
+                "repo": r["full_name"],
+                **stats,
+                "recent_decisions": feedback_source.recent_decisions(
+                    conn, r["full_name"]
+                ),
+            }
+        )
     out.sort(key=lambda x: (-x["total"], x["repo"]))
     return out
 

@@ -1030,6 +1030,66 @@ def test_repo_feedback_stats_reads_repo_decisions(tmp_path):
     assert cats["correctness"]["approved"] == 1
 
 
+def test_recent_decisions_returns_recent_human_verdicts(tmp_path):
+    from server.context.feedback_source import recent_decisions
+
+    conn = _feedback_db(tmp_path)
+    _seed_decisions(
+        conn,
+        "acme/api",
+        [
+            ("style", "dismissed", "기각된 지적", None),
+            ("correctness", "approved", "승인된 지적", None),
+            (
+                "perf",
+                "posted",
+                "게시된 지적",
+                None,
+            ),  # posted=시스템 게시 → 활동에서 제외
+            (
+                "bug",
+                "edited",
+                "수정된 지적",
+                "다듬은 문구",
+            ),  # edited_text 분기 → to_status='edited'
+        ],
+    )
+    out = recent_decisions(conn, "acme/api")
+    conn.close()
+    # 최근순(마지막 결정이 앞), posted 제외, edited 분기도 활동에 노출
+    assert [(d["verdict"], d["claim"]) for d in out] == [
+        ("edited", "수정된 지적"),
+        ("approved", "승인된 지적"),
+        ("dismissed", "기각된 지적"),
+    ]
+
+
+def test_recent_decisions_scoped_and_field_shapes(tmp_path):
+    from server.context.feedback_source import recent_decisions
+
+    conn = _feedback_db(tmp_path)
+    _seed_decisions(conn, "Acme/API", [("style", "dismissed", "이 레포 지적", None)])
+    _seed_decisions(conn, "other/repo", [("perf", "approved", "다른 레포", None)])
+    out = recent_decisions(conn, "acme/api")  # 다른 casing 조회
+    conn.close()
+    assert len(out) == 1  # 다른 레포 격리
+    d = out[0]
+    assert d["claim"] == "이 레포 지적" and d["verdict"] == "dismissed"
+    assert d["category"] == "style" and d["pr_number"] == 1
+    assert d["decided_at"]  # 타임스탬프 존재
+
+
+def test_recent_decisions_empty_without_decisions(tmp_path):
+    from server.context.feedback_source import recent_decisions
+    from server.repos import repo_repo
+
+    conn = _feedback_db(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")  # 레포만, 결정 없음
+    out = recent_decisions(conn, "acme/api")
+    conn.close()
+    assert out == []
+
+
 # ── graphify 애그리게이터: 오픈 finding 요약(다른 열린 PR의 미결 지적) ──────────
 
 

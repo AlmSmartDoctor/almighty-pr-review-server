@@ -159,6 +159,24 @@ def test_learn_orders_repos_by_decision_count(tmp_path):
     assert [r["repo"] for r in body] == ["acme/zzz", "acme/api"]
 
 
+def test_learn_includes_recent_decisions(tmp_path):
+    client, conn = _client(tmp_path)
+    _seed_learn_decisions(
+        conn,
+        "acme/api",
+        [("style", "dismissed", "기각 지적"), ("correctness", "approved", "승인 지적")],
+    )
+
+    entry = client.get("/api/learn").json()[0]
+
+    claims = [d["claim"] for d in entry["recent_decisions"]]
+    assert "기각 지적" in claims and "승인 지적" in claims
+    assert all(
+        {"verdict", "decided_at", "pr_number", "category"} <= d.keys()
+        for d in entry["recent_decisions"]
+    )
+
+
 def test_learn_empty_without_decisions(tmp_path):
     client, _ = _client(tmp_path)
     assert client.get("/api/learn").json() == []

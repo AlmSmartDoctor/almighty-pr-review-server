@@ -68,6 +68,13 @@ CREATE TABLE IF NOT EXISTS finding (
   status TEXT NOT NULL DEFAULT 'pending',          -- pending|approved|dismissed|edited|posted
   edited_text TEXT, created_at TEXT
 );
+-- 서브프로젝트 C: finding 사람 판단 이력(append-only 감사). set_status가 상태 변경 시 1행 append.
+CREATE TABLE IF NOT EXISTS finding_decision (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  finding_id INTEGER NOT NULL REFERENCES finding(id),
+  from_status TEXT, to_status TEXT NOT NULL,
+  decided_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS posted_comment (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER NOT NULL REFERENCES review_run(id),

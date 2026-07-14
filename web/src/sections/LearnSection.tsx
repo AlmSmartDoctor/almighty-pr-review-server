@@ -23,12 +23,20 @@ type CategoryStat = {
   edited: number;
   rejected: number;
 };
+type Decision = {
+  category: string;
+  claim: string;
+  verdict: "approved" | "dismissed" | "edited";
+  pr_number: number;
+  decided_at: string;
+};
 type RepoFeedback = {
   repo: string;
   total: number;
   categories: CategoryStat[];
   rejected_examples: Example[];
   edited_examples: Example[];
+  recent_decisions: Decision[];
 };
 
 export function LearnSection({ load }: { load?: () => Promise<RepoFeedback[]> }) {
@@ -185,7 +193,50 @@ function RepoFeedbackView({ data }: { data: RepoFeedback }) {
           examples={data.edited_examples}
         />
       )}
+      {data.recent_decisions.length > 0 && (
+        <RecentDecisions decisions={data.recent_decisions} />
+      )}
     </div>
+  );
+}
+
+const VERDICT_LABEL: Record<Decision["verdict"], string> = {
+  approved: "승인",
+  dismissed: "기각",
+  edited: "수정",
+};
+const VERDICT_TONE: Record<Decision["verdict"], BadgeVariant> = {
+  approved: "ok",
+  dismissed: "danger",
+  edited: "warn",
+};
+
+function RecentDecisions({ decisions }: { decisions: Decision[] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>최근 결정 활동</CardTitle>
+        <StatusLine inline>사람이 내린 최근 판단 순서</StatusLine>
+      </CardHeader>
+      <CardContent>
+        <ul className="flex flex-col gap-2">
+          {decisions.map((d, i) => (
+            <li key={i} className="flex flex-wrap items-start gap-2 text-[13px]">
+              <Badge variant={VERDICT_TONE[d.verdict]}>{VERDICT_LABEL[d.verdict]}</Badge>
+              <span className="font-mono text-[11.5px] text-muted-foreground">
+                #{d.pr_number}
+              </span>
+              <span className="min-w-0 flex-1 leading-relaxed">{d.claim}</span>
+              {d.decided_at && (
+                <span className="shrink-0 text-[11.5px] text-muted-foreground tabular-nums">
+                  {d.decided_at}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
   );
 }
 
