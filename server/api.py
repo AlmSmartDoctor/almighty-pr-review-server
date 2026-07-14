@@ -460,6 +460,8 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
 @app.post("/api/prs/{pid}/review", status_code=202)
 def trigger_review(pid: int, conn=Depends(get_conn)):
     pr = pr_repo.get(conn, pid)
+    if pr is None:
+        raise HTTPException(404, "pr not found")
     job_id = job_repo.enqueue_manual(conn, pr_id=pid, head_sha=pr["head_sha"])
     return {"job_id": job_id}
 

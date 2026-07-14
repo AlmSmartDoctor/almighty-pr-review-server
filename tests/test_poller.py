@@ -169,7 +169,9 @@ def test_poll_once_skips_reconcile_when_list_truncated(db, monkeypatch):
     assert pr_repo.get(db, 1)["state"] == "open"  # #8 유지
 
 
-def test_poll_once_skips_manual_trigger_mode(db):
+def test_poll_once_manual_discovers_pr_but_skips_enqueue(db):
+    # ★개정: manual 레포도 PR을 발견·upsert(대시보드 노출→사람이 리뷰 버튼으로 트리거)
+    # 하되 자동 enqueue만 막는다. (예전엔 레포 전체를 skip해 새 PR이 안 떠 수동 트리거 불가)
     rid = repo_repo.add(db, full_name="acme/api")
     repo_repo.update(db, rid, trigger_mode="manual")
     enqueued = []
@@ -178,8 +180,8 @@ def test_poll_once_skips_manual_trigger_mode(db):
         list_prs=lambda repo: [PrInfo(7, "t", "a", "sha1", "main", "u", "open")],
         enqueue=lambda pr_id: enqueued.append(pr_id),
     )
-    assert enqueued == []  # manual 모드 → 레포 전체 skip
-    assert pr_repo.get(db, 1) is None  # continue가 upsert 이전이라 PR도 미생성
+    assert enqueued == []  # manual → 자동 리뷰 enqueue 안 함
+    assert pr_repo.get(db, 1)["head_sha"] == "sha1"  # 그러나 PR은 발견·upsert됨
 
 
 def test_poll_loop_survives_tick_error(tmp_path, monkeypatch):

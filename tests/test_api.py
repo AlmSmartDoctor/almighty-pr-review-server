@@ -328,6 +328,13 @@ def test_run_context_404_for_missing_run(tmp_path):
     assert r.status_code == 404
 
 
+def test_trigger_review_404_for_missing_pr(tmp_path):
+    # 수동 트리거가 1급 경로 — stale/bogus pid는 500이 아니라 404로 정직하게 거부
+    client, _ = _client(tmp_path)
+    r = client.post("/api/prs/99999/review")
+    assert r.status_code == 404
+
+
 def test_run_context_empty_when_unstored(tmp_path):
     client, conn = _client(tmp_path)
     from server.repos import repo_repo, pr_repo, review_repo
