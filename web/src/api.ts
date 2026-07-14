@@ -20,6 +20,7 @@ export const api = {
   patchRepo: (id: number, body: object) =>
     fetch(`/api/repos/${id}`, writeJson("PATCH", body)).then(json),
   overview: () => fetch("/api/overview").then(json),
+  learn: () => fetch("/api/learn").then(json),
   settings: () => fetch("/api/settings").then(json),
   patchSettings: (body: object) =>
     fetch("/api/settings", writeJson("PATCH", body)).then(json),

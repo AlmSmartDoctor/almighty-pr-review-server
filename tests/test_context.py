@@ -966,6 +966,70 @@ def test_db_feedback_source_empty_without_decisions(tmp_path):
     assert src(_req(repo="acme/api")) == ""
 
 
+def test_feedback_stats_tallies_categories_and_examples():
+    from server.context.feedback_source import feedback_stats
+
+    out = feedback_stats(
+        _fb_rows(
+            ("style", "dismissed", "nit A", None),
+            ("style", "dismissed", "nit B", None),
+            ("style", "posted", "원 지적", "다듬은 문구"),  # edited 버킷
+            ("correctness", "approved", "real bug", None),
+        )
+    )
+    assert out["total"] == 4
+    cats = {c["category"]: c for c in out["categories"]}
+    assert cats["style"] == {
+        "category": "style",
+        "approved": 0,
+        "edited": 1,
+        "rejected": 2,
+    }
+    assert cats["correctness"] == {
+        "category": "correctness",
+        "approved": 1,
+        "edited": 0,
+        "rejected": 0,
+    }
+    assert out["categories"][0]["category"] == "style"  # 결정 많은 카테고리 우선
+    assert {e["claim"] for e in out["rejected_examples"]} == {"nit A", "nit B"}
+    assert out["edited_examples"] == [{"category": "style", "claim": "원 지적"}]
+
+
+def test_feedback_stats_no_min_floor_and_empty():
+    from server.context.feedback_source import feedback_stats
+
+    small = feedback_stats(_fb_rows(("style", "dismissed", "x", None)))
+    assert small["total"] == 1  # summarize_feedback와 달리 최소 결정 게이트 없음
+    assert small["categories"][0]["rejected"] == 1
+    assert feedback_stats([]) == {
+        "total": 0,
+        "categories": [],
+        "rejected_examples": [],
+        "edited_examples": [],
+    }
+
+
+def test_repo_feedback_stats_reads_repo_decisions(tmp_path):
+    from server.context.feedback_source import repo_feedback_stats
+
+    conn = _feedback_db(tmp_path)
+    _seed_decisions(
+        conn,
+        "acme/api",
+        [
+            ("style", "dismissed", "변수명 개선", None),
+            ("correctness", "approved", "널 체크 누락", None),
+        ],
+    )
+    out = repo_feedback_stats(conn, "ACME/api")  # 대소문자 무관 조회
+    conn.close()
+    assert out["total"] == 2
+    cats = {c["category"]: c for c in out["categories"]}
+    assert cats["style"]["rejected"] == 1
+    assert cats["correctness"]["approved"] == 1
+
+
 # ── graphify 애그리게이터: 오픈 finding 요약(다른 열린 PR의 미결 지적) ──────────
 
 

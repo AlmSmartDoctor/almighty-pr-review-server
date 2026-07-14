@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import { ReviewSection } from "./sections/ReviewSection";
 import { HarnessSection } from "./sections/HarnessSection";
 import { SettingsSection } from "./sections/SettingsSection";
+import { LearnSection } from "./sections/LearnSection";
 import { StubSection } from "./sections/StubSection";
 
 type NavItem = {
@@ -25,7 +26,7 @@ const SECTIONS: NavItem[] = [
   { key: "harness", label: "하네스 편집", icon: SlidersHorizontal },
   { key: "settings", label: "설정", icon: Settings },
   { key: "wiki", label: "LLM Wiki", icon: BookOpen, soon: "곧 제공" },
-  { key: "learn", label: "자가 학습", icon: GraduationCap, soon: "실험 단계" },
+  { key: "learn", label: "자가 학습", icon: GraduationCap },
 ];
 
 export default function App() {
@@ -104,7 +105,7 @@ export default function App() {
             <Route path="/harness" element={<HarnessSection />} />
             <Route path="/settings" element={<SettingsSection />} />
             <Route path="/wiki" element={<StubSection title="LLM Wiki" note="곧 제공" />} />
-            <Route path="/learn" element={<StubSection title="자가 학습" note="실험 단계" />} />
+            <Route path="/learn" element={<LearnSection />} />
           </Routes>
         </div>
       </main>

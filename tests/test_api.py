@@ -84,6 +84,86 @@ def test_patch_repo_context_settings(tmp_path):
     assert body["graphify_path"] == "docs/PROJECT.md"
 
 
+def _seed_learn_decisions(conn, full_name, decisions):
+    from server.repos import finding_repo, repo_repo
+
+    rid = repo_repo.add(conn, full_name=full_name)
+    pr = conn.execute(
+        "INSERT INTO pull_request (repo_id, number, head_sha) VALUES (?, 1, 's')",
+        (rid,),
+    ).lastrowid
+    run = conn.execute(
+        "INSERT INTO review_run (pr_id, head_sha) VALUES (?, 's')", (pr,)
+    ).lastrowid
+    conn.commit()
+    for cat, status, claim in decisions:
+        fid = finding_repo.add(
+            conn,
+            run_id=run,
+            vendor="claude",
+            file="a.py",
+            line=1,
+            severity="high",
+            category=cat,
+            claim=claim,
+            rationale="r",
+            confidence=0.9,
+        )
+        finding_repo.set_status(conn, fid, status)
+
+
+def test_learn_returns_repo_feedback_and_excludes_empty(tmp_path):
+    from server.repos import repo_repo
+
+    client, conn = _client(tmp_path)
+    _seed_learn_decisions(
+        conn,
+        "acme/api",
+        [
+            ("style", "dismissed", "nit A"),
+            ("style", "dismissed", "nit B"),
+            ("correctness", "approved", "real bug"),
+        ],
+    )
+    repo_repo.add(conn, full_name="empty/repo")  # 사람 결정 없음 → 제외
+
+    body = client.get("/api/learn").json()
+
+    assert [r["repo"] for r in body] == ["acme/api"]  # 결정 없는 레포 제외
+    entry = body[0]
+    assert entry["total"] == 3
+    cats = {c["category"]: c for c in entry["categories"]}
+    assert cats["style"]["rejected"] == 2
+    assert cats["correctness"]["approved"] == 1
+    assert {e["claim"] for e in entry["rejected_examples"]} == {"nit A", "nit B"}
+
+
+def test_learn_orders_repos_by_decision_count(tmp_path):
+    client, conn = _client(tmp_path)
+    _seed_learn_decisions(  # total 2, 이름은 앞서지만 결정 수는 적음
+        conn, "acme/api", [("style", "dismissed", "a"), ("style", "dismissed", "b")]
+    )
+    _seed_learn_decisions(  # total 3
+        conn,
+        "acme/zzz",
+        [
+            ("perf", "approved", "c"),
+            ("perf", "approved", "d"),
+            ("correctness", "approved", "e"),
+        ],
+    )
+
+    body = client.get("/api/learn").json()
+
+    # 이름순이 아니라 결정 수 많은 순 — zzz(3)가 api(2)보다 앞
+    assert [r["repo"] for r in body] == ["acme/zzz", "acme/api"]
+
+
+def test_learn_empty_without_decisions(tmp_path):
+    client, _ = _client(tmp_path)
+    assert client.get("/api/learn").json() == []
+
+
 def test_patch_verify_singles_toggle(tmp_path):
     client, _ = _client(tmp_path)
     assert (

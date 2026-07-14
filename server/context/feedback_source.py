@@ -78,6 +78,46 @@ def summarize_feedback(rows) -> str:
     return "\n".join(lines)
 
 
+def feedback_stats(rows) -> dict:
+    """사람 판단 finding 행들을 카테고리별 수용/수정/기각 집계 + 대표 예시로 구조화(순수 함수).
+    /learn 웹 탭 표시용 — LLM 주입(summarize_feedback)과 달리 최소 결정 수 게이트 없이 있는 그대로."""
+    categories = {}  # category -> {approved, edited, rejected}
+    rejected, edited = [], []  # [{category, claim}], 중복 제거·최근순
+    seen_rej, seen_ed = set(), set()
+    total = 0
+    for row in rows:
+        cat = (row["category"] or "").strip() or "기타"
+        claim = _one_line(row["claim"])
+        verdict = _verdict(row["status"], row["edited_text"])
+        total += 1
+        c = categories.setdefault(cat, {"approved": 0, "edited": 0, "rejected": 0})
+        c[verdict] += 1
+        if verdict == "rejected":
+            if claim and claim not in seen_rej and len(rejected) < _MAX_EXAMPLES:
+                seen_rej.add(claim)
+                rejected.append({"category": cat, "claim": claim})
+        elif verdict == "edited":
+            if claim and claim not in seen_ed and len(edited) < _MAX_EXAMPLES:
+                seen_ed.add(claim)
+                edited.append({"category": cat, "claim": claim})
+    ordered = sorted(
+        categories.items(),
+        key=lambda kv: -(kv[1]["approved"] + kv[1]["edited"] + kv[1]["rejected"]),
+    )
+    return {
+        "total": total,
+        "categories": [{"category": cat, **counts} for cat, counts in ordered],
+        "rejected_examples": rejected,
+        "edited_examples": edited,
+    }
+
+
+def repo_feedback_stats(conn, full_name) -> dict:
+    """열린 커넥션으로 한 레포의 사람 판단을 조회해 구조화 통계 반환(/learn 탭 API용)."""
+    rows = conn.execute(_QUERY, (full_name, _MAX_DECISIONS)).fetchall()
+    return feedback_stats(rows)
+
+
 def db_feedback_source(*, db_path=None):
     """이 레포의 과거 사람 판단을 앱 DB에서 읽어 요약하는 feedback_source(req)->str 를 만든다.
     read-only SELECT + short-lived 커넥션(worker 진행 중에도 WAL 하에서 안전)."""

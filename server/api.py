@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from server import config
+from server.context import feedback_source
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment
 from server.github.gh import GhClient, GitHubCliError
@@ -141,6 +142,23 @@ def overview(conn=Depends(get_conn)):
     """).fetchall()
     sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
     return [{**dict(x), "severity": sev.get(x["sev_rank"], "low")} for x in rows]
+
+
+@app.get("/api/learn")
+def learn(conn=Depends(get_conn)):
+    """레포별 팀 판단(수용·수정·기각) 집계 — /learn 탭이 열람하는 학습 신호.
+    finding 사람 결정이 있는 레포만, 결정 수 많은 순으로 반환."""
+    repos = conn.execute("SELECT full_name FROM repo ORDER BY full_name").fetchall()
+    out = [
+        {
+            "repo": r["full_name"],
+            **feedback_source.repo_feedback_stats(conn, r["full_name"]),
+        }
+        for r in repos
+    ]
+    out = [r for r in out if r["total"]]
+    out.sort(key=lambda x: (-x["total"], x["repo"]))
+    return out
 
 
 class RepoPatch(BaseModel):
