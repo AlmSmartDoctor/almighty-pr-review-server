@@ -48,8 +48,17 @@ def get(conn, fid):
 
 
 def list_for_run(conn, run_id):
+    # 위험도(rank) → 벤더 합의 우선 → 신뢰도 내림차순. severity를 TEXT로 정렬하면
+    # low가 medium 앞에 오는 역전 버그가 있어 CASE rank로 교정하고, 여러 벤더가
+    # 합의한 지적과 고신뢰 지적을 상단에 노출한다(confidence 가중 우선순위화).
     return conn.execute(
-        "SELECT * FROM finding WHERE run_id=? ORDER BY severity, file", (run_id,)
+        """SELECT * FROM finding WHERE run_id=?
+           ORDER BY CASE severity
+                      WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                      WHEN 'medium' THEN 2 ELSE 3 END,
+                    CASE consensus WHEN 'consensus' THEN 0 ELSE 1 END,
+                    confidence DESC, file""",
+        (run_id,),
     ).fetchall()
 
 

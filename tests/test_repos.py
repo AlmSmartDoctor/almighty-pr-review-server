@@ -137,6 +137,49 @@ def test_finding_status_transition(db):
     assert finding_repo.get(db, fid)["status"] == "approved"
 
 
+def test_list_for_run_orders_by_severity_consensus_confidence(db):
+    # 위험도 rank(critical<high<medium<low) → 합의 우선 → 신뢰도 내림차순.
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=9,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = db.execute(
+        "INSERT INTO review_run (pr_id, head_sha) VALUES (?, ?)", (pid, "s")
+    ).lastrowid
+
+    def _add(sev, conf, consensus="single", file="z.py"):
+        return finding_repo.add(
+            db,
+            run_id=run_id,
+            vendor="claude",
+            file=file,
+            line=1,
+            severity=sev,
+            category="bug",
+            claim="c",
+            rationale="r",
+            confidence=conf,
+            consensus=consensus,
+        )
+
+    # 삽입 순서를 정렬 결과와 어긋나게 섞는다.
+    f_low = _add("low", 0.9)
+    f_med = _add("medium", 0.2)  # TEXT 정렬이면 low보다 뒤로 갔던 버그 케이스
+    f_high_single = _add("high", 0.9)
+    f_high_consensus = _add("high", 0.3, consensus="consensus")
+
+    order = [r["id"] for r in finding_repo.list_for_run(db, run_id)]
+    # high 합의(저신뢰라도 합의 우선) → high 단일 → medium → low
+    assert order == [f_high_consensus, f_high_single, f_med, f_low]
+
+
 def test_settings_singleton_update(db):
     settings_repo.update(db, concurrency_limit=4)
     assert settings_repo.get(db)["concurrency_limit"] == 4
