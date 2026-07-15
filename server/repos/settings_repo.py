@@ -2,7 +2,6 @@ ALLOWED = {
     "default_effort",
     "concurrency_limit",
     "default_poll_interval",
-    "approval_gate_on",
     "prescreen_model",
     "review_model",
     "codex_model",

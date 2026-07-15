@@ -55,13 +55,16 @@ def _now(conn):
 
 
 async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
-    """★개정: 폴러는 매 틱 자기 커넥션을 열고, 새 head sha면 review_job enqueue."""
+    """★개정: 폴러는 매 틱 자기 커넥션을 열고, 새 head sha면 review_job enqueue.
+    대기 간격은 매 틱 app_settings.default_poll_interval을 읽어 반영(웹 UI 수정이
+    재시작 없이 적용). interval_sec 인자는 설정 조회 실패 시 폴백 겸 테스트 seam."""
     from server.db import connect
-    from server.repos import job_repo
+    from server.repos import job_repo, settings_repo
 
     client = GhClient()
     while stop_event is None or not stop_event.is_set():
         conn = connect(db_path)
+        interval = interval_sec
         try:
 
             def enqueue(pid):
@@ -74,6 +77,9 @@ async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
                 await asyncio.to_thread(
                     poll_once, conn, list_prs=client.list_open_prs, enqueue=enqueue
                 )
+                row = settings_repo.get(conn)
+                if row and row["default_poll_interval"]:
+                    interval = row["default_poll_interval"]
             except Exception as e:  # 한 틱의 실패가 폴러를 영구히 죽이지 않게
                 print(f"[poller] tick failed: {e!r}")
         finally:
@@ -81,8 +87,8 @@ async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
         # ★개정: interval 대기 중에도 stop_event에 즉시 반응(graceful shutdown)
         if stop_event is not None:
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
         else:
-            await asyncio.sleep(interval_sec)
+            await asyncio.sleep(interval)

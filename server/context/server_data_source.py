@@ -3,8 +3,7 @@ from server.db import connect
 
 _MAX_OPEN_FINDINGS = 200  # 스캔 상한(비용)
 _MAX_EXAMPLES = 8  # 대표 미결 지적 예시 상한(중복 제거)
-_MAX_CLAIM_CHARS = 160  # 예시 claim(·PR 제목) 1줄 절단
-_MAX_OPEN_PRS = 30  # 동시 진행 오픈 PR 목록 상한
+_MAX_CLAIM_CHARS = 160  # 예시 claim 1줄 절단
 
 # 다른 열린 PR들의 미결(status='pending') finding — 현재 리뷰 중인 PR은 자기-에코 방지로 제외.
 # finding엔 repo_id가 없어 review_run→pull_request→repo 조인. done 런의 미결만 보되,
@@ -25,18 +24,6 @@ WHERE r.full_name = ? COLLATE NOCASE
   AND rr.status = 'done'
 GROUP BY p.id, f.file, f.line, f.claim
 ORDER BY p.number DESC, MAX(f.id) DESC
-LIMIT ?
-"""
-
-# 같은 레포에 현재 열려 있는 다른 PR(리뷰 중인 PR 제외) — 동시 진행 작업 상황 인지용.
-_OPEN_PRS_QUERY = """
-SELECT p.number AS number, p.title AS title, p.author AS author
-FROM pull_request p
-JOIN repo r ON r.id = p.repo_id
-WHERE r.full_name = ? COLLATE NOCASE
-  AND p.state = 'open'
-  AND p.number != ?
-ORDER BY p.number DESC
 LIMIT ?
 """
 
@@ -93,87 +80,5 @@ def open_findings_source(*, db_path=None):
         finally:
             conn.close()
         return summarize_open_findings(rows)
-
-    return source
-
-
-def summarize_open_prs(rows) -> str:
-    """같은 레포의 다른 오픈 PR 목록을 번호·제목·작성자로 요약(순수 함수)."""
-    lines = [
-        f"- #{row['number']} {_one_line(row['title']) or '(제목 없음)'} "
-        f"({(row['author'] or '').strip() or '?'})"
-        for row in rows
-    ]
-    if not lines:
-        return ""
-    return "이 레포에 현재 열려 있는 다른 PR (동시 진행 작업 인지용):\n" + "\n".join(
-        lines
-    )
-
-
-def open_prs_source(*, db_path=None):
-    """같은 레포의 다른 열린 PR 목록을 앱 DB에서 읽어 요약하는 graph_source(req)->str.
-    read-only SELECT + short-lived 커넥션. 현재 PR(req.pr_number)은 제외."""
-    path = db_path if db_path is not None else config.DB_PATH
-
-    def source(req) -> str:
-        conn = connect(path)
-        try:
-            rows = conn.execute(
-                _OPEN_PRS_QUERY, (req.repo, req.pr_number, _MAX_OPEN_PRS)
-            ).fetchall()
-        finally:
-            conn.close()
-        return summarize_open_prs(rows)
-
-    return source
-
-
-# 이 레포의 리뷰 실행 활동 — 처리량·최근성·실패 이력만(프로젝트 진행 맥락). finding 내용/심각도
-# 분포는 의도적으로 배제(#2 오픈 finding·#8 팀 피드백과 겹치지 않고 앵커링 위험 없음). 단일 집계 행.
-_ACTIVITY_QUERY = """
-SELECT
-  SUM(CASE WHEN rr.status='done' THEN 1 ELSE 0 END) AS done_runs,
-  COUNT(DISTINCT CASE WHEN rr.status='done' THEN rr.pr_id END) AS reviewed_prs,
-  MAX(CASE WHEN rr.status='done' THEN rr.finished_at END) AS last_done,
-  SUM(CASE WHEN rr.status='failed' THEN 1 ELSE 0 END) AS failed_runs
-FROM review_run rr
-JOIN pull_request p ON p.id = rr.pr_id
-JOIN repo r ON r.id = p.repo_id
-WHERE r.full_name = ? COLLATE NOCASE
-"""
-
-
-def summarize_activity(row) -> str:
-    """레포 리뷰 실행 활동 요약(순수 함수). 완료·실패 이력이 전무하면 ""(미주입)."""
-    done = (row["done_runs"] if row else 0) or 0
-    prs = (row["reviewed_prs"] if row else 0) or 0
-    failed = (row["failed_runs"] if row else 0) or 0
-    last = ((row["last_done"] if row else "") or "")[:16]
-    if not done and not failed:
-        return ""
-    lines = ["이 레포 리뷰 활동 현황 (프로젝트 진행 맥락):"]
-    if done:
-        tail = f", 마지막 리뷰 {last}" if last else ""
-        lines.append(f"- 완료된 리뷰 {done}건 (PR {prs}건){tail}")
-    else:
-        lines.append("- 아직 완료된 리뷰 없음")
-    if failed:
-        lines.append(f"- 리뷰 실패 이력 {failed}건")
-    return "\n".join(lines)
-
-
-def activity_source(*, db_path=None):
-    """이 레포 리뷰 실행 활동을 앱 DB에서 읽어 요약하는 graph_source(req)->str.
-    read-only 단일 집계 SELECT + short-lived 커넥션."""
-    path = db_path if db_path is not None else config.DB_PATH
-
-    def source(req) -> str:
-        conn = connect(path)
-        try:
-            row = conn.execute(_ACTIVITY_QUERY, (req.repo,)).fetchone()
-        finally:
-            conn.close()
-        return summarize_activity(row)
 
     return source

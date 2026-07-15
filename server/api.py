@@ -174,7 +174,6 @@ class RepoPatch(BaseModel):
     vendor_claude_on: int | None = None
     vendor_codex_on: int | None = None
     merge_enabled: int | None = None
-    auto_post: int | None = None
     harness_name: str | None = None
     local_path: str | None = None  # ★개정
     context_static_on: int | None = None
@@ -217,7 +216,6 @@ class SettingsPatch(BaseModel):
     default_effort: str | None = None
     concurrency_limit: int | None = None
     default_poll_interval: int | None = None
-    approval_gate_on: int | None = None
     prescreen_model: str | None = None
     review_model: str | None = None
     codex_model: str | None = None

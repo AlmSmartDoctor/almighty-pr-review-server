@@ -26,9 +26,8 @@
 
 - **소스 #1 — 정적 프로젝트 문서(구현됨).** 레포별 비밀-아님 컬럼 `graphify_path`가 레포 안에 체크인된 프로젝트 문서(예: `docs/PROJECT.md` — 진행상황·아키텍처·도메인 개요)를 가리킨다. 경로는 `static_context_path`/`db_schema_path`와 동일하게 **레포 root 하위로 realpath 봉쇄**(임의 절대경로 exfil 차단, B-INV-9). 변경 파일과 무관하게 **문서 전체를 항상 주입**한다(DBSchema의 변경파일→테이블 필터링과 다름). 미설정이면 소스 미주입=skipped. per-source 캡은 downstream(`render_context`)이 처리한다.
 - **소스 #2 — 서버 보유 오픈 finding 요약(구현됨, `server_data_source.open_findings_source`).** 앱 DB에서 **다른 열린 PR의 미결(`pending`) 지적**을 레포 스코프로 읽어 카테고리별 건수 + 대표 예시로 요약 주입한다(중복 제기 방지·일관성 참고용). `done` 런의 미결만 보되 `(PR, file, line, claim)`로 중복 제거 — 전체 재리뷰가 같은 지적을 여러 런에 재발행해도 1건으로 합치고, 증분 리뷰가 델타만 훑어 이전 런의 미결을 다시 싣지 않아도 그 미결을 보존한다("최신 done 런만" 필터는 후자를 누락시켜 미사용). 현재 리뷰 중인 PR은 자기-에코 방지로 제외, `state='open'`만, 레포명 `COLLATE NOCASE`. read-only SELECT + short-lived 커넥션, 없으면 `""`.
-- **소스 #3 — 최근 오픈 PR 목록(구현됨, `server_data_source.open_prs_source`).** 앱 DB에서 **같은 레포에 현재 열려 있는 다른 PR**(번호·제목·작성자)을 읽어 "동시 진행 작업" 목록으로 주입한다(리뷰어가 관련/충돌 가능 작업을 인지). 현재 PR 제외, `state='open'`만, 레포명 `COLLATE NOCASE`, `LIMIT 30`. finding 유무와 무관(소스 #2가 못 잡는, 아직 안 리뷰됐거나 전부 처리된 오픈 PR까지 포괄). read-only SELECT, 없으면 `""`.
-- **소스 #4 — 리뷰 활동 현황(구현됨, `server_data_source.activity_source`).** 앱 DB에서 이 레포의 **리뷰 실행 활동**(완료 런 수·리뷰된 PR 수·마지막 리뷰 시각·실패 이력)만 단일 집계로 읽어 "프로젝트 진행 맥락"으로 주입한다. finding 내용·심각도 분포는 **의도적으로 배제** — 소스 #2(미결 지적 내용)·자가 학습(팀의 수용/기각 판단 캘리브레이션)과 겹치지 않고, 모델이 앵커링할 여지가 없는 순수 활동/헬스 신호만 담는다. 레포명 `COLLATE NOCASE`, 완료·실패 이력이 전무하면 `""`. read-only 단일 집계 SELECT.
-- **경로 설정 불필요(소스 #2·#3·#4는 항상 활성):** `context_graphify_on`이 켜지면 문서(있으면, 소스 #1) + 소스 #2 + 소스 #3 + 소스 #4를 `_compose_sources`(소스별 예외 격리 후 비어있지 않은 출력만 join)로 애그리게이트한다. 전부 비면 provider `empty`, NEVER raises(B-INV-4).
+- **~~소스 #3 — 최근 오픈 PR 목록~~ / ~~소스 #4 — 리뷰 활동 현황~~ (제거됨).** 오픈 PR 목록·리뷰 실행 활동 통계는 결함 탐지 신호가 아니라 프롬프트를 희석하므로 LLM 경로에서 제거했다(코드·유닛 테스트 모두 삭제). 사람용 `/learn` 탭에도 노출되지 않는다.
+- **경로 설정 불필요(소스 #2는 항상 활성):** `context_graphify_on`이 켜지면 문서(있으면, 소스 #1) + 소스 #2를 `_compose_sources`(소스별 예외 격리 후 비어있지 않은 출력만 join)로 애그리게이트한다. 전부 비면 provider `empty`, NEVER raises(B-INV-4).
 - **향후 증분(같은 seam에 스택):** 관련 DB 데이터 특징(실접속 시 실데이터 특성) 등을 같은 `graph_source` seam에 순차 추가한다.
 
 ## 자가 학습 — 팀 피드백 (서브프로젝트 C)

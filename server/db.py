@@ -17,13 +17,6 @@ CREATE TABLE IF NOT EXISTS repo (
   local_path TEXT,                                -- ★개정: 로컬 clone 경로(worktree 소스). 등록 시 검증
   last_polled_at TEXT
 );
-CREATE TABLE IF NOT EXISTS harness (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL UNIQUE,
-  scope TEXT NOT NULL DEFAULT 'global',            -- global|repo|situation
-  path TEXT NOT NULL,
-  note TEXT
-);
 CREATE TABLE IF NOT EXISTS pull_request (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo_id INTEGER NOT NULL REFERENCES repo(id),
@@ -194,10 +187,6 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "WHERE prescreen_model='claude-haiku'"
     )
     conn.execute("INSERT OR IGNORE INTO app_settings (id) VALUES (1)")
-    conn.execute(
-        "INSERT OR IGNORE INTO harness (name, scope, path) VALUES "
-        "('default', 'global', 'harness/default')"
-    )
     conn.commit()
 
 

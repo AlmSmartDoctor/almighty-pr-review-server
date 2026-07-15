@@ -28,12 +28,10 @@ def list_enabled(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 ALLOWED = {
     "enabled",
     "trigger_mode",
-    "poll_interval_sec",
     "default_effort",
     "vendor_claude_on",
     "vendor_codex_on",
     "merge_enabled",
-    "auto_post",
     "harness_name",
     "local_path",
     "last_polled_at",  # ★개정: local_path

@@ -23,7 +23,6 @@ type Settings = {
   default_effort: string;
   concurrency_limit: number;
   default_poll_interval: number;
-  approval_gate_on: number;
   prescreen_model: string;
   review_model: string;
   codex_model: string;
@@ -54,7 +53,6 @@ type Repo = {
   vendor_claude_on?: number;
   vendor_codex_on?: number;
   merge_enabled?: number;
-  auto_post?: number;
   harness_name?: string;
   context_static_on?: number | null;
   context_jira_on?: number | null;
@@ -186,7 +184,6 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
                     <TableHead className="text-center">Claude</TableHead>
                     <TableHead className="text-center">Codex</TableHead>
                     <TableHead className="text-center">병합</TableHead>
-                    <TableHead className="text-center">auto-post</TableHead>
                     <TableHead>컨텍스트 오버라이드</TableHead>
                     <TableHead>하네스</TableHead>
                   </TableRow>
@@ -223,7 +220,6 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
                       <ToggleCell label="Claude" checked={r.vendor_claude_on !== 0} onChange={(v) => patchRepo(r, { vendor_claude_on: v })} />
                       <ToggleCell label="Codex" checked={r.vendor_codex_on !== 0} onChange={(v) => patchRepo(r, { vendor_codex_on: v })} />
                       <ToggleCell label="병합" checked={!!r.merge_enabled} onChange={(v) => patchRepo(r, { merge_enabled: v })} />
-                      <ToggleCell label="auto-post" checked={!!r.auto_post} onChange={(v) => patchRepo(r, { auto_post: v })} />
                       <ContextOverrideCell
                         repo={r}
                         settings={settings}
@@ -289,10 +285,6 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
             <Field title="폴링 간격" help="새 PR과 head sha 감지 주기(초)">
               <Input type="number" min={15} step={5} className="w-24 text-right" value={draft.default_poll_interval}
                      onChange={(e) => setDraft({ ...draft, default_poll_interval: Number(e.target.value) })} />
-            </Field>
-            <Field title="승인 게이트" help="켜면 내가 승인한 findings만 GitHub에 포스팅">
-              <Switch aria-label="승인 게이트" checked={!!draft.approval_gate_on}
-                      onCheckedChange={(v) => setDraft({ ...draft, approval_gate_on: v ? 1 : 0 })} />
             </Field>
             <Field title="고위험 단독 지적 검증" help="한 벤더만 낸 critical/high 지적을 다른 벤더로 반박 검증하고, 반박되면 신뢰도를 낮춤">
               <Switch aria-label="고위험 단독 지적 검증" checked={!!draft.verify_singles_on}

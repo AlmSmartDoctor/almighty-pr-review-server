@@ -5,7 +5,7 @@ import { SettingsSection } from "./SettingsSection";
 
 const settings = {
   default_effort: "medium", concurrency_limit: 2,
-  default_poll_interval: 60, approval_gate_on: 1,
+  default_poll_interval: 60,
   prescreen_model: "haiku", review_model: "sonnet",
   codex_model: "", prescreen_gate_threshold: "moderate",
 };

@@ -2,7 +2,6 @@ from server.db import connect, init_schema
 
 EXPECTED_TABLES = {
     "repo",
-    "harness",
     "pull_request",
     "pre_screen",
     "review_run",

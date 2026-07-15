@@ -126,7 +126,7 @@ def build_context_provider(repo, settings):
             )
             # 프로젝트 문서(있으면) + 다른 열린 PR의 미결 지적(교차 PR 일관성)만 주입.
             # open-PR 목록·리뷰 활동 통계는 결함 탐지 신호가 아니라 프롬프트를 희석하므로
-            # LLM 경로에서 제외(사람용 /learn 웹 탭에는 그대로 노출).
+            # 주입하지 않는다(어느 경로에도 노출 안 함 — 해당 소스는 제거됨).
             source = _compose_sources(doc_source, open_findings_source())
             providers.append(GraphifyProvider(graph_source=source))
         except Exception as e:  # never raise

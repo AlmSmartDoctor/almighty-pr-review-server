@@ -197,3 +197,31 @@ def test_poll_loop_survives_tick_error(tmp_path, monkeypatch):
     monkeypatch.setattr("server.poller.poll_once", fake_poll_once)
     asyncio.run(poll_loop(tmp_path / "p.db", interval_sec=0.01, stop_event=stop))
     assert len(calls) >= 2  # 첫 에러 후에도 루프 생존
+
+
+def test_poll_loop_reads_interval_from_settings(tmp_path, monkeypatch):
+    from server.db import connect, init_schema
+    from server.repos import settings_repo
+
+    db = tmp_path / "p.db"
+    conn = connect(db)
+    init_schema(conn)
+    settings_repo.update(conn, default_poll_interval=123)
+    conn.close()
+
+    stop = asyncio.Event()
+    seen = []
+
+    def fake_poll_once(conn, *, list_prs, enqueue):
+        pass  # 성공 틱 → 설정값이 읽힘
+
+    async def fake_wait_for(aw, timeout):
+        seen.append(timeout)
+        stop.set()
+        aw.close()  # stop_event.wait() 코루틴 정리
+        return None
+
+    monkeypatch.setattr("server.poller.poll_once", fake_poll_once)
+    monkeypatch.setattr("server.poller.asyncio.wait_for", fake_wait_for)
+    asyncio.run(poll_loop(db, interval_sec=999, stop_event=stop))
+    assert seen == [123]  # interval_sec 폴백(999) 아니라 설정값(123) 사용
