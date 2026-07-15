@@ -332,9 +332,14 @@ def _github_error_message(error: GitHubCliError) -> str:
 
 
 def _health_status_code(health: dict) -> int:
+    # 실패 섹션이면 인식된 HTTP 상태(401/403/404)는 그대로, 그 외(네트워크·미로그인·
+    # 5xx 등 http_status 미상)는 502로. ok 여부로 판정해 status가 None이어도 200으로
+    # 새지 않게 한다(_post_health는 첫 실패 섹션에서 즉시 반환하므로 iteration 순서상
+    # 첫 not-ok 섹션이 곧 실패 지점).
     for section in ("auth", "repo", "issue"):
-        status = health[section].get("status")
-        if status:
+        sec = health[section]
+        if not sec.get("ok"):
+            status = sec.get("status")
             return status if status in {401, 403, 404} else 502
     return 200
 
@@ -389,40 +394,57 @@ def _post_health(conn, pid: int, gh) -> dict:
 
 
 POSTABLE_FINDING_STATUSES = {"approved", "edited"}
+# 코멘트 본문에 실을 상태 집합 — 이미 게시된(posted) finding도 포함해야 같은 run을
+# 증분 승인하며 재포스팅(in-place edit)할 때 앞서 게시한 지적이 사라지지 않는다.
+DISPLAYED_FINDING_STATUSES = POSTABLE_FINDING_STATUSES | {"posted"}
 
 
-def _postable_rows(conn, run_id: int):
-    return [
-        f
-        for f in finding_repo.list_for_run(conn, run_id)
-        if f["status"] in POSTABLE_FINDING_STATUSES
-    ]
+def _row_to_finding(f) -> Finding:
+    return Finding(
+        f["vendor"],
+        f["file"],
+        f["line"],
+        f["severity"],
+        f["category"],
+        f["edited_text"] or f["claim"],
+        f["rationale"],
+        f["confidence"] or 0.0,
+    )
 
 
-def _comments_for_rows(rows):
-    by_vendor: dict[str, list[Finding]] = {}
-    for f in rows:
-        by_vendor.setdefault(f["vendor"], []).append(
-            Finding(
-                f["vendor"],
-                f["file"],
-                f["line"],
-                f["severity"],
-                f["category"],
-                f["edited_text"] or f["claim"],
-                f["rationale"],
-                f["confidence"] or 0.0,
-            )
+def _comments_to_post(conn, run_id: int):
+    """게시 대상 벤더별 코멘트. 새로 승인/수정된(approved/edited) finding이 있는 벤더만
+    대상으로 하되, 본문은 이미 posted된 것까지 합쳐 구성한다(재포스팅 유실 방지).
+    반환 항목: {vendor, body, new_ids(이번에 posted로 전환), all_ids(코멘트 전체)}."""
+    rows = finding_repo.list_for_run(conn, run_id)
+    pending = [f for f in rows if f["status"] in POSTABLE_FINDING_STATUSES]
+    display = [f for f in rows if f["status"] in DISPLAYED_FINDING_STATUSES]
+    order: list[str] = []
+    for f in pending:  # 벤더 등장 순서 보존(부분 실패 응답의 posted 순서 안정성)
+        if f["vendor"] not in order:
+            order.append(f["vendor"])
+    out = []
+    for vendor in order:
+        findings = [_row_to_finding(f) for f in display if f["vendor"] == vendor]
+        out.append(
+            {
+                "vendor": vendor,
+                "body": build_comment(vendor=vendor, findings=findings),
+                "new_ids": [f["id"] for f in pending if f["vendor"] == vendor],
+                "all_ids": [f["id"] for f in display if f["vendor"] == vendor],
+            }
         )
-    return [
-        {"vendor": vendor, "body": build_comment(vendor=vendor, findings=findings)}
-        for vendor, findings in by_vendor.items()
-    ]
+    return out
 
 
 @app.get("/api/runs/{run_id}/post-preview")
 def post_preview(run_id: int, conn=Depends(get_conn)):
-    return {"comments": _comments_for_rows(_postable_rows(conn, run_id))}
+    return {
+        "comments": [
+            {"vendor": c["vendor"], "body": c["body"]}
+            for c in _comments_to_post(conn, run_id)
+        ]
+    }
 
 
 @app.get("/api/prs/{pid}/post-health")
@@ -442,21 +464,24 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
             status_code=_health_status_code(health),
             content={"detail": health},
         )
-    rows = _postable_rows(conn, run_id)
     posted = []
-    for comment in _comments_for_rows(rows):
+    for comment in _comments_to_post(conn, run_id):
         vendor = comment["vendor"]
         body = comment["body"]
-        # ★개정(codex 재검증 [MEDIUM]): 진짜 update-or-create.
-        # 같은 PR·벤더의 기존 비대체 코멘트가 있으면 GitHub상 in-place 수정,
-        # 없으면 새로 post. → GitHub 화면에도 중복이 남지 않음.
+        # 진짜 update-or-create: 같은 PR·벤더의 기존 비대체 코멘트가 있으면 GitHub상
+        # in-place 수정, 없으면 새로 post → GitHub 화면에 중복이 남지 않음.
         prev = posted_repo.latest_for_pr_vendor(conn, pr_id=pr["id"], vendor=vendor)
-        fids = [f["id"] for f in rows if f["vendor"] == vendor]
         try:
             if prev is not None and prev["github_comment_id"]:
-                res = gh.edit_comment(
-                    repo["full_name"], prev["github_comment_id"], body
-                )
+                try:
+                    res = gh.edit_comment(
+                        repo["full_name"], prev["github_comment_id"], body
+                    )
+                except GitHubCliError as e:
+                    if e.http_status != 404:
+                        raise
+                    # GitHub에서 코멘트가 삭제됨 → 새로 생성으로 폴백(영구 실패 방지).
+                    res = gh.post_comment(repo["full_name"], pr["number"], body)
                 posted_repo.supersede(conn, prev["id"])
             else:
                 res = gh.post_comment(repo["full_name"], pr["number"], body)
@@ -485,11 +510,10 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
             marker=MARKER.format(vendor=vendor),
             body=body,
             head_sha=run["head_sha"],
-            finding_ids=fids,
+            finding_ids=comment["all_ids"],
         )
-        for f in rows:
-            if f["vendor"] == vendor:
-                finding_repo.set_status(conn, f["id"], "posted")
+        for fid in comment["new_ids"]:  # 이번에 새로 게시한 것만 posted 전환
+            finding_repo.set_status(conn, fid, "posted")
         posted.append({"vendor": vendor, "url": res["html_url"]})
     return {"posted": posted}
 
