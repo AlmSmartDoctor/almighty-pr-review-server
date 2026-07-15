@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS review_job (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pr_id INTEGER NOT NULL REFERENCES pull_request(id),
   head_sha TEXT NOT NULL,
-  trigger TEXT NOT NULL DEFAULT 'auto',            -- auto|manual
+  trigger TEXT NOT NULL DEFAULT 'auto',            -- auto|manual|retry
   status TEXT NOT NULL DEFAULT 'queued',           -- queued|running|done|failed|canceled
   priority INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS review_job (
   locked_by TEXT, locked_at TEXT,
   next_run_at TEXT,                                -- backoff/rate-limit 지연
   run_id INTEGER REFERENCES review_run(id),
+  retry_run_id INTEGER REFERENCES review_run(id),  -- trigger='retry'가 이어받을 대상 run
   error TEXT, created_at TEXT,
   UNIQUE(pr_id, head_sha)                          -- 같은 sha 중복 잡 방지(idempotency)
 );
@@ -127,6 +128,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "pull_request", "head_ref", "TEXT")
     _ensure_column(conn, "pull_request", "body", "TEXT")
     _ensure_column(conn, "pull_request", "is_draft", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "review_job", "retry_run_id", "INTEGER")
     _ensure_column(
         conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
     )

@@ -1,6 +1,6 @@
 import asyncio
 
-from server.pipeline import PipelineError, review_pr
+from server.pipeline import PipelineError, retry_pr, review_pr
 from server.repos import job_repo, pr_repo, repo_repo, settings_repo
 from server.review.gh_deps import build_deps  # Task 7.2에서 정의
 
@@ -22,9 +22,15 @@ async def run_one_job(conn, *, worker_id: str) -> bool:
         repo = repo_repo.get(conn, pr["repo_id"])
         settings = settings_repo.get(conn)
         deps = build_deps(repo, settings)
-        run_id = await review_pr(
-            conn, pr_id=job["pr_id"], trigger=job["trigger"], deps=deps
-        )
+        # trigger='retry'는 엔드포인트가 검증한 retry_run_id의 실패 벤더만 재실행(새 run 미생성).
+        if job["trigger"] == "retry":
+            run_id = await retry_pr(
+                conn, pr_id=job["pr_id"], run_id=job["retry_run_id"], deps=deps
+            )
+        else:
+            run_id = await review_pr(
+                conn, pr_id=job["pr_id"], trigger=job["trigger"], deps=deps
+            )
         job_repo.mark_done(conn, job["id"], run_id)
     except PipelineError as e:
         # ★개정 (codex v3 [HIGH]): 실패한 attempt의 run_id를 job에 기록해

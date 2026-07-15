@@ -22,6 +22,7 @@ vi.mock("../api", () => ({
     patchFinding: async () => ({}),
     postRun: async () => ({}),
     triggerReview: async () => ({ job_id: 42 }),
+    retryVendors: async () => ({ job_id: 43 }),
   },
 }));
 
@@ -374,4 +375,30 @@ test("non-draft PRs have no Draft badge", async () => {
   renderReview({ loadPrs: async () => PRS });
   expect(await screen.findByText("fix null")).toBeInTheDocument();
   expect(screen.queryByText("Draft")).toBeNull();
+});
+
+test("retry-failed-vendors button enqueues retry for the run", async () => {
+  const spy = vi.spyOn(api, "retryVendors").mockResolvedValue({ job_id: 43 });
+  renderReview({ loadPrs: async () => PRS,
+                 loadFindings: async () => [],
+                 loadVendors: async () => [
+                   { vendor: "claude", status: "done", error: null, duration_ms: 2100 },
+                   { vendor: "codex", status: "failed", error: "rate limit", duration_ms: 900 },
+                 ] });
+  fireEvent.click(await screen.findByText("fix null"));
+  fireEvent.click(await screen.findByText("실패 벤더만 재시도"));
+  await waitFor(() => expect(spy).toHaveBeenCalledWith(11));  // pr.run_id
+  expect(await screen.findByText(/재시도를 큐에 넣었습니다/)).toBeInTheDocument();
+});
+
+test("no retry button when every vendor succeeded", async () => {
+  renderReview({ loadPrs: async () => PRS,
+                 loadFindings: async () => [],
+                 loadVendors: async () => [
+                   { vendor: "claude", status: "done", error: null, duration_ms: 2100 },
+                   { vendor: "codex", status: "done", error: null, duration_ms: 900 },
+                 ] });
+  fireEvent.click(await screen.findByText("fix null"));
+  await screen.findByText("전체 실행");  // detail 로드 완료 대기
+  expect(screen.queryByText("실패 벤더만 재시도")).toBeNull();
 });

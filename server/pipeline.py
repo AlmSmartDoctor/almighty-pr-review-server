@@ -16,6 +16,7 @@ from server.repos import (
     review_repo,
     settings_repo,
 )
+from server.models import Finding
 from server.review.harness import HarnessProfile
 from server.review.merge import deterministic_merge
 from server.review.prescreen import (
@@ -226,26 +227,12 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
                 for ad in adapters
             }
 
-            async def _run_one(ad):
-                t0 = time.monotonic()
-                collected, errs = [], []
-                for p in prompts:
-
-                    async def job(p=p):
-                        return await ad.review(
-                            prompt=p, workdir=Path(str(wt)), harness=hp, runtime_dir=rt
-                        )
-
-                    try:
-                        collected.extend(await pool.run(job))
-                    except Exception as e:  # 청크 하나 실패가 다른 청크를 막지 않음
-                        errs.append(str(e))
-                dur = int((time.monotonic() - t0) * 1000)
-                if errs and len(errs) == len(prompts):  # 전 청크 실패 → 벤더 실패
-                    return ad.vendor, [], "; ".join(errs), dur
-                return ad.vendor, collected, None, dur  # 부분 성공 = 성공(수집분 사용)
-
-            results = await asyncio.gather(*(_run_one(a) for a in adapters))
+            results = await asyncio.gather(
+                *(
+                    _run_vendor(a, prompts, pool=pool, wt=wt, hp=hp, rt=rt)
+                    for a in adapters
+                )
+            )
 
     all_findings = []  # (vendor_result_id, finding)
     succeeded, errors = 0, []
@@ -305,6 +292,28 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
 
 
+async def _run_vendor(ad, prompts, *, pool, wt, hp, rt):
+    """한 벤더로 청크별 순차 리뷰 후 finding 집계. 전 청크 실패만 벤더 실패로 본다
+    (부분 성공 = 성공). _execute_run과 retry_pr이 공유."""
+    t0 = time.monotonic()
+    collected, errs = [], []
+    for p in prompts:
+
+        async def job(p=p):
+            return await ad.review(
+                prompt=p, workdir=Path(str(wt)), harness=hp, runtime_dir=rt
+            )
+
+        try:
+            collected.extend(await pool.run(job))
+        except Exception as e:  # 청크 하나 실패가 다른 청크를 막지 않음
+            errs.append(str(e))
+    dur = int((time.monotonic() - t0) * 1000)
+    if errs and len(errs) == len(prompts):  # 전 청크 실패 → 벤더 실패
+        return ad.vendor, [], "; ".join(errs), dur
+    return ad.vendor, collected, None, dur
+
+
 def _enabled_adapters(adapters, repo):
     out = []
     for ad in adapters:
@@ -335,6 +344,151 @@ def _persist(conn, run_id, items):
             verify_status=getattr(f, "verify_status", None),
             verify_rationale=getattr(f, "verify_rationale", None),
         )
+
+
+async def retry_pr(conn, *, pr_id: int, run_id: int, deps: PipelineDeps) -> int:
+    """엔드포인트가 검증한 **바로 그 run**의 실패 벤더만 재실행해 같은 run에 finding을
+    채운다. 새 run을 만들지 않으므로 이전 성공 벤더 결과가 그대로 노출된다(run-history UI 없음).
+    실행 시점(worker) 재검증: 엔드포인트 검증과 실행 사이 poller가 head를 전진시켰을 수
+    있으므로(TOCTOU) head·status를 다시 확인해, 새 head의 diff를 옛 run에 뒤섞지 않는다."""
+    run = review_repo.get_run(conn, run_id) if run_id else None
+    pr = pr_repo.get(conn, pr_id)
+    if run is None or pr is None:
+        raise PipelineError(run_id or 0, "재시도 대상 run/pr가 없습니다")
+    if run["head_sha"] != pr["head_sha"]:
+        raise PipelineError(run_id, "PR가 갱신되어 재시도 취소(전체 재리뷰 필요)")
+    if run["status"] != "done":
+        raise PipelineError(run_id, "부분 실패 상태가 아니라 재시도 취소")
+    repo = repo_repo.get(conn, pr["repo_id"])
+    settings = settings_repo.get(conn)
+    try:
+        await _retry_failed_vendors(
+            conn, run=run, pr=pr, repo=repo, settings=settings, deps=deps
+        )
+    except Exception as e:  # 재시도 인프라 실패 → run은 done 유지, job만 failed
+        raise PipelineError(run_id, str(e)) from e
+    return run_id
+
+
+async def _retry_failed_vendors(conn, *, run, pr, repo, settings, deps) -> None:
+    run_id = run["id"]
+    failed = set(review_repo.failed_vendors(conn, run_id))
+    adapters = [
+        ad for ad in _enabled_adapters(deps.adapters, repo) if ad.vendor in failed
+    ]
+    if not adapters:
+        return  # 재시도할 실패 벤더 없음(엔드포인트에서 거르지만 방어적)
+
+    hp = HarnessProfile.load(repo["harness_name"])
+    hp.model = settings["review_model"]
+    hp.codex_model = settings["codex_model"]
+    hp.effort = repo["default_effort"] or DEFAULT_EFFORT
+    pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
+
+    # 원 run이 본 것과 동일한 diff 기준선(base_sha면 증분, 없으면 full) + 저장된 컨텍스트 재사용.
+    diff = filter_reviewable(
+        await _resolve_retry_diff(conn, deps=deps, repo=repo, pr=pr, run=run)
+    )
+    if not diff.strip():
+        return
+    context_text = run["context_text"] or ""
+    chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
+    multi = len(chunks) > 1
+    changed_files = parse_changed_files(diff)
+    prompts = [
+        _build_prompt(
+            pr,
+            c,
+            context_text,
+            chunk_note=(f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if multi else ""),
+            changed_files=(changed_files if multi else ()),
+        )
+        for i, c in enumerate(chunks)
+    ]
+
+    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
+        with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
+            hp.prepare_runtime(runtime_dir=rt)
+            # 기존 실패 vendor_result 행 id만 확보(상태는 종료 후 갱신 — 크래시 시 'failed'로
+            # 남아 self-heal). 새 행은 만들지 않아 run당 벤더 1행 불변식 유지.
+            vr_ids = {
+                ad.vendor: review_repo.vendor_result_id(
+                    conn, run_id=run_id, vendor=ad.vendor
+                )
+                for ad in adapters
+            }
+            results = await asyncio.gather(
+                *(
+                    _run_vendor(a, prompts, pool=pool, wt=wt, hp=hp, rt=rt)
+                    for a in adapters
+                )
+            )
+
+    new_findings = []
+    for vendor, fs, err, dur in results:
+        vr_id = vr_ids[vendor]
+        if err is not None:
+            conn.execute(
+                "UPDATE vendor_result SET status='failed', error=?, duration_ms=? "
+                "WHERE id=?",
+                (err, dur, vr_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE vendor_result SET status='done', error=NULL, duration_ms=? "
+                "WHERE id=?",
+                (dur, vr_id),
+            )
+            for f in fs:
+                f.vendor_result_id = vr_id
+                new_findings.append((vr_id, f))
+    conn.commit()
+
+    _persist(conn, run_id, new_findings)  # consensus는 'single'로 들어감
+    # merge 표시가 켜져 있으면 (기존 성공분 + 새로 채운 벤더) 전체에 대해 consensus를
+    # 재태깅한다. 행을 지우지 않고 consensus 컬럼만 UPDATE → 사람 결정·감사 이력 보존.
+    if repo["merge_enabled"]:
+        _retag_consensus(conn, run_id)
+
+
+async def _resolve_retry_diff(conn, *, deps, repo, pr, run) -> str:
+    base = run["base_sha"] if "base_sha" in run.keys() else None
+    if base and deps.gh_compare_diff:
+        try:
+            return await asyncio.to_thread(
+                deps.gh_compare_diff, repo["full_name"], base, pr["head_sha"]
+            )
+        except Exception:
+            pass  # 증분 재구성 실패 → full diff로 degrade
+    return await asyncio.to_thread(deps.gh_diff, repo["full_name"], pr["number"])
+
+
+def _retag_consensus(conn, run_id) -> None:
+    rows = conn.execute(
+        "SELECT id, vendor, file, line, severity, category, confidence "
+        "FROM finding WHERE run_id=?",
+        (run_id,),
+    ).fetchall()
+    fs, fid_by_obj = [], {}
+    for r in rows:
+        f = Finding(
+            r["vendor"],
+            r["file"],
+            r["line"],
+            r["severity"],
+            r["category"],
+            "",
+            "",
+            r["confidence"],
+        )
+        fs.append(f)
+        fid_by_obj[id(f)] = r["id"]
+    for m in deterministic_merge(fs):
+        conn.execute(
+            "UPDATE finding SET consensus=?, consensus_group_id=? WHERE id=?",
+            (m.consensus, m.consensus_group_id, fid_by_obj[id(m.finding)]),
+        )
+    conn.commit()
 
 
 async def _resolve_diff(conn, *, run_id, deps, repo, pr, settings) -> str:

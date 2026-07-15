@@ -1,7 +1,11 @@
 const json = async (r: Response) => {
   const data = await r.json().catch(() => null);
   if (!r.ok) {
-    const message = data?.detail?.message ?? data?.message ?? `HTTP ${r.status}`;
+    const message =
+      data?.detail?.message ??
+      (typeof data?.detail === "string" ? data.detail : null) ??
+      data?.message ??
+      `HTTP ${r.status}`;
     throw new Error(message);
   }
   return data;
@@ -37,4 +41,5 @@ export const api = {
     fetch(`/api/findings/${id}`, writeJson("PATCH", body)).then(json),
   postRun: (id: number) => fetch(`/api/runs/${id}/post`, { method: "POST" }).then(json),
   triggerReview: (prId: number) => fetch(`/api/prs/${prId}/review`, { method: "POST" }).then(json),
+  retryVendors: (runId: number) => fetch(`/api/runs/${runId}/retry-vendors`, { method: "POST" }).then(json),
 };

@@ -71,6 +71,25 @@ def get_run(conn, run_id):
     return conn.execute("SELECT * FROM review_run WHERE id=?", (run_id,)).fetchone()
 
 
+def failed_vendors(conn, run_id):
+    return [
+        r["vendor"]
+        for r in conn.execute(
+            "SELECT vendor FROM vendor_result WHERE run_id=? AND status='failed'",
+            (run_id,),
+        ).fetchall()
+    ]
+
+
+def vendor_result_id(conn, *, run_id, vendor) -> int:
+    """부분 재시도용: 기존 vendor_result 행 id를 반환(상태는 건드리지 않음).
+    'running'으로 미리 바꾸지 않으므로 재시도 도중 크래시해도 행은 'failed'로 남아
+    다음 재시도가 self-heal한다(run당 벤더 1행 불변식 유지, 새 행 미생성)."""
+    return conn.execute(
+        "SELECT id FROM vendor_result WHERE run_id=? AND vendor=?", (run_id, vendor)
+    ).fetchone()["id"]
+
+
 def list_vendor_results(conn, run_id):
     # ★개정 (codex v6 [MEDIUM]): 부분 실패 벤더를 대시보드가 노출할 수 있게
     # run의 vendor_result 행을 반환(실패 벤더 배지 근거).

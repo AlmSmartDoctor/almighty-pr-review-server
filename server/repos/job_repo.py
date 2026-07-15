@@ -45,6 +45,37 @@ def enqueue_manual(conn, *, pr_id, head_sha, priority=0) -> int:
     return row["id"]
 
 
+def enqueue_retry(conn, *, pr_id, head_sha, run_id) -> int:
+    """부분 재시도: 같은 (pr, sha) 잡 행을 재사용하되 trigger='retry' + retry_run_id로
+    이어받을 대상 run을 명시해, worker가 latest run이 아니라 **엔드포인트가 검증한 바로
+    그 run**의 실패 벤더만 재실행하게 한다. 진행 중(queued/running)이면 건드리지 않고 id만
+    반환(enqueue_manual과 동일한 멱등 규약)."""
+    row = conn.execute(
+        "SELECT id, status FROM review_job WHERE pr_id=? AND head_sha=?",
+        (pr_id, head_sha),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            """INSERT INTO review_job (pr_id, head_sha, trigger, retry_run_id, created_at)
+               VALUES (?,?, 'retry', ?, datetime('now'))""",
+            (pr_id, head_sha, run_id),
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT id FROM review_job WHERE pr_id=? AND head_sha=?",
+            (pr_id, head_sha),
+        ).fetchone()["id"]
+    if row["status"] in ("done", "failed", "canceled"):
+        conn.execute(
+            """UPDATE review_job SET status='queued', trigger='retry', retry_run_id=?,
+               locked_by=NULL, locked_at=NULL, next_run_at=NULL,
+               attempts=0, error=NULL WHERE id=?""",
+            (run_id, row["id"]),
+        )
+        conn.commit()
+    return row["id"]
+
+
 STALE_LOCK_MINUTES = 30
 
 

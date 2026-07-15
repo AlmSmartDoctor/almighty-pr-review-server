@@ -466,3 +466,119 @@ def test_run_context_endpoint_redacts_secret_across_sinks(tmp_path, monkeypatch)
     stored = review_repo.get_run(conn, run_id)
     assert "tok-LEAK" not in (stored["context_meta"] or "")
     assert "[redacted]" in stored["context_meta"]
+
+
+def _seed_partial_fail_run(conn, *, number=70):
+    """claude done + codex failed 상태의 done run(부분 실패) 시드."""
+    from server.repos import pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=number,
+        title="t",
+        author="a",
+        head_sha="S",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="S", trigger="manual", effort="medium"
+    )
+    review_repo.add_vendor_result(conn, run_id=run_id, vendor="claude", status="done")
+    review_repo.add_vendor_result(
+        conn, run_id=run_id, vendor="codex", status="failed", error="boom"
+    )
+    review_repo.finish_run(conn, run_id, "done")
+    return pid, run_id
+
+
+def test_retry_vendors_enqueues_retry_job(tmp_path):
+    client, conn = _client(tmp_path)
+    _, run_id = _seed_partial_fail_run(conn)
+    r = client.post(f"/api/runs/{run_id}/retry-vendors")
+    assert r.status_code == 202
+    job = conn.execute(
+        "SELECT trigger, status, retry_run_id FROM review_job WHERE id=?",
+        (r.json()["job_id"],),
+    ).fetchone()
+    assert job["trigger"] == "retry" and job["status"] == "queued"
+    assert job["retry_run_id"] == run_id  # 검증된 바로 그 run이 대상으로 전파됨
+
+
+def test_retry_vendors_409_when_failed_vendor_disabled(tmp_path):
+    client, conn = _client(tmp_path)
+    pid, run_id = _seed_partial_fail_run(conn, number=73)
+    # 실패한 codex를 비활성화 → 재시도해도 worker가 걸러 무동작이므로 엔드포인트가 거절
+    repo_id = conn.execute(
+        "SELECT repo_id FROM pull_request WHERE id=?", (pid,)
+    ).fetchone()["repo_id"]
+    conn.execute("UPDATE repo SET vendor_codex_on=0 WHERE id=?", (repo_id,))
+    conn.commit()
+    r = client.post(f"/api/runs/{run_id}/retry-vendors")
+    assert r.status_code == 409 and "실패 벤더" in r.json()["detail"]
+
+
+def test_retry_vendors_404_when_run_missing(tmp_path):
+    client, _ = _client(tmp_path)
+    assert client.post("/api/runs/999/retry-vendors").status_code == 404
+
+
+def test_retry_vendors_409_when_head_advanced(tmp_path):
+    client, conn = _client(tmp_path)
+    pid, run_id = _seed_partial_fail_run(conn)
+    conn.execute("UPDATE pull_request SET head_sha='NEW' WHERE id=?", (pid,))
+    conn.commit()
+    r = client.post(f"/api/runs/{run_id}/retry-vendors")
+    assert r.status_code == 409 and "전체 재리뷰" in r.json()["detail"]
+
+
+def test_retry_vendors_409_when_no_failed_vendor(tmp_path):
+    client, conn = _client(tmp_path)
+    from server.repos import pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=71,
+        title="t",
+        author="a",
+        head_sha="S",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="S", trigger="manual", effort="medium"
+    )
+    review_repo.add_vendor_result(conn, run_id=run_id, vendor="claude", status="done")
+    review_repo.finish_run(conn, run_id, "done")
+    r = client.post(f"/api/runs/{run_id}/retry-vendors")
+    assert r.status_code == 409 and "실패 벤더" in r.json()["detail"]
+
+
+def test_retry_vendors_409_when_run_not_done(tmp_path):
+    client, conn = _client(tmp_path)
+    from server.repos import pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=72,
+        title="t",
+        author="a",
+        head_sha="S",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="S", trigger="manual", effort="medium"
+    )
+    review_repo.add_vendor_result(
+        conn, run_id=run_id, vendor="codex", status="failed", error="boom"
+    )
+    review_repo.finish_run(conn, run_id, "failed", error="all vendors failed")
+    r = client.post(f"/api/runs/{run_id}/retry-vendors")
+    assert r.status_code == 409

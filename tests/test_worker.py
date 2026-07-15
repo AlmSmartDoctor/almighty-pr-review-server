@@ -30,6 +30,43 @@ def test_worker_claims_and_runs_job(db, monkeypatch):
     assert j["status"] == "done" and j["run_id"] is not None
 
 
+def test_worker_routes_retry_trigger_to_retry_pr(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=1,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    target = review_repo.create_run(
+        db, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    job_repo.enqueue_retry(db, pr_id=pid, head_sha="s1", run_id=target)
+
+    calls = {}
+
+    async def fake_retry_pr(conn, *, pr_id, run_id, deps):
+        calls["retry"] = (pr_id, run_id)
+        return run_id
+
+    async def fake_review_pr(conn, *, pr_id, trigger, deps):
+        calls["review"] = pr_id
+        return 0
+
+    monkeypatch.setattr("server.worker.build_deps", lambda repo, settings: None)
+    monkeypatch.setattr("server.worker.retry_pr", fake_retry_pr)
+    monkeypatch.setattr("server.worker.review_pr", fake_review_pr)
+    asyncio.run(run_one_job(db, worker_id="w1"))
+    # retry 트리거는 retry_pr만 호출(review_pr 아님) + 검증된 run_id 전파
+    assert calls == {"retry": (pid, target)}
+    j = db.execute("SELECT status FROM review_job WHERE pr_id=?", (pid,)).fetchone()
+    assert j["status"] == "done"
+
+
 def test_worker_marks_failed_with_retry(db, monkeypatch):
     rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
     pid = pr_repo.upsert(

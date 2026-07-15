@@ -4,7 +4,13 @@ from contextlib import contextmanager
 import pytest
 
 from server.models import Finding
-from server.pipeline import review_pr, PipelineDeps, PipelineError, _build_prompt
+from server.pipeline import (
+    review_pr,
+    retry_pr,
+    PipelineDeps,
+    PipelineError,
+    _build_prompt,
+)
 from server.repos import repo_repo, pr_repo, finding_repo, review_repo
 from server.review.prescreen import PRESCREEN_FALLBACK_REASON
 
@@ -1070,6 +1076,264 @@ def test_prescreen_fallback_not_cached_so_next_run_retries(db):
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     assert counter.calls == 2  # 파싱 실패는 캐시 안 됨 → 재시도(self-heal)
+
+
+class _CodexFail:
+    vendor = "codex"
+
+    async def review(self, **kw):
+        raise RuntimeError("boom")
+
+
+class _ClaudeMustNotRun:
+    vendor = "claude"
+
+    async def review(self, **kw):
+        raise AssertionError("이미 성공한 벤더는 재실행되면 안 됨")
+
+
+def _partial_fail_run(db, *, pid, claude_finding, repo_path="/tmp/x"):
+    """claude 성공 + codex 실패한 부분 실패 run을 만들고 run_id 반환."""
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [claude_finding]), _CodexFail()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path=repo_path,
+    )
+    return asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+
+def _retry_deps(codex_findings, repo_path="/tmp/x"):
+    return PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[_ClaudeMustNotRun(), FakeAdapter("codex", codex_findings)],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path=repo_path,
+    )
+
+
+def test_retry_reruns_only_failed_vendor_into_same_run(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=20,
+        title="t",
+        author="a",
+        head_sha="s20",
+        base_ref="main",
+        url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8),
+    )
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]
+
+    retry_run_id = asyncio.run(
+        retry_pr(
+            db,
+            pr_id=pid,
+            run_id=run_id,
+            deps=_retry_deps(
+                [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+            ),
+        )
+    )
+    assert retry_run_id == run_id  # 같은 run 재사용
+    n_runs = db.execute(
+        "SELECT COUNT(*) c FROM review_run WHERE pr_id=?", (pid,)
+    ).fetchone()["c"]
+    assert n_runs == 1  # 새 run 미생성
+    vr = {v["vendor"]: v["status"] for v in review_repo.list_vendor_results(db, run_id)}
+    assert vr == {"claude": "done", "codex": "done"}  # 실패 벤더가 done으로 채워짐
+    fs = {f["vendor"]: f for f in finding_repo.list_for_run(db, run_id)}
+    assert set(fs) == {"claude", "codex"}
+    assert fs["claude"]["file"] == "a.py" and fs["codex"]["file"] == "b.py"
+
+
+def test_retry_retags_consensus_when_merge_enabled(db):
+    _, pid = _seed_pr(db, number=21, head_sha="s21", merge_enabled=1)
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 10, "high", "bug", "c", "r", 0.8),
+    )
+    assert finding_repo.list_for_run(db, run_id)[0]["consensus"] == "single"
+
+    asyncio.run(
+        retry_pr(
+            db,
+            pr_id=pid,
+            run_id=run_id,
+            deps=_retry_deps(
+                [Finding("codex", "a.py", 11, "high", "bug", "c2", "r2", 0.7)]
+            ),
+        )
+    )
+    fs = finding_repo.list_for_run(db, run_id)
+    assert len(fs) == 2
+    assert all(f["consensus"] == "consensus" for f in fs)  # union 재태깅
+    assert len({f["consensus_group_id"] for f in fs}) == 1
+
+
+def test_retry_preserves_human_decision_on_retag(db):
+    _, pid = _seed_pr(db, number=22, head_sha="s22", merge_enabled=1)
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 10, "high", "bug", "c", "r", 0.8),
+    )
+    claude_fid = finding_repo.list_for_run(db, run_id)[0]["id"]
+    finding_repo.set_status(db, claude_fid, "approved")
+
+    asyncio.run(
+        retry_pr(
+            db,
+            pr_id=pid,
+            run_id=run_id,
+            deps=_retry_deps(
+                [Finding("codex", "a.py", 11, "high", "bug", "c2", "r2", 0.7)]
+            ),
+        )
+    )
+    row = finding_repo.get(db, claude_fid)
+    assert row["status"] == "approved"  # consensus UPDATE이 사람 결정을 지우지 않음
+    assert row["consensus"] == "consensus"  # 태깅은 갱신
+
+
+def test_retry_targets_validated_run_not_latest(db):
+    # 같은 head에 done run이 둘일 때 retry는 전달된 run_id만 대상으로 한다(latest 아님).
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=23,
+        title="t",
+        author="a",
+        head_sha="s23",
+        base_ref="main",
+        url="u",
+    )
+    target_run = _partial_fail_run(  # run A: codex 실패(재시도 대상)
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8),
+    )
+    # run B: 이후 생긴 최신 done run(두 벤더 성공) — latest지만 재시도 대상 아님
+    later_run = asyncio.run(
+        review_pr(
+            db,
+            pr_id=pid,
+            trigger="manual",
+            deps=PipelineDeps(
+                gh_diff=lambda repo, n: "diff...",
+                worktree=fake_worktree,
+                adapters=[
+                    FakeAdapter(
+                        "claude",
+                        [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)],
+                    ),
+                    FakeAdapter(
+                        "codex",
+                        [Finding("codex", "z.py", 9, "low", "style", "c", "r", 0.4)],
+                    ),
+                ],
+                prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+                repo_local_path="/tmp/x",
+            ),
+        )
+    )
+    assert later_run != target_run and review_repo.failed_vendors(db, later_run) == []
+
+    asyncio.run(
+        retry_pr(
+            db,
+            pr_id=pid,
+            run_id=target_run,
+            deps=_retry_deps(
+                [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+            ),
+        )
+    )
+    # codex finding은 검증된 target_run에 들어가고 later_run은 그대로
+    assert {f["vendor"] for f in finding_repo.list_for_run(db, target_run)} == {
+        "claude",
+        "codex",
+    }
+    assert review_repo.failed_vendors(db, target_run) == []
+
+
+def test_retry_bails_when_head_advanced_between_enqueue_and_run(db):
+    # 엔드포인트 검증 후 poller가 head를 전진시킨 경우(TOCTOU): retry는 새 head diff를
+    # 옛 run에 섞지 않고 PipelineError로 취소하며 데이터를 건드리지 않는다.
+    _, pid = _seed_pr(db, number=24, head_sha="s24", merge_enabled=1)
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 10, "high", "bug", "c", "r", 0.8),
+    )
+    before = [dict(f) for f in finding_repo.list_for_run(db, run_id)]
+    pr_repo.upsert(  # poller가 head를 전진시킴(같은 pr, 새 sha)
+        db,
+        repo_id=pr_repo.get(db, pid)["repo_id"],
+        number=24,
+        title="t",
+        author="a",
+        head_sha="s24-NEW",
+        base_ref="main",
+        url="u",
+    )
+
+    with pytest.raises(PipelineError):
+        asyncio.run(
+            retry_pr(
+                db,
+                pr_id=pid,
+                run_id=run_id,
+                deps=_retry_deps(
+                    [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+                ),
+            )
+        )
+    # run은 오염되지 않음: finding 그대로, codex 여전히 failed
+    assert [dict(f) for f in finding_repo.list_for_run(db, run_id)] == before
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]
+
+
+def test_retry_vendor_refail_stays_failed_and_retryable(db):
+    # 재시도한 벤더가 또 실패하면 'running'이 아니라 'failed'로 남아 다음 재시도가 가능하다.
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=25,
+        title="t",
+        author="a",
+        head_sha="s25",
+        base_ref="main",
+        url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8),
+    )
+    # codex가 재시도에서도 실패(_CodexFail 재사용)
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[_ClaudeMustNotRun(), _CodexFail()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=deps))
+    vr = {v["vendor"]: v["status"] for v in review_repo.list_vendor_results(db, run_id)}
+    assert vr["codex"] == "failed"  # 'running' 고착 아님
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]  # 재시도 가능 상태 유지
 
 
 def test_build_prompt_empty_no_block():

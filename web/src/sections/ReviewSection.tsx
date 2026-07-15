@@ -532,6 +532,20 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       .finally(() => setPosting(false));
   };
 
+  const retryVendors = () => {
+    if (!runId) return;
+    setTriggering(true);
+    setMessage("");
+    api.retryVendors(runId)
+      .then((res) => {
+        setMessage(`실패 벤더 재시도를 큐에 넣었습니다. job ${res.job_id}`);
+        reloadVendors();  // 재시도 벤더가 running으로 즉시 반영
+        return onRefresh();
+      })
+      .catch((e) => setMessage(`재시도에 실패했습니다: ${e instanceof Error ? e.message : "원인 미상"}`))
+      .finally(() => setTriggering(false));
+  };
+
   const triggerReview = () => {
     setTriggering(true);
     setMessage("");
@@ -589,6 +603,9 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
             <StatusLine inline>
               자동 재시도 안 함: {failed.map((v) => `${v.vendor}(${v.error ?? "실패"})`).join(", ")}
             </StatusLine>
+            <Button variant="outline" size="sm" onClick={retryVendors} disabled={triggering}>
+              실패 벤더만 재시도
+            </Button>
           </CardContent>
         </Card>
       )}

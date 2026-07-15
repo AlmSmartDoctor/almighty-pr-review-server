@@ -249,6 +249,35 @@ def run_vendor_results(run_id: int, conn=Depends(get_conn)):
     return [dict(v) for v in review_repo.list_vendor_results(conn, run_id)]
 
 
+@app.post("/api/runs/{run_id}/retry-vendors", status_code=202)
+def retry_vendors(run_id: int, conn=Depends(get_conn)):
+    """부분 실패한 리뷰의 **실패 벤더만** 재실행(새 run 미생성, 기존 성공분 보존).
+    head가 갱신됐거나 실패 벤더가 없거나 부분 실패 상태(done)가 아니면 거절한다."""
+    run = review_repo.get_run(conn, run_id)
+    if run is None:
+        raise HTTPException(404, "run not found")
+    pr = pr_repo.get(conn, run["pr_id"])
+    if pr is None:
+        raise HTTPException(404, "pr not found")
+    if pr["head_sha"] != run["head_sha"]:
+        raise HTTPException(409, "PR가 갱신됨 — 전체 재리뷰를 사용하세요")
+    if run["status"] != "done":
+        raise HTTPException(
+            409, "부분 실패한 리뷰에만 사용 가능 — 전체 재리뷰를 사용하세요"
+        )
+    # 실패했더라도 현재 비활성인 벤더는 재시도해도 worker가 걸러 무동작이므로 제외한다.
+    repo = repo_repo.get(conn, pr["repo_id"])
+    enabled = {"claude"} if repo["vendor_claude_on"] else set()
+    if repo["vendor_codex_on"]:
+        enabled.add("codex")
+    if not (set(review_repo.failed_vendors(conn, run_id)) & enabled):
+        raise HTTPException(409, "재시도할 실패 벤더가 없습니다")
+    job_id = job_repo.enqueue_retry(
+        conn, pr_id=run["pr_id"], head_sha=run["head_sha"], run_id=run_id
+    )
+    return {"job_id": job_id}
+
+
 @app.get("/api/runs/{run_id}/context")
 def run_context(run_id: int, conn=Depends(get_conn)):
     run = review_repo.get_run(conn, run_id)
