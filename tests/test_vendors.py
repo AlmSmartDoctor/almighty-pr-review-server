@@ -110,7 +110,7 @@ def test_adapter_verify_parses_verdict(tmp_path):
 
 def test_codex_adapter_passes_reasoning_effort(tmp_path):
     hp = HarnessProfile.load("default")
-    hp.effort = "high"
+    hp.codex_effort = "high"
     runner = fake_runner(FAKE_OUT)
     asyncio.run(
         CodexAdapter(runner=runner).review(
@@ -125,7 +125,7 @@ def test_codex_adapter_passes_reasoning_effort(tmp_path):
 
 def test_codex_adapter_omits_effort_when_unknown_value(tmp_path):
     hp = HarnessProfile.load("default")
-    hp.effort = "turbo"  # codex enum 밖 → 플래그 생략(400 방지)
+    hp.codex_effort = "turbo"  # codex enum 밖 → 플래그 생략(400 방지)
     runner = fake_runner(FAKE_OUT)
     asyncio.run(
         CodexAdapter(runner=runner).review(
@@ -136,7 +136,7 @@ def test_codex_adapter_omits_effort_when_unknown_value(tmp_path):
     assert not any(a.startswith("model_reasoning_effort=") for a in args)
 
 
-def test_claude_adapter_has_no_effort_flag(tmp_path):
+def test_claude_adapter_passes_effort(tmp_path):
     hp = HarnessProfile.load("default")
     hp.effort = "high"
     runner = fake_runner(FAKE_OUT)
@@ -146,8 +146,22 @@ def test_claude_adapter_has_no_effort_flag(tmp_path):
         )
     )
     args = runner.calls[0]["args"]
-    assert "-c" not in args
-    assert not any("reasoning_effort" in a for a in args)
+    assert "--effort" in args
+    assert args[args.index("--effort") + 1] == "high"
+    assert "-c" not in args  # codex 전용 config 플래그는 claude에 없음
+
+
+def test_claude_adapter_omits_effort_when_unknown_value(tmp_path):
+    hp = HarnessProfile.load("default")
+    hp.effort = "turbo"  # claude enum 밖 → 플래그 생략
+    runner = fake_runner(FAKE_OUT)
+    asyncio.run(
+        ClaudeAdapter(runner=runner).review(
+            prompt="리뷰해", workdir=tmp_path, harness=hp, runtime_dir=str(tmp_path)
+        )
+    )
+    args = runner.calls[0]["args"]
+    assert "--effort" not in args
 
 
 def test_default_runner_timeout_raises_vendor_timeout():

@@ -1,15 +1,15 @@
-import pytest
-
 from server.pipeline import PipelineDeps
 from server.context.composite import CompositeContextProvider
 from server.review.gh_deps import build_deps
 
 
-def test_build_deps_requires_local_path():
-    with pytest.raises(ValueError):
-        build_deps(
-            {"full_name": "acme/api", "local_path": None, "harness_name": "default"}, {}
-        )
+def test_build_deps_allows_missing_local_path():
+    # local_path 없어도 deps를 조립한다 — 리뷰 시 clone으로 온디맨드 체크아웃.
+    deps = build_deps(
+        {"full_name": "acme/api", "local_path": None, "harness_name": "default"}, {}
+    )
+    assert deps.repo_local_path is None
+    assert callable(deps.clone)  # 온디맨드 clone 배선됨
 
 
 def test_build_deps_assembles_pipeline_deps():
@@ -21,6 +21,7 @@ def test_build_deps_assembles_pipeline_deps():
     assert deps.repo_local_path == "/tmp/acme"
     assert [a.vendor for a in deps.adapters] == ["claude", "codex"]
     assert callable(deps.gh_diff) and callable(deps.prescreen)
+    assert callable(deps.clone)
     assert isinstance(deps.context, CompositeContextProvider)
 
 

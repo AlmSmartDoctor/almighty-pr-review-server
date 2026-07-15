@@ -22,26 +22,25 @@ afterEach(() => {
 
 test("renders global defaults from settings", async () => {
   render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
-  expect(await screen.findByDisplayValue("medium")).toBeInTheDocument();
+  expect(await screen.findByDisplayValue("haiku")).toBeInTheDocument();
   expect(screen.getByText(/동시성/)).toBeInTheDocument();
   expect(screen.getByText("등록된 레포가 없습니다.")).toBeInTheDocument();
 });
 
-test("selects a review model and saves it", async () => {
-  const patchSettings = vi
-    .spyOn(api, "patchSettings")
-    .mockResolvedValue({ ...settings, review_model: "opus" });
-  render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+test("sets per-repo claude model and effort", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 };
+  const patchRepo = vi
+    .spyOn(api, "patchRepo")
+    .mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
 
-  const select = await screen.findByDisplayValue("sonnet");
-  fireEvent.change(select, { target: { value: "opus" } });
-  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+  const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
+  fireEvent.change(model, { target: { value: "opus" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { claude_model: "opus" }));
 
-  await waitFor(() =>
-    expect(patchSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ review_model: "opus" }),
-    ),
-  );
+  const effort = screen.getByRole("combobox", { name: "acme/api Claude effort" });
+  fireEvent.change(effort, { target: { value: "xhigh" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { claude_effort: "xhigh" }));
 });
 
 test("toggles high-severity single verification and saves it", async () => {
@@ -78,21 +77,21 @@ test("toggles incremental review and saves it", async () => {
   );
 });
 
-test("selects a codex model and saves it", async () => {
-  const patchSettings = vi
-    .spyOn(api, "patchSettings")
-    .mockResolvedValue({ ...settings, codex_model: "gpt-5.4" });
-  render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+test("sets per-repo codex model and effort", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 };
+  const patchRepo = vi
+    .spyOn(api, "patchRepo")
+    .mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
 
-  const select = await screen.findByDisplayValue("기본값 (codex 자체)");
-  fireEvent.change(select, { target: { value: "gpt-5.4" } });
-  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+  const model = await screen.findByRole("combobox", { name: "acme/api Codex 모델" });
+  expect(model).toHaveDisplayValue("기본값 (codex 자체)");
+  fireEvent.change(model, { target: { value: "gpt-5.4" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { codex_model: "gpt-5.4" }));
 
-  await waitFor(() =>
-    expect(patchSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ codex_model: "gpt-5.4" }),
-    ),
-  );
+  const effort = screen.getByRole("combobox", { name: "acme/api Codex effort" });
+  fireEvent.change(effort, { target: { value: "high" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { codex_effort: "high" }));
 });
 
 test("renders repositories and toggles enabled state", async () => {
@@ -123,7 +122,7 @@ test("adds a repository and refreshes the repository list", async () => {
   fireEvent.change(await screen.findByPlaceholderText("owner/repo"), {
     target: { value: "acme/web" },
   });
-  fireEvent.change(screen.getByPlaceholderText("/로컬/clone/경로 (리뷰 시 필요)"), {
+  fireEvent.change(screen.getByPlaceholderText("/로컬/clone/경로 (선택)"), {
     target: { value: "/work/acme-web" },
   });
   fireEvent.click(screen.getByRole("button", { name: "등록" }));

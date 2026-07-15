@@ -11,8 +11,7 @@ from server.review.worktree import prepared_worktree
 
 
 def build_deps(repo, settings) -> PipelineDeps:
-    if not repo["local_path"]:
-        raise ValueError(f"repo {repo['full_name']}에 local_path 미설정")
+    # local_path는 선택값 — 없으면 파이프라인이 gh.clone으로 PR 브랜치를 온디맨드 clone.
     gh = GhClient()
     hp = HarnessProfile.load(repo["harness_name"])
 
@@ -33,6 +32,7 @@ def build_deps(repo, settings) -> PipelineDeps:
         adapters=adapters,
         prescreen=_prescreen_tuple,
         repo_local_path=repo["local_path"],
+        clone=gh.clone,
         context=build_context_provider(repo, settings),
-        verify=make_verifier(adapters, prepared_worktree),
+        verify=make_verifier(adapters, prepared_worktree, gh.clone),
     )

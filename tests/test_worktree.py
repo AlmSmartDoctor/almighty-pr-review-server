@@ -1,10 +1,68 @@
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from server.review.worktree import WorktreePrepareError, prepared_worktree
+from server.review.worktree import WorktreePrepareError, checkout, prepared_worktree
+
+
+@contextmanager
+def _spy_worktree(seen):
+    @contextmanager
+    def wt(repo, sha, pr_number=None):
+        seen["repo"] = repo
+        seen["sha"] = sha
+        seen["pr_number"] = pr_number
+        yield "WT"
+
+    yield wt
+
+
+def test_checkout_uses_local_path_and_skips_clone():
+    seen = {}
+    with _spy_worktree(seen) as wt:
+
+        def clone(full_name, dest):
+            raise AssertionError("local_path 있으면 clone 안 함")
+
+        with checkout(
+            wt,
+            clone,
+            local_path="/local/x",
+            full_name="acme/api",
+            sha="s1",
+            pr_number=7,
+        ) as out:
+            assert out == "WT"
+    assert str(seen["repo"]) == "/local/x" and seen["sha"] == "s1"
+
+
+def test_checkout_clones_when_no_local_path_and_cleans_up():
+    seen, cloned = {}, {}
+    with _spy_worktree(seen) as wt:
+
+        def clone(full_name, dest):
+            cloned["full_name"] = full_name
+            cloned["dest"] = dest
+
+        with checkout(
+            wt, clone, local_path=None, full_name="acme/api", sha="s1", pr_number=7
+        ) as out:
+            assert out == "WT"
+    assert cloned["full_name"] == "acme/api"
+    # worktree는 clone된 임시 repo_dir(dest) 위에서 열린다
+    assert str(seen["repo"]) == cloned["dest"]
+    # 임시 clone 디렉토리는 종료 시 제거됨
+    assert not Path(cloned["dest"]).parent.exists()
+
+
+def test_checkout_raises_when_no_local_path_and_no_clone():
+    with _spy_worktree({}) as wt:
+        with pytest.raises(WorktreePrepareError):
+            with checkout(wt, None, local_path=None, full_name="acme/api", sha="s1"):
+                pass
 
 
 def _init_repo(path):
@@ -82,9 +140,16 @@ def test_worktree_fetches_missing_commit(tmp_path):
         ],
         check=True,
     )
-    subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
-    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "HEAD:main"], check=True)
-    subprocess.run(["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(seed), "push", "-q", "origin", "HEAD:main"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+        check=True,
+    )
     subprocess.run(["git", "clone", "-q", str(remote), str(src)], check=True)
     subprocess.run(["git", "clone", "-q", str(remote), str(other)], check=True)
 
@@ -108,12 +173,17 @@ def test_worktree_fetches_missing_commit(tmp_path):
     sha = subprocess.run(
         ["git", "-C", str(other), "rev-parse", "HEAD"], capture_output=True, text=True
     ).stdout.strip()
-    subprocess.run(["git", "-C", str(other), "push", "-q", "origin", "HEAD:main"], check=True)
-    assert subprocess.run(
-        ["git", "-C", str(src), "cat-file", "-e", f"{sha}^{{commit}}"],
-        capture_output=True,
-        text=True,
-    ).returncode != 0
+    subprocess.run(
+        ["git", "-C", str(other), "push", "-q", "origin", "HEAD:main"], check=True
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", str(src), "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True,
+            text=True,
+        ).returncode
+        != 0
+    )
 
     with prepared_worktree(src, sha) as wt:
         assert (wt / "g.txt").read_text() == "fetched"
@@ -143,9 +213,16 @@ def test_worktree_fetches_missing_commit_from_pr_ref(tmp_path):
         ],
         check=True,
     )
-    subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
-    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "HEAD:main"], check=True)
-    subprocess.run(["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(seed), "push", "-q", "origin", "HEAD:main"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+        check=True,
+    )
     subprocess.run(["git", "clone", "-q", str(remote), str(src)], check=True)
     subprocess.run(["git", "clone", "-q", str(remote), str(pr_src)], check=True)
 
@@ -173,11 +250,14 @@ def test_worktree_fetches_missing_commit_from_pr_ref(tmp_path):
         ["git", "-C", str(pr_src), "push", "-q", "origin", "HEAD:refs/pull/123/head"],
         check=True,
     )
-    assert subprocess.run(
-        ["git", "-C", str(src), "cat-file", "-e", f"{sha}^{{commit}}"],
-        capture_output=True,
-        text=True,
-    ).returncode != 0
+    assert (
+        subprocess.run(
+            ["git", "-C", str(src), "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True,
+            text=True,
+        ).returncode
+        != 0
+    )
 
     with prepared_worktree(src, sha, pr_number=123) as wt:
         assert (wt / "pr.txt").read_text() == "from pr"

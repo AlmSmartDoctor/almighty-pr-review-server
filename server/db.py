@@ -164,6 +164,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "repo", "db_schema_path", "TEXT")
     # Graphify 애그리게이터 1차 소스: 레포에 체크인된 프로젝트 문서 경로(root 하위 봉쇄).
     _ensure_column(conn, "repo", "graphify_path", "TEXT")
+    # 레포별·벤더별 모델/effort — 전역 기본 없이 레포마다 직접 지정(NULL=코드 기본값 fallback).
+    # claude는 --model/--effort, codex는 --model/-c model_reasoning_effort로 각각 전달.
+    _ensure_column(conn, "repo", "claude_model", "TEXT")
+    _ensure_column(conn, "repo", "claude_effort", "TEXT")
+    _ensure_column(conn, "repo", "codex_model", "TEXT")
+    _ensure_column(conn, "repo", "codex_effort", "TEXT")
     # 고위험 SINGLE finding 반박 패스 토글 — 전역 기본 + per-repo override(NULL=상속).
     _ensure_column(
         conn, "app_settings", "verify_singles_on", "INTEGER NOT NULL DEFAULT 0"

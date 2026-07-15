@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Plus, RotateCcw, Save } from "lucide-react";
 import { api } from "../api";
 import { PageHead } from "@/components/page-head";
@@ -10,14 +10,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 type Settings = {
   default_effort: string;
@@ -49,7 +41,10 @@ type Repo = {
   local_path: string | null;
   enabled: number;
   trigger_mode?: string;
-  default_effort?: string;
+  claude_model?: string | null;
+  claude_effort?: string | null;
+  codex_model?: string | null;
+  codex_effort?: string | null;
   vendor_claude_on?: number;
   vendor_codex_on?: number;
   merge_enabled?: number;
@@ -73,9 +68,10 @@ const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
   { key: "context_feedback_on", label: "피드백" },
 ];
 
-const EFFORTS = ["low", "medium", "high", "xhigh"];
 const MODELS = ["opus", "sonnet", "haiku", "fable"];
+const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"];
 // 저장된 값이 별칭 목록에 없더라도(전체 모델 ID·레거시 값) 선택칸이 비지 않도록 앞에 붙인다.
 const optionsWith = (known: string[], current: string) =>
   current && !known.includes(current) ? [current, ...known] : known;
@@ -172,79 +168,17 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
           {repos.length === 0 ? (
             <StatusLine className="pt-1">등록된 레포가 없습니다.</StatusLine>
           ) : (
-            <div className="mt-4 overflow-x-auto rounded-lg border border-border">
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-secondary/60 hover:bg-secondary/60">
-                    <TableHead>레포</TableHead>
-                    <TableHead>로컬 경로</TableHead>
-                    <TableHead>트리거</TableHead>
-                    <TableHead>effort</TableHead>
-                    <TableHead className="text-center">활성</TableHead>
-                    <TableHead className="text-center">Claude</TableHead>
-                    <TableHead className="text-center">Codex</TableHead>
-                    <TableHead className="text-center">병합</TableHead>
-                    <TableHead>컨텍스트 오버라이드</TableHead>
-                    <TableHead>하네스</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {repos.map((r) => (
-                    <TableRow key={r.id}>
-                      <TableCell className="whitespace-nowrap font-mono text-[12.5px] font-semibold">{r.full_name}</TableCell>
-                      <TableCell className="min-w-[200px]">
-                        <Input
-                          value={r.local_path ?? ""}
-                          aria-label={`${r.full_name} local_path`}
-                          className="h-8"
-                          onChange={(e) => setRepos((rs) => rs.map((x) => x.id === r.id ? { ...x, local_path: e.target.value } : x))}
-                          onBlur={(e) => patchRepo(r, { local_path: e.target.value })}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <div className="w-24">
-                          <NativeSelect value={r.trigger_mode ?? "auto"} className="h-8" onChange={(e) => patchRepo(r, { trigger_mode: e.target.value })}>
-                            <option value="auto">auto</option>
-                            <option value="manual">manual</option>
-                          </NativeSelect>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="w-24">
-                          <NativeSelect value={r.default_effort ?? "medium"} className="h-8" onChange={(e) => patchRepo(r, { default_effort: e.target.value })}>
-                            {EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
-                          </NativeSelect>
-                        </div>
-                      </TableCell>
-                      <ToggleCell label="활성" checked={!!r.enabled} onChange={(v) => patchRepo(r, { enabled: v })} />
-                      <ToggleCell label="Claude" checked={r.vendor_claude_on !== 0} onChange={(v) => patchRepo(r, { vendor_claude_on: v })} />
-                      <ToggleCell label="Codex" checked={r.vendor_codex_on !== 0} onChange={(v) => patchRepo(r, { vendor_codex_on: v })} />
-                      <ToggleCell label="병합" checked={!!r.merge_enabled} onChange={(v) => patchRepo(r, { merge_enabled: v })} />
-                      <ContextOverrideCell
-                        repo={r}
-                        settings={settings}
-                        onPatch={(patch) => patchRepo(r, patch)}
-                        onLocalChange={(patch) => setRepos((rs) => rs.map((x) => x.id === r.id ? { ...x, ...patch } : x))}
-                      />
-                      <TableCell>
-                        <div className="w-28">
-                          <NativeSelect
-                            aria-label={`${r.full_name} 하네스`}
-                            value={r.harness_name ?? "default"}
-                            className="h-8"
-                            onChange={(e) => patchRepo(r, { harness_name: e.target.value })}
-                          >
-                            {(harnessNames.includes(r.harness_name ?? "default")
-                              ? harnessNames
-                              : [r.harness_name ?? "default", ...harnessNames]
-                            ).map((n) => <option key={n} value={n}>{n}</option>)}
-                          </NativeSelect>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+            <div className="mt-4 space-y-3">
+              {repos.map((r) => (
+                <RepoCard
+                  key={r.id}
+                  repo={r}
+                  settings={settings}
+                  harnessNames={harnessNames}
+                  onPatch={(patch) => patchRepo(r, patch)}
+                  onLocalChange={(patch) => setRepos((rs) => rs.map((x) => (x.id === r.id ? { ...x, ...patch } : x)))}
+                />
+              ))}
             </div>
           )}
         </CardContent>
@@ -256,28 +190,6 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
         </CardHeader>
         <CardContent className="pt-1">
           <div className="divide-y divide-border">
-            <Field title="기본 effort" help="새 레포에 적용되는 기본 reasoning 강도(레포별로 재정의 가능, codex에 반영)">
-              <div className="w-40">
-                <NativeSelect value={draft.default_effort} onChange={(e) => setDraft({ ...draft, default_effort: e.target.value })}>
-                  {EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
-                </NativeSelect>
-              </div>
-            </Field>
-            <Field title="Claude 모델" help="풀리뷰에서 Claude 벤더가 사용할 모델">
-              <div className="w-40">
-                <NativeSelect value={draft.review_model} onChange={(e) => setDraft({ ...draft, review_model: e.target.value })}>
-                  {optionsWith(MODELS, draft.review_model).map((x) => <option key={x} value={x}>{x}</option>)}
-                </NativeSelect>
-              </div>
-            </Field>
-            <Field title="Codex 모델" help="풀리뷰에서 Codex 벤더가 사용할 모델">
-              <div className="w-44">
-                <NativeSelect value={draft.codex_model} onChange={(e) => setDraft({ ...draft, codex_model: e.target.value })}>
-                  <option value="">기본값 (codex 자체)</option>
-                  {optionsWith(CODEX_MODELS, draft.codex_model).map((x) => <option key={x} value={x}>{x}</option>)}
-                </NativeSelect>
-              </div>
-            </Field>
             <Field title="동시성 N" help="rate-limit 보호용 RunnerPool 상한">
               <Input type="number" min={1} max={8} className="w-24 text-right" value={draft.concurrency_limit}
                      onChange={(e) => setDraft({ ...draft, concurrency_limit: Number(e.target.value) })} />
@@ -360,27 +272,119 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
   );
 }
 
-function ToggleCell({ label, checked, onChange }: {
-  label: string; checked: boolean; onChange: (v: number) => void;
+function RepoCard({ repo, settings, harnessNames, onPatch, onLocalChange }: {
+  repo: Repo;
+  settings: Settings;
+  harnessNames: string[];
+  onPatch: (patch: Partial<Repo>) => void;
+  onLocalChange: (patch: Partial<Repo>) => void;
 }) {
+  const harnessOptions = harnessNames.includes(repo.harness_name ?? "default")
+    ? harnessNames
+    : [repo.harness_name ?? "default", ...harnessNames];
   return (
-    <TableCell className="text-center">
-      <div className="flex justify-center">
-        <Switch aria-label={label} checked={checked} onCheckedChange={(v) => onChange(v ? 1 : 0)} />
+    <div className="rounded-lg border border-border p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-mono text-[13px] font-semibold">{repo.full_name}</span>
+        <RepoToggle label="활성" checked={!!repo.enabled} onChange={(v) => onPatch({ enabled: v })} />
       </div>
-    </TableCell>
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2">
+        <RepoToggle label="Claude" checked={repo.vendor_claude_on !== 0} onChange={(v) => onPatch({ vendor_claude_on: v })} />
+        <RepoToggle label="Codex" checked={repo.vendor_codex_on !== 0} onChange={(v) => onPatch({ vendor_codex_on: v })} />
+        <RepoToggle label="병합" checked={!!repo.merge_enabled} onChange={(v) => onPatch({ merge_enabled: v })} />
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
+        <RepoField label="트리거">
+          <NativeSelect aria-label={`${repo.full_name} 트리거`} value={repo.trigger_mode ?? "auto"} className="h-8"
+                        onChange={(e) => onPatch({ trigger_mode: e.target.value })}>
+            <option value="auto">auto</option>
+            <option value="manual">manual</option>
+          </NativeSelect>
+        </RepoField>
+        <RepoField label="하네스">
+          <NativeSelect aria-label={`${repo.full_name} 하네스`} value={repo.harness_name ?? "default"} className="h-8"
+                        onChange={(e) => onPatch({ harness_name: e.target.value })}>
+            {harnessOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+          </NativeSelect>
+        </RepoField>
+        <RepoField label="Claude 모델">
+          <NativeSelect aria-label={`${repo.full_name} Claude 모델`} value={repo.claude_model ?? "sonnet"} className="h-8"
+                        onChange={(e) => onPatch({ claude_model: e.target.value })}>
+            {optionsWith(MODELS, repo.claude_model ?? "sonnet").map((x) => <option key={x} value={x}>{x}</option>)}
+          </NativeSelect>
+        </RepoField>
+        <RepoField label="Claude effort">
+          <NativeSelect aria-label={`${repo.full_name} Claude effort`} value={repo.claude_effort ?? "medium"} className="h-8"
+                        onChange={(e) => onPatch({ claude_effort: e.target.value })}>
+            {CLAUDE_EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
+          </NativeSelect>
+        </RepoField>
+        <RepoField label="Codex 모델">
+          <NativeSelect aria-label={`${repo.full_name} Codex 모델`} value={repo.codex_model ?? ""} className="h-8"
+                        onChange={(e) => onPatch({ codex_model: e.target.value })}>
+            <option value="">기본값 (codex 자체)</option>
+            {optionsWith(CODEX_MODELS, repo.codex_model ?? "").map((x) => <option key={x} value={x}>{x}</option>)}
+          </NativeSelect>
+        </RepoField>
+        <RepoField label="Codex effort">
+          <NativeSelect aria-label={`${repo.full_name} Codex effort`} value={repo.codex_effort ?? "medium"} className="h-8"
+                        onChange={(e) => onPatch({ codex_effort: e.target.value })}>
+            {CODEX_EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
+          </NativeSelect>
+        </RepoField>
+      </div>
+
+      <div className="mt-3">
+        <RepoField label="로컬 경로 (선택 · 비우면 리뷰 시 온디맨드 clone)">
+          <Input
+            value={repo.local_path ?? ""}
+            aria-label={`${repo.full_name} local_path`}
+            className="h-8"
+            placeholder="/로컬/clone/경로"
+            onChange={(e) => onLocalChange({ local_path: e.target.value })}
+            onBlur={(e) => onPatch({ local_path: e.target.value })}
+          />
+        </RepoField>
+      </div>
+
+      <div className="mt-3 border-t border-border pt-3">
+        <ContextOverride repo={repo} settings={settings} onPatch={onPatch} onLocalChange={onLocalChange} />
+      </div>
+    </div>
   );
 }
 
-function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
+function RepoField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function RepoToggle({ label, checked, onChange }: {
+  label: string; checked: boolean; onChange: (v: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+      <Switch aria-label={label} checked={checked} onCheckedChange={(v) => onChange(v ? 1 : 0)} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function ContextOverride({ repo, settings, onPatch, onLocalChange }: {
   repo: Repo;
   settings: Settings;
   onPatch: (patch: Partial<Repo>) => void;
   onLocalChange: (patch: Partial<Repo>) => void;
 }) {
   return (
-    <TableCell className="min-w-[260px]">
-      <div className="grid grid-cols-2 gap-1.5">
+    <div>
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
         {CONTEXT_TOGGLES.map(({ key, label }) => {
           const value = repo[key];
           const inherited = settings[key] ? "켜짐" : "꺼짐";
@@ -404,9 +408,9 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
           );
         })}
       </div>
-      <div className="mt-1.5 space-y-1">
+      <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-12 shrink-0">경로</span>
+          <span className="w-14 shrink-0">Static 경로</span>
           <Input
             aria-label={`${repo.full_name} Static 경로`}
             className="h-7 min-w-0 text-[11px]"
@@ -417,7 +421,7 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
           />
         </label>
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-12 shrink-0">Jira키</span>
+          <span className="w-14 shrink-0">Jira키</span>
           <Input
             aria-label={`${repo.full_name} Jira 프로젝트 키`}
             className="h-7 min-w-0 text-[11px]"
@@ -428,7 +432,7 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
           />
         </label>
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-12 shrink-0">DB스키마</span>
+          <span className="w-14 shrink-0">DB스키마</span>
           <Input
             aria-label={`${repo.full_name} DB 스키마 경로`}
             className="h-7 min-w-0 text-[11px]"
@@ -439,7 +443,7 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
           />
         </label>
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-12 shrink-0">프로젝트</span>
+          <span className="w-14 shrink-0">프로젝트</span>
           <Input
             aria-label={`${repo.full_name} 프로젝트 문서 경로`}
             className="h-7 min-w-0 text-[11px]"
@@ -450,7 +454,7 @@ function ContextOverrideCell({ repo, settings, onPatch, onLocalChange }: {
           />
         </label>
       </div>
-    </TableCell>
+    </div>
   );
 }
 
@@ -470,7 +474,7 @@ function RepoForm({ onAdded }: { onAdded: () => void }) {
     <div className="flex flex-wrap items-center gap-2">
       <Input placeholder="owner/repo" value={fullName} className="w-48"
              onChange={(e) => setFullName(e.target.value)} />
-      <Input placeholder="/로컬/clone/경로 (리뷰 시 필요)" value={localPath} className="w-72 min-w-0 flex-1"
+      <Input placeholder="/로컬/clone/경로 (선택)" value={localPath} className="w-72 min-w-0 flex-1"
              onChange={(e) => setLocalPath(e.target.value)} />
       <Button onClick={submit}><Plus /> 등록</Button>
       {err && <StatusLine tone="error" inline>{err}</StatusLine>}

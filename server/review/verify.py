@@ -29,6 +29,7 @@ class VerifyContext:
     head_sha: str
     pr_number: int
     harness: object
+    repo_full_name: str = ""  # local_path 없을 때 온디맨드 clone 대상
 
 
 def parse_verdict(raw: str) -> Verdict:
@@ -68,15 +69,23 @@ def _pick_verifier(by_vendor: dict, author_vendor: str):
     return by_vendor.get(author_vendor)
 
 
-def make_verifier(adapters, worktree):
+def make_verifier(adapters, worktree, clone=None):
     """gh_deps 배선용 실 검증기. 리뷰 블록과 독립된 자체 worktree/runtime을 열어
     고위험 SINGLE finding을 다른 벤더로 반박 검증한다. 실패는 confirmed로 degrade
-    (검증이 리뷰 결과를 절대 삭제하지 않는다)."""
+    (검증이 리뷰 결과를 절대 삭제하지 않는다). local_path 없으면 clone으로 온디맨드."""
+    from server.review.worktree import checkout
 
     async def verify(targets, ctx: VerifyContext):
         by_vendor = {a.vendor: a for a in adapters}
         verdicts = []
-        with worktree(Path(ctx.repo_local_path), ctx.head_sha, ctx.pr_number) as wt:
+        with checkout(
+            worktree,
+            clone,
+            local_path=ctx.repo_local_path,
+            full_name=ctx.repo_full_name,
+            sha=ctx.head_sha,
+            pr_number=ctx.pr_number,
+        ) as wt:
             with tempfile.TemporaryDirectory(prefix="almighty-vf-") as rt:
                 ctx.harness.prepare_runtime(runtime_dir=rt)
                 for m in targets:

@@ -88,13 +88,17 @@ class RepoIn(BaseModel):
 
 @app.post("/api/repos", status_code=201)
 def add_repo(body: RepoIn, conn=Depends(get_conn)):
-    # 전역 기본 effort를 신규 레포에 seed(레포별로 재정의 가능). 이후 리뷰가
-    # repo.default_effort를 codex reasoning effort로 사용하므로 전역값이 실제로 작동.
+    # 레포별·벤더별 모델/effort를 코드 기본값으로 seed(전역값 미사용, 이후 레포별 재정의).
+    # local_path는 선택 — 비우면 리뷰 시 gh로 PR 브랜치를 온디맨드 clone한다.
     rid = repo_repo.add(
         conn,
         full_name=body.full_name,
         local_path=body.local_path,
         default_effort=settings_repo.get(conn)["default_effort"],
+        claude_model=config.DEFAULT_REVIEW_MODEL,
+        claude_effort=config.DEFAULT_EFFORT,
+        codex_model=config.DEFAULT_CODEX_MODEL,
+        codex_effort=config.DEFAULT_EFFORT,
     )
     return dict(repo_repo.get(conn, rid))
 
@@ -173,6 +177,10 @@ class RepoPatch(BaseModel):
     enabled: int | None = None
     trigger_mode: str | None = None
     default_effort: str | None = None
+    claude_model: str | None = None
+    claude_effort: str | None = None
+    codex_model: str | None = None
+    codex_effort: str | None = None
     vendor_claude_on: int | None = None
     vendor_codex_on: int | None = None
     merge_enabled: int | None = None

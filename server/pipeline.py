@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from server import config
 from server.config import DEFAULT_EFFORT, CONTEXT_GATHER_TIMEOUT_SEC
 from server.repos import (
     finding_repo,
@@ -29,6 +30,7 @@ from server.context.base import ContextRequest, parse_changed_files, redact_secr
 from server.context.registry import _effective
 from server.review.runner import RunnerPool
 from server.review.verify import VerifyContext
+from server.review.worktree import checkout
 from server.seams import NoOpContextProvider
 
 
@@ -49,12 +51,28 @@ class PipelineDeps:
         [str, str], tuple
     ]  # (diff, model) -> (complexity, score, reason)
     repo_local_path: str
+    clone: Callable = None  # (full_name, dest)->None; local_path 없을 때 온디맨드 clone
     context: object = field(default_factory=NoOpContextProvider)
     pool: RunnerPool = None  # ★개정: 벤더 병렬 실행 세마포어(없으면 생성)
     gh_compare_diff: Callable = None  # (repo, base, head)->diff; None=증분 미지원
     verify: object = (
         None  # async (targets, VerifyContext) -> list[Verdict]; None=미배선
     )
+
+
+def _col(repo, key, default):
+    """sqlite3.Row에서 값을 읽되 NULL/'' 이면 default(레포별 미설정 → 코드 기본값)."""
+    v = repo[key] if key in repo.keys() else None
+    return v if v not in (None, "") else default
+
+
+def _apply_models(hp, repo) -> None:
+    """레포별·벤더별 모델/effort를 하네스에 적용(전역값 미사용). 미설정(NULL/'')이면
+    코드 기본값으로 폴백 — 레포마다 독립적으로 claude/codex 모델·effort를 지정한다."""
+    hp.model = _col(repo, "claude_model", config.DEFAULT_REVIEW_MODEL)
+    hp.effort = _col(repo, "claude_effort", DEFAULT_EFFORT)
+    hp.codex_model = _col(repo, "codex_model", config.DEFAULT_CODEX_MODEL)
+    hp.codex_effort = _col(repo, "codex_effort", DEFAULT_EFFORT)
 
 
 async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> int:
@@ -68,7 +86,7 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
         pr_id=pr_id,
         head_sha=pr["head_sha"],
         trigger=trigger,
-        effort=repo["default_effort"] or DEFAULT_EFFORT,
+        effort=_col(repo, "codex_effort", DEFAULT_EFFORT),
         merge_enabled=repo["merge_enabled"],
     )
     try:
@@ -83,10 +101,7 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
 
 async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     hp = HarnessProfile.load(repo["harness_name"])
-    # ★ 설정에서 고른 벤더별 모델로 하네스 기본값 덮어씀
-    hp.model = settings["review_model"]  # Claude
-    hp.codex_model = settings["codex_model"]  # Codex ("" = codex 자체 기본)
-    hp.effort = repo["default_effort"] or DEFAULT_EFFORT  # codex reasoning effort 구동
+    _apply_models(hp, repo)  # 레포별·벤더별 모델/effort(전역 미사용)
     prescreen_model = settings["prescreen_model"]
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
@@ -217,7 +232,14 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         )
         for i, c in enumerate(chunks)
     ]
-    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
+    with checkout(
+        deps.worktree,
+        deps.clone,
+        local_path=deps.repo_local_path,
+        full_name=repo["full_name"],
+        sha=pr["head_sha"],
+        pr_number=pr["number"],
+    ) as wt:
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
             vr_ids = {
@@ -380,9 +402,7 @@ async def _retry_failed_vendors(conn, *, run, pr, repo, settings, deps) -> None:
         return  # 재시도할 실패 벤더 없음(엔드포인트에서 거르지만 방어적)
 
     hp = HarnessProfile.load(repo["harness_name"])
-    hp.model = settings["review_model"]
-    hp.codex_model = settings["codex_model"]
-    hp.effort = repo["default_effort"] or DEFAULT_EFFORT
+    _apply_models(hp, repo)
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
     # 원 run이 본 것과 동일한 diff 기준선(base_sha면 증분, 없으면 full) + 저장된 컨텍스트 재사용.
@@ -406,7 +426,14 @@ async def _retry_failed_vendors(conn, *, run, pr, repo, settings, deps) -> None:
         for i, c in enumerate(chunks)
     ]
 
-    with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
+    with checkout(
+        deps.worktree,
+        deps.clone,
+        local_path=deps.repo_local_path,
+        full_name=repo["full_name"],
+        sha=pr["head_sha"],
+        pr_number=pr["number"],
+    ) as wt:
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)
             # 기존 실패 vendor_result 행 id만 확보(상태는 종료 후 갱신 — 크래시 시 'failed'로
@@ -537,6 +564,7 @@ async def _verify_singles(deps, merged, *, repo, pr, diff, harness) -> None:
         head_sha=pr["head_sha"],
         pr_number=pr["number"],
         harness=harness,
+        repo_full_name=repo["full_name"],
     )
     try:
         verdicts = await deps.verify(targets, ctx)

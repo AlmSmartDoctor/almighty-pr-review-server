@@ -132,6 +132,15 @@ class GhClient:
             for d in json.loads(out)
         ]
 
+    def clone(self, repo: str, dest: str) -> None:
+        """레포를 dest에 얕게(no-checkout, depth=1) clone. gh가 인증을 주입하므로
+        private 레포도 동작. worktree가 이후 PR head ref를 추가로 fetch해 체크아웃한다.
+        local_path 미설정 레포를 온디맨드로 리뷰하기 위한 소스(로컬 clone 의존 제거)."""
+        self._call(
+            ["gh", "repo", "clone", repo, dest, "--", "--no-checkout", "--depth=1"],
+            kind="clone",
+        )
+
     def diff(self, repo: str, number: int) -> str:
         return self._call(
             ["gh", "pr", "diff", str(number), "--repo", repo], kind="diff"

@@ -58,9 +58,10 @@ class HarnessProfile:
     codex_sandbox: str
     mcp: str
     model: str
-    effort: str
+    effort: str  # claude reasoning effort(--effort)
     prescreen_model: str
     codex_model: str  # "" = codex CLI 자체 기본 모델(--model 미전달)
+    codex_effort: str = ""  # codex reasoning effort(-c model_reasoning_effort)
 
     @classmethod
     def load(cls, name: str) -> "HarnessProfile":
@@ -77,6 +78,7 @@ class HarnessProfile:
             effort=cfg["effort"],
             prescreen_model=cfg.get("prescreen_model", "haiku"),
             codex_model=cfg.get("codex_model", ""),
+            codex_effort=cfg.get("codex_effort", cfg["effort"]),
         )
 
     # 인증에 필요한 env allowlist(키체인 접근 등). 정확한 목록은 Task 0.5 실증값.

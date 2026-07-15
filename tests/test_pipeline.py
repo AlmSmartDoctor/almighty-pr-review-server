@@ -70,6 +70,42 @@ def test_pipeline_persists_findings_both_vendors(db):
     assert pr_repo.get(db, pid)["last_reviewed_sha"] == "sha1"
 
 
+def test_pipeline_reviews_without_local_path_via_ondemand_clone(db):
+    """local_path 미설정 레포도 gh 온디맨드 clone으로 auto 리뷰가 완주한다(자동 리뷰 언블록)."""
+    rid = repo_repo.add(db, full_name="acme/api")  # local_path 없음
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=80,
+        title="t",
+        author="a",
+        head_sha="s80",
+        base_ref="main",
+        url="u",
+    )
+    cloned = {}
+
+    def clone(full_name, dest):
+        cloned["full_name"] = full_name
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        clone=clone,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path=None,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="auto", deps=deps))
+    assert cloned["full_name"] == "acme/api"  # 온디맨드 clone 호출됨
+    assert review_repo.get_run(db, run_id)["status"] == "done"
+    assert {f["vendor"] for f in finding_repo.list_for_run(db, run_id)} == {"claude"}
+
+
 def test_pipeline_records_step_durations(db):
     """prescreen·벤더 단계별 소요시간이 실측 저장된다(하드코딩 0/미기록 아님)."""
     import time as _time
@@ -977,21 +1013,55 @@ def test_incremental_on_by_default_uses_delta(db):
     assert review_repo.get_run(db, run_id)["base_sha"] == "base1"
 
 
-def test_pipeline_injects_repo_effort_into_harness_seen_by_adapter(db):
+def test_pipeline_injects_repo_vendor_model_effort_into_harness(db):
+    """레포별·벤더별 모델/effort가 각 벤더 어댑터가 보는 하네스에 반영된다(전역 미사용)."""
     rid, pid = _seed_pr(db, number=70, head_sha="s70")
-    repo_repo.update(db, rid, default_effort="high")
+    repo_repo.update(
+        db,
+        rid,
+        claude_model="opus",
+        claude_effort="xhigh",
+        codex_model="gpt-5.4",
+        codex_effort="high",
+    )
 
-    class EffortCapturingAdapter:
-        vendor = "codex"
-
-        def __init__(self):
-            self.effort = None
+    class HarnessCapturingAdapter:
+        def __init__(self, vendor):
+            self.vendor = vendor
+            self.hp = None
 
         async def review(self, *, harness, **kw):
-            self.effort = harness.effort
+            self.hp = harness
             return []
 
-    cap = EffortCapturingAdapter()
+    claude, codex = HarnessCapturingAdapter("claude"), HarnessCapturingAdapter("codex")
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[claude, codex],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert (claude.hp.model, claude.hp.effort) == ("opus", "xhigh")
+    assert (codex.hp.codex_model, codex.hp.codex_effort) == ("gpt-5.4", "high")
+
+
+def test_pipeline_falls_back_to_default_model_effort_when_repo_unset(db):
+    """레포에 모델/effort 미설정(NULL)이면 코드 기본값으로 폴백."""
+    _, pid = _seed_pr(db, number=76, head_sha="s76")
+
+    class HarnessCapturingAdapter:
+        vendor = "claude"
+
+        def __init__(self):
+            self.hp = None
+
+        async def review(self, *, harness, **kw):
+            self.hp = harness
+            return []
+
+    cap = HarnessCapturingAdapter()
     deps = PipelineDeps(
         gh_diff=lambda repo, n: "diff...",
         worktree=fake_worktree,
@@ -1000,7 +1070,7 @@ def test_pipeline_injects_repo_effort_into_harness_seen_by_adapter(db):
         repo_local_path="/tmp/acme-api",
     )
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
-    assert cap.effort == "high"
+    assert cap.hp.model == "sonnet" and cap.hp.effort == "medium"
 
 
 def test_prescreen_reused_across_reviews_of_identical_diff(db):
