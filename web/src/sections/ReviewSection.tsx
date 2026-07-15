@@ -52,6 +52,7 @@ type RunContext = {
   meta: {
     sources: { provider: string; status: string; chars: number; error: string | null }[];
     degraded?: boolean;
+    duration_ms?: number | null;
   } | null;
 };
 type PostPreview = { comments: { vendor: string; body: string }[] };
@@ -66,6 +67,8 @@ type PostHealth = {
 const SEV_LABEL: Record<string, string> = {
   critical: "CRITICAL", high: "HIGH", medium: "MEDIUM", low: "LOW",
 };
+
+const POLL_MS = 2500;  // 상세 페이지 실시간 폴링 주기
 
 const sevVariant = (s: string): BadgeVariant =>
   (["critical", "high", "medium", "low"].includes(s) ? (s as BadgeVariant) : "neutral");
@@ -141,6 +144,7 @@ export function ReviewSection(props: {
         loadContext={loadContext}
         loadPreview={loadPreview}
         loadPostHealth={props.loadPostHealth}
+        onRefresh={refresh}
         onBack={() => navigate("/reviews")}
       />
     );
@@ -384,13 +388,14 @@ function prCreatedLine(pr: Pr) {
   return author;
 }
 
-function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealth, onBack }: {
+function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealth, onRefresh, onBack }: {
   pr: Pr;
   load: (id: number) => Promise<Finding[]>;
   loadVendors?: (id: number) => Promise<VendorResult[]>;
   loadContext?: (id: number) => Promise<RunContext>;
   loadPreview?: (id: number) => Promise<PostPreview>;
   loadPostHealth?: (id: number) => Promise<PostHealth>;
+  onRefresh: () => Promise<void>;
   onBack: () => void;
 }) {
   const loadVR = loadVendors ?? api.runVendorResults;
@@ -405,6 +410,9 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   const [posting, setPosting] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [message, setMessage] = useState("");
+  // 트리거 직후 새 run이 아직 안 생긴 구간을 폴링으로 메우기 위해, 트리거 시점의 run_id를 기억.
+  // undefined = 대기 안 함(sentinel). null도 유효값(리뷰 이력 없던 PR).
+  const [awaitingBase, setAwaitingBase] = useState<number | null | undefined>(undefined);
   const runId = pr.run_id;
   const runDuration = formatDuration(pr.run_duration_ms);
   const prescreenDuration = formatDuration(pr.prescreen_duration_ms);
@@ -413,12 +421,20 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
     if (!runId) return Promise.resolve();
     return load(runId).then(setFindings).catch(() => setMessage("findings를 불러오지 못했습니다."));
   };
+  const reloadVendors = () => {
+    if (!runId) return;
+    loadVR(runId).then(setVendors).catch(() => setVendors([]));
+  };
+  const reloadContext = () => {
+    if (!runId) return;
+    loadCtx(runId).then(setContext).catch(() => setContext(null));
+  };
 
   useEffect(() => {
     if (!runId) return;
     reloadFindings();
-    loadVR(runId).then(setVendors).catch(() => setVendors([]));
-    loadCtx(runId).then(setContext).catch(() => setContext(null));
+    reloadVendors();
+    reloadContext();
     loadHealth(pr.id)
       .then(setPostHealth)
       .catch((e: unknown) => setPostHealth({
@@ -430,13 +446,41 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       }));
   }, [runId]);
 
+  // 리뷰 진행 중(큐 대기/실행 중)이거나 트리거 직후 새 run을 기다리는 동안 폴링해
+  // run 상태·단계별 소요시간·finding·벤더 결과를 새로고침 없이 실시간 갱신한다.
+  const inProgress = ["queued", "running"].includes(pr.run_status ?? "");
+  const awaitingNewRun = awaitingBase !== undefined && pr.run_id === awaitingBase;
+  const live = inProgress || awaitingNewRun;
+
+  useEffect(() => {
+    // 대기 해제: 새 run이 등장했거나(run_id 변경), 이미 진행 중이면(inProgress가
+    // 폴링을 이어감). inProgress 조건이 없으면 '실행 중 재트리거→같은 run 종료' 케이스에서
+    // awaitingBase가 영원히 run_id와 일치해 무한 폴링에 빠진다.
+    if (awaitingBase !== undefined && (pr.run_id !== awaitingBase || inProgress)) {
+      setAwaitingBase(undefined);
+    }
+  }, [pr.run_id, awaitingBase, inProgress]);
+
+  useEffect(() => {
+    if (!live) return;
+    const id = setInterval(() => {
+      onRefresh();
+      reloadFindings();
+      reloadVendors();
+      reloadContext();
+    }, POLL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, runId]);
+
   const ctxSources = context?.meta?.sources ?? [];
   const ctxPresent = Boolean(context?.text);
-  const ctxDesc = context?.meta?.degraded
+  const ctxBase = context?.meta?.degraded
     ? "컨텍스트 수집 실패 · 컨텍스트 없이 진행"
     : ctxSources.length > 0
       ? ctxSources.map((s) => `${s.provider}·${s.status}`).join(" · ")
       : "주입된 외부 컨텍스트 없음";
+  const ctxDesc = [ctxBase, formatDuration(context?.meta?.duration_ms)].filter(Boolean).join(" · ");
 
   const failed = vendors.filter((v) => v.status === "failed");
   const approved = findings.filter((f) => f.status === "approved" || f.status === "edited");
@@ -489,9 +533,16 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   const triggerReview = () => {
     setTriggering(true);
     setMessage("");
+    setAwaitingBase(pr.run_id);  // 이 run 이후 생길 새 run을 폴링으로 기다린다
     api.triggerReview(pr.id)
-      .then((res) => setMessage(`리뷰 잡을 큐에 넣었습니다. job ${res.job_id}`))
-      .catch(() => setMessage("리뷰 트리거에 실패했습니다."))
+      .then((res) => {
+        setMessage(`리뷰 잡을 큐에 넣었습니다. job ${res.job_id}`);
+        return onRefresh();
+      })
+      .catch(() => {
+        setAwaitingBase(undefined);
+        setMessage("리뷰 트리거에 실패했습니다.");
+      })
       .finally(() => setTriggering(false));
   };
 

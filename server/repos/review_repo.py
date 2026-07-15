@@ -59,8 +59,8 @@ def add_vendor_result(
 ) -> int:
     cur = conn.execute(
         """INSERT INTO vendor_result
-           (run_id, vendor, status, duration_ms, tokens, raw_path, error)
-           VALUES (?,?,?,?,?,?,?)""",
+           (run_id, vendor, status, duration_ms, tokens, raw_path, error, started_at)
+           VALUES (?,?,?,?,?,?,?, datetime('now'))""",
         (run_id, vendor, status, duration_ms, tokens, raw_path, error),
     )
     conn.commit()
@@ -74,8 +74,13 @@ def get_run(conn, run_id):
 def list_vendor_results(conn, run_id):
     # ★개정 (codex v6 [MEDIUM]): 부분 실패 벤더를 대시보드가 노출할 수 있게
     # run의 vendor_result 행을 반환(실패 벤더 배지 근거).
+    # running 벤더는 아직 duration_ms가 없으므로 서버가 경과시간을 실시간 계산해
+    # 반환한다(run_duration_ms와 동일 공식) → 상세 트레이스가 폴링만으로 틱업.
     return conn.execute(
-        "SELECT vendor, status, error, duration_ms FROM vendor_result "
-        "WHERE run_id=? ORDER BY vendor",
+        """SELECT vendor, status, error, started_at,
+                  CASE WHEN status='running' AND started_at IS NOT NULL
+                       THEN (strftime('%s','now') - strftime('%s', started_at)) * 1000
+                       ELSE duration_ms END AS duration_ms
+           FROM vendor_result WHERE run_id=? ORDER BY vendor""",
         (run_id,),
     ).fetchall()

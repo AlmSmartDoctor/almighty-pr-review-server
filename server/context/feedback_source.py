@@ -82,8 +82,8 @@ def feedback_stats(rows) -> dict:
     """사람 판단 finding 행들을 카테고리별 수용/수정/기각 집계 + 대표 예시로 구조화(순수 함수).
     /learn 웹 탭 표시용 — LLM 주입(summarize_feedback)과 달리 최소 결정 수 게이트 없이 있는 그대로."""
     categories = {}  # category -> {approved, edited, rejected}
-    rejected, edited = [], []  # [{category, claim}], 중복 제거·최근순
-    seen_rej, seen_ed = set(), set()
+    approved, rejected, edited = [], [], []  # [{category, claim}], 중복 제거·최근순
+    seen_app, seen_rej, seen_ed = set(), set(), set()
     total = 0
     for row in rows:
         cat = (row["category"] or "").strip() or "기타"
@@ -100,6 +100,9 @@ def feedback_stats(rows) -> dict:
             if claim and claim not in seen_ed and len(edited) < _MAX_EXAMPLES:
                 seen_ed.add(claim)
                 edited.append({"category": cat, "claim": claim})
+        elif claim and claim not in seen_app and len(approved) < _MAX_EXAMPLES:
+            seen_app.add(claim)
+            approved.append({"category": cat, "claim": claim})
     ordered = sorted(
         categories.items(),
         key=lambda kv: -(kv[1]["approved"] + kv[1]["edited"] + kv[1]["rejected"]),
@@ -107,6 +110,7 @@ def feedback_stats(rows) -> dict:
     return {
         "total": total,
         "categories": [{"category": cat, **counts} for cat, counts in ordered],
+        "approved_examples": approved,
         "rejected_examples": rejected,
         "edited_examples": edited,
     }

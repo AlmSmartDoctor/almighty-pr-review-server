@@ -34,6 +34,7 @@ type RepoFeedback = {
   repo: string;
   total: number;
   categories: CategoryStat[];
+  approved_examples: Example[];
   rejected_examples: Example[];
   edited_examples: Example[];
   recent_decisions: Decision[];
@@ -177,6 +178,14 @@ function RepoFeedbackView({ data }: { data: RepoFeedback }) {
         </CardContent>
       </Card>
 
+      {data.approved_examples.length > 0 && (
+        <ExampleCard
+          title="팀이 수용한 지적"
+          desc="이 레포에서 그대로 받아들인 지적"
+          tone="ok"
+          examples={data.approved_examples}
+        />
+      )}
       {data.rejected_examples.length > 0 && (
         <ExampleCard
           title="팀이 자주 기각한 지적"

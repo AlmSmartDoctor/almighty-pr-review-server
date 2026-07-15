@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
@@ -139,6 +139,53 @@ test("manual trigger is available from overview", async () => {
                  loadVendors: async () => [] });
   fireEvent.click(await screen.findByRole("button", { name: "수동 리뷰" }));
   expect(await screen.findByText(/job 42/)).toBeInTheDocument();
+});
+
+test("manual trigger from detail refreshes the overview without a reload", async () => {
+  let calls = 0;
+  renderReview({ loadPrs: async () => { calls++; return PRS; },
+                 loadFindings: async () => [],
+                 loadVendors: async () => [] });
+  fireEvent.click(await screen.findByText("fix null"));  // 상세 진입
+  const before = calls;
+  fireEvent.click(screen.getByRole("button", { name: "수동 리뷰" }));  // 상세의 수동 리뷰
+  expect(await screen.findByText(/job 42/)).toBeInTheDocument();
+  // 트리거 후 onRefresh로 오버뷰를 재조회 → 화면이 새로고침 없이 갱신됨
+  await waitFor(() => expect(calls).toBeGreaterThan(before));
+});
+
+test("detail polls the overview while a run is in progress", async () => {
+  vi.useFakeTimers();
+  try {
+    let calls = 0;
+    const running = [{ ...PRS[0], run_status: "running" }];
+    renderReview({ loadPrs: async () => { calls++; return running; },
+                   loadFindings: async () => [],
+                   loadVendors: async () => [] }, "/reviews/1");
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });  // 초기 로드
+    const afterInitial = calls;
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });  // > POLL_MS
+    expect(calls).toBeGreaterThan(afterInitial);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("detail does not poll a settled run", async () => {
+  vi.useFakeTimers();
+  try {
+    let calls = 0;
+    renderReview({ loadPrs: async () => { calls++; return PRS; },  // run_status: done
+                   loadFindings: async () => [],
+                   loadVendors: async () => [] }, "/reviews/1");
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText("전체 실행")).toBeInTheDocument();  // Detail이 실제 마운트됐는지 앵커
+    const afterInitial = calls;
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(calls).toBe(afterInitial);  // 완료된 run은 폴링 안 함(무한 폴링/낭비 방지)
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("detail route can be opened directly", async () => {

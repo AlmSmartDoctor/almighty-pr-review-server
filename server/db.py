@@ -176,10 +176,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # 반박 패스 결과(감사·트리아지) — finding당 verdict + 근거.
     _ensure_column(conn, "finding", "verify_status", "TEXT")
     _ensure_column(conn, "finding", "verify_rationale", "TEXT")
-    # 증분 리뷰 토글 — 전역 기본 + per-repo override(NULL=상속). 켜면 재리뷰가
+    # 벤더 리뷰 시작 시각 — running 중 상세 트레이스의 실시간 경과시간 계산용.
+    _ensure_column(conn, "vendor_result", "started_at", "TEXT")
+    # 증분 리뷰 토글 — 전역 기본 ON + per-repo override(NULL=상속). 켜면 재리뷰가
     # 직전 완료(done) 런 이후의 델타만 리뷰. review_run.base_sha=델타 기준 sha(NULL=전체).
     _ensure_column(
-        conn, "app_settings", "incremental_review_on", "INTEGER NOT NULL DEFAULT 0"
+        conn, "app_settings", "incremental_review_on", "INTEGER NOT NULL DEFAULT 1"
     )
     _ensure_column(conn, "repo", "incremental_review_on", "INTEGER")
     _ensure_column(conn, "review_run", "base_sha", "TEXT")

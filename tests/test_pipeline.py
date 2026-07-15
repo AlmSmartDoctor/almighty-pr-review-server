@@ -6,7 +6,7 @@ import pytest
 from server.models import Finding
 from server.pipeline import review_pr, PipelineDeps, PipelineError, _build_prompt
 from server.repos import repo_repo, pr_repo, finding_repo, review_repo
-from server.review.prescreen import MAX_INLINE_DIFF_CHARS, PRESCREEN_FALLBACK_REASON
+from server.review.prescreen import PRESCREEN_FALLBACK_REASON
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +64,60 @@ def test_pipeline_persists_findings_both_vendors(db):
     assert pr_repo.get(db, pid)["last_reviewed_sha"] == "sha1"
 
 
+def test_pipeline_records_step_durations(db):
+    """prescreen·벤더 단계별 소요시간이 실측 저장된다(하드코딩 0/미기록 아님)."""
+    import time as _time
+
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="sha1",
+        base_ref="main",
+        url="u",
+    )
+
+    def slow_prescreen(diff, model):
+        _time.sleep(0.02)
+        return ("complex", 0.9, "핵심 로직")
+
+    class SlowAdapter:
+        def __init__(self, vendor):
+            self.vendor = vendor
+
+        async def review(self, **kw):
+            await asyncio.sleep(0.02)
+            return [Finding(self.vendor, "a.py", 1, "high", "bug", "c", "r", 0.8)]
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[SlowAdapter("claude"), SlowAdapter("codex")],
+        prescreen=slow_prescreen,
+        repo_local_path="/tmp/acme-api",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    ps = db.execute(
+        "SELECT duration_ms FROM pre_screen WHERE pr_id=? ORDER BY id DESC LIMIT 1",
+        (pid,),
+    ).fetchone()
+    assert ps["duration_ms"] is not None and ps["duration_ms"] > 0
+
+    vrs = review_repo.list_vendor_results(db, run_id)
+    assert all(v["status"] == "done" for v in vrs)
+    assert all(v["duration_ms"] is not None and v["duration_ms"] > 0 for v in vrs)
+
+    # 외부 컨텍스트 단계 소요시간도 감사에 기록(트레이스 표시용)
+    import json
+
+    meta = json.loads(review_repo.get_run(db, run_id)["context_meta"])
+    assert meta["duration_ms"] is not None and meta["duration_ms"] >= 0
+
+
 def test_pipeline_skips_on_trivial_prescreen(db):
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(
@@ -89,7 +143,14 @@ def test_pipeline_skips_on_trivial_prescreen(db):
     assert finding_repo.list_for_run(db, run_id) == []
 
 
-def test_pipeline_cancels_too_large_diff_before_vendor_review(db):
+def _diff_block(path: str) -> str:
+    return f"diff --git a/{path} b/{path}\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+def test_pipeline_chunks_large_diff_and_reviews_each_chunk(db, monkeypatch):
+    """예산 초과 diff는 통째 취소 대신 파일 경계 청크로 나눠 벤더가 각 청크를 리뷰·집계한다."""
+    from server.review.diff_filter import chunk_by_budget
+
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(
         db,
@@ -98,6 +159,56 @@ def test_pipeline_cancels_too_large_diff_before_vendor_review(db):
         title="big",
         author="a",
         head_sha="bigsha",
+        base_ref="main",
+        url="u",
+    )
+
+    diff = _diff_block("a.py") + _diff_block("b.py") + _diff_block("c.py")
+    budget = len(_diff_block("a.py")) + 1  # 블록 하나만 겨우 → 파일당 한 청크
+    monkeypatch.setattr("server.pipeline.MAX_INLINE_DIFF_CHARS", budget)
+    expected = len(chunk_by_budget(diff, budget))
+    assert expected == 3
+
+    class CountingAdapter:
+        def __init__(self, vendor):
+            self.vendor = vendor
+            self.calls = 0
+
+        async def review(self, *, prompt, **kw):
+            self.calls += 1
+            return [
+                Finding(
+                    self.vendor, f"f{self.calls}.py", 1, "high", "bug", "c", "r", 0.8
+                )
+            ]
+
+    cap = CountingAdapter("claude")
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[cap],
+        prescreen=lambda diff, model: ("complex", 1.0, "big"),
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    assert cap.calls == expected  # 청크마다 한 번씩 호출
+    assert review_repo.get_run(db, run_id)["status"] == "done"
+    assert len(finding_repo.list_for_run(db, run_id)) == expected  # 청크별 finding 집계
+    vrs = review_repo.list_vendor_results(db, run_id)
+    assert all(v["status"] == "done" for v in vrs)
+
+
+def test_pipeline_cancels_when_only_noise_files_changed(db):
+    """노이즈(lockfile 등)만 바뀐 PR → 필터 후 빈 diff → 벤더 호출 없이 canceled."""
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=14,
+        title="lock",
+        author="a",
+        head_sha="locksha",
         base_ref="main",
         url="u",
     )
@@ -113,19 +224,48 @@ def test_pipeline_cancels_too_large_diff_before_vendor_review(db):
         async def review(self, **kw):
             raise AssertionError("adapter should not be called")
 
+    noise = _diff_block("package-lock.json") + _diff_block("yarn.lock")
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "x" * (MAX_INLINE_DIFF_CHARS + 1),
+        gh_diff=lambda repo, n: noise,
         worktree=blocked_worktree,
         adapters=[BlockedAdapter()],
-        prescreen=lambda diff, model: ("complex", 1.0, "diff too large"),
+        prescreen=lambda diff, model: (_ for _ in ()).throw(
+            AssertionError("prescreen should not run on empty diff")
+        ),
         repo_local_path="/tmp/x",
     )
-
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     run = review_repo.get_run(db, run_id)
     assert run["status"] == "canceled"
-    assert "diff too large" in run["error"]
+    assert "리뷰할 변경이 없습니다" in run["error"]
     assert review_repo.list_vendor_results(db, run_id) == []
+
+
+def test_pipeline_filters_noise_keeps_real_files(db):
+    """노이즈+실파일 혼합 diff → 프롬프트엔 실파일만 인라인된다."""
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=15,
+        title="mix",
+        author="a",
+        head_sha="mixsha",
+        base_ref="main",
+        url="u",
+    )
+    diff = _diff_block("src/real.py") + _diff_block("package-lock.json")
+    cap = PromptCapturingAdapter()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[cap],
+        prescreen=lambda diff, model: ("complex", 0.9, "x"),
+        repo_local_path="/tmp/x",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert "src/real.py" in cap.prompt
+    assert "package-lock.json" not in cap.prompt
 
 
 def test_pipeline_fails_run_when_all_vendors_fail(db):
@@ -797,18 +937,38 @@ def test_incremental_compare_error_degrades_to_full(db):
     assert review_repo.get_run(db, run_id)["base_sha"] is None
 
 
-def test_incremental_off_by_default_uses_full_even_with_prior_run(db):
+def test_incremental_off_override_uses_full_even_with_prior_run(db):
     from server.repos import review_repo
 
-    _, pid = _seed_pr(db, number=64, head_sha="head2")  # incremental 미설정=off
+    rid, pid = _seed_pr(db, number=64, head_sha="head2")
+    repo_repo.update(
+        db, rid, incremental_review_on=0
+    )  # per-repo 명시 off(전역 상속 무시)
     _prior_done_run(db, pid, "base1")
+    calls = []
     cap = PromptCapturingAdapter()
     deps = _incremental_deps(
-        cap, compare=lambda *a: (_ for _ in ()).throw(AssertionError("불필요 호출"))
+        cap, compare=lambda repo, base, head: calls.append((base, head)) or "DELTA"
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert calls == []  # off면 compare 자체를 호출하지 않음(degrade 아님)
     assert "FULL-DIFF" in cap.prompt
     assert review_repo.get_run(db, run_id)["base_sha"] is None
+
+
+def test_incremental_on_by_default_uses_delta(db):
+    """전역 기본 ON — repo override 없이도 직전 완료 런 이후 델타를 리뷰한다."""
+    from server.repos import review_repo
+
+    _, pid = _seed_pr(
+        db, number=65, head_sha="head2"
+    )  # incremental override 미설정=상속
+    _prior_done_run(db, pid, "base1")
+    cap = PromptCapturingAdapter()
+    deps = _incremental_deps(cap, compare=lambda repo, base, head: "DELTA-DIFF")
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert "DELTA-DIFF" in cap.prompt and "FULL-DIFF" not in cap.prompt
+    assert review_repo.get_run(db, run_id)["base_sha"] == "base1"
 
 
 def test_pipeline_injects_repo_effort_into_harness_seen_by_adapter(db):

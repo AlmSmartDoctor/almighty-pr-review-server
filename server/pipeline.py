@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -20,8 +21,8 @@ from server.review.prescreen import (
     MAX_INLINE_DIFF_CHARS,
     PRESCREEN_FALLBACK_REASON,
     PreScreenResult,
-    diff_too_large_reason,
 )
+from server.review.diff_filter import chunk_by_budget, filter_reviewable
 from server.context.base import ContextRequest, parse_changed_files, redact_secrets
 from server.context.registry import _effective
 from server.review.runner import RunnerPool
@@ -92,10 +93,23 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     diff = await _resolve_diff(
         conn, run_id=run_id, deps=deps, repo=repo, pr=pr, settings=settings
     )
+    # 노이즈(lock/generated/vendored/minified/snapshot) 제외 → 크기·시그널 개선.
+    # parse_changed_files·prescreen·리뷰 모두 걸러진 diff를 본다.
+    diff = filter_reviewable(diff)
+    if not diff.strip():  # 노이즈만 바뀐 PR → 리뷰할 게 없음(prescreen CLI 낭비 방지)
+        review_repo.finish_run(
+            conn,
+            run_id,
+            "canceled",
+            error="리뷰할 변경이 없습니다(노이즈 파일만 변경).",
+        )
+        pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])  # 재큐 루프 방지
+        return
 
     # 2. Pre-screen — 같은 (diff 내용, model) 직전 결과가 있으면 CLI 호출 재사용
     # (retry·동일 sha 재리뷰의 중복 haiku 호출 절약; 벤더 리뷰는 그대로 재실행).
     diff_hash = hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()
+    t0 = time.monotonic()
     reused = prescreen_repo.find_reusable(conn, pr["id"], diff_hash, prescreen_model)
     if reused is not None:
         complexity, score, reason = (
@@ -107,6 +121,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         complexity, score, reason = await asyncio.to_thread(
             deps.prescreen, diff, prescreen_model
         )
+    prescreen_ms = int((time.monotonic() - t0) * 1000)
     ps = PreScreenResult(complexity, score, reason)
     decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
     prescreen_repo.add(
@@ -117,7 +132,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         complexity=complexity,
         score=score,
         reason=reason,
-        duration_ms=0,
+        duration_ms=prescreen_ms,
         decided=decided,
         # 파싱 실패 fallback은 비결정적 → 캐시 미등록(다음 런이 CLI 재시도해 self-heal).
         diff_hash=None if reason == PRESCREEN_FALLBACK_REASON else diff_hash,
@@ -125,11 +140,6 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     if decided == "skip" and repo["trigger_mode"] == "auto":
         review_repo.finish_run(conn, run_id, "canceled")
         pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
-        return
-    if len(diff) > MAX_INLINE_DIFF_CHARS:
-        review_repo.finish_run(
-            conn, run_id, "canceled", error=diff_too_large_reason(diff)
-        )
         return
 
     # ★개정 (codex v5 [LOW]): enabled 벤더가 0개면 리뷰할 게 없다 → worktree도
@@ -154,6 +164,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     )
     degraded = False
     context_results = []
+    t_ctx = time.monotonic()
     try:
         context_text = await asyncio.wait_for(
             asyncio.to_thread(deps.context.gather, req=req),
@@ -167,9 +178,11 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
             f"[pipeline] context gather degraded: "
             f"{redact_secrets(f'{type(e).__name__}: {e}')}"
         )
+    context_ms = int((time.monotonic() - t_ctx) * 1000)
 
     # 런당 외부 컨텍스트 감사 저장. error는 meta 조립에서도 redact(defense-in-depth, B-INV-4).
     context_meta = {
+        "duration_ms": context_ms,
         "sources": [
             {
                 "provider": r.provider,
@@ -178,14 +191,28 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
                 "error": redact_secrets(r.error) if r.error else None,
             }
             for r in context_results
-        ]
+        ],
     }
     if degraded:
         context_meta["degraded"] = True
     review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
 
-    # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리
-    prompt = _build_prompt(pr, diff, context_text)
+    # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리.
+    # 예산 초과 diff는 파일 경계 청크로 나눠 벤더당 순차 리뷰 후 finding 합침(통째 취소 대신 스케일).
+    chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
+    if len(chunks) > 1:
+        print(f"[pipeline] diff chunked into {len(chunks)} parts ({len(diff)} chars)")
+    prompts = [
+        _build_prompt(
+            pr,
+            c,
+            context_text,
+            chunk_note=(
+                f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if len(chunks) > 1 else ""
+            ),
+        )
+        for i, c in enumerate(chunks)
+    ]
     with deps.worktree(Path(deps.repo_local_path), pr["head_sha"], pr["number"]) as wt:
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
@@ -197,32 +224,43 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
             }
 
             async def _run_one(ad):
-                async def job():
-                    return await ad.review(
-                        prompt=prompt, workdir=Path(str(wt)), harness=hp, runtime_dir=rt
-                    )
+                t0 = time.monotonic()
+                collected, errs = [], []
+                for p in prompts:
 
-                try:
-                    fs = await pool.run(job)
-                    return ad.vendor, fs, None
-                except Exception as e:  # 한 벤더 실패가 다른 벤더를 막지 않음
-                    return ad.vendor, [], str(e)
+                    async def job(p=p):
+                        return await ad.review(
+                            prompt=p, workdir=Path(str(wt)), harness=hp, runtime_dir=rt
+                        )
+
+                    try:
+                        collected.extend(await pool.run(job))
+                    except Exception as e:  # 청크 하나 실패가 다른 청크를 막지 않음
+                        errs.append(str(e))
+                dur = int((time.monotonic() - t0) * 1000)
+                if errs and len(errs) == len(prompts):  # 전 청크 실패 → 벤더 실패
+                    return ad.vendor, [], "; ".join(errs), dur
+                return ad.vendor, collected, None, dur  # 부분 성공 = 성공(수집분 사용)
 
             results = await asyncio.gather(*(_run_one(a) for a in adapters))
 
     all_findings = []  # (vendor_result_id, finding)
     succeeded, errors = 0, []
-    for vendor, fs, err in results:
+    for vendor, fs, err, dur in results:
         vr_id = vr_ids[vendor]
         if err is not None:
             errors.append(f"{vendor}: {err}")
             conn.execute(
-                "UPDATE vendor_result SET status='failed', error=? WHERE id=?",
-                (err, vr_id),
+                "UPDATE vendor_result SET status='failed', error=?, duration_ms=? "
+                "WHERE id=?",
+                (err, dur, vr_id),
             )
         else:
             succeeded += 1
-            conn.execute("UPDATE vendor_result SET status='done' WHERE id=?", (vr_id,))
+            conn.execute(
+                "UPDATE vendor_result SET status='done', duration_ms=? WHERE id=?",
+                (dur, vr_id),
+            )
             for f in fs:
                 f.vendor_result_id = vr_id  # ★개정: id() 매핑 제거, 명시 부착
                 all_findings.append((vr_id, f))
@@ -357,10 +395,11 @@ async def _verify_singles(deps, merged, *, repo, pr, diff, harness) -> None:
             m.finding.confidence = round(m.finding.confidence * 0.5, 3)
 
 
-def _build_prompt(pr, diff, context_text: str) -> str:
+def _build_prompt(pr, diff, context_text: str, chunk_note: str = "") -> str:
     ctx_block = f"\n\n## 외부 컨텍스트\n{context_text}" if context_text else ""
+    note = f"\n{chunk_note}" if chunk_note else ""
     return (
         f"# PR #{pr['number']}: {pr['title']}\n작성자: {pr['author']}\n"
-        f"{ctx_block}\n\n## Diff\n```diff\n{diff}\n```\n"
+        f"{ctx_block}\n\n## Diff{note}\n```diff\n{diff}\n```\n"
         "필요하면 레포를 읽어 맥락을 확인하라(수정 금지)."
     )

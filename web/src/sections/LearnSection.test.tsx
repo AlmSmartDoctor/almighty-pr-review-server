@@ -10,6 +10,7 @@ const feedback = [
       { category: "style", approved: 0, edited: 1, rejected: 3 },
       { category: "correctness", approved: 1, edited: 0, rejected: 0 },
     ],
+    approved_examples: [{ category: "correctness", claim: "승인된 실제 버그" }],
     rejected_examples: [{ category: "style", claim: "변수명 개선" }],
     edited_examples: [{ category: "style", claim: "주석 문구 다듬음" }],
     recent_decisions: [
@@ -40,6 +41,7 @@ const feedback = [
     repo: "acme/web",
     total: 2,
     categories: [{ category: "perf", approved: 2, edited: 0, rejected: 0 }],
+    approved_examples: [{ category: "perf", claim: "N+1 개선 수용" }],
     rejected_examples: [],
     edited_examples: [],
     recent_decisions: [],
@@ -55,6 +57,13 @@ test("shows first repo tallies and examples on load", async () => {
   const table = screen.getByRole("table");
   expect(within(table).getByText("correctness")).toBeInTheDocument();
   expect(within(table).getByText("style")).toBeInTheDocument();
+});
+
+test("surfaces approved findings so problems are visible at a glance", async () => {
+  render(<LearnSection load={async () => feedback} />);
+  // 집계 표 숫자뿐 아니라 실제 승인된 지적(claim)이 카드로 바로 노출
+  expect(await screen.findByText("팀이 수용한 지적")).toBeInTheDocument();
+  expect(screen.getByText("승인된 실제 버그")).toBeInTheDocument();
 });
 
 test("shows recent decision activity timeline", async () => {

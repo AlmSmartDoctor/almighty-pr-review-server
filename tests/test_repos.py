@@ -410,6 +410,36 @@ def test_prescreen_find_reusable_matches_diff_hash_and_model(db):
     assert prescreen_repo.find_reusable(db, 999, "h1", "haiku") is None  # 다른 PR
 
 
+def test_list_vendor_results_computes_live_elapsed_for_running(db):
+    """running 벤더는 저장된 duration이 없으므로 서버가 경과시간을 실시간 계산해 반환."""
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=8,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        db, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    vr = review_repo.add_vendor_result(
+        db, run_id=run_id, vendor="claude", status="running"
+    )
+    db.execute(
+        "UPDATE vendor_result SET started_at=datetime('now','-5 seconds') WHERE id=?",
+        (vr,),
+    )
+    db.commit()
+
+    row = review_repo.list_vendor_results(db, run_id)[0]
+    assert row["status"] == "running"
+    assert row["duration_ms"] >= 4000  # ~5초 경과를 실시간 계산(초 granularity 여유)
+
+
 def test_finding_persists_verify_columns(db):
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(

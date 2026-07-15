@@ -994,6 +994,10 @@ def test_feedback_stats_tallies_categories_and_examples():
     assert out["categories"][0]["category"] == "style"  # 결정 많은 카테고리 우선
     assert {e["claim"] for e in out["rejected_examples"]} == {"nit A", "nit B"}
     assert out["edited_examples"] == [{"category": "style", "claim": "원 지적"}]
+    # approved 지적도 예시로 노출 — 집계 표만 뜨고 실제 claim이 안 보이던 문제 방지
+    assert out["approved_examples"] == [
+        {"category": "correctness", "claim": "real bug"}
+    ]
 
 
 def test_feedback_stats_no_min_floor_and_empty():
@@ -1005,6 +1009,7 @@ def test_feedback_stats_no_min_floor_and_empty():
     assert feedback_stats([]) == {
         "total": 0,
         "categories": [],
+        "approved_examples": [],
         "rejected_examples": [],
         "edited_examples": [],
     }
