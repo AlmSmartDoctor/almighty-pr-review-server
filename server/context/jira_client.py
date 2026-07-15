@@ -4,7 +4,9 @@ from urllib.parse import urlparse
 
 from server import config
 
-_HTTP_TIMEOUT_SEC = 10
+# gather 총예산(CONTEXT_GATHER_TIMEOUT_SEC=15s)의 일부만 쓰도록 낮게 유지 —
+# Jira 한 요청이 전체 컨텍스트 수집을 굶겨 로컬 소스까지 버려지지 않게 한다(provider의 총예산과 병행).
+_HTTP_TIMEOUT_SEC = 5
 _MAX_RESPONSE_BYTES = 1_048_576
 _KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+")
 _AC_FIELD_RE = re.compile(r"customfield_\d+")

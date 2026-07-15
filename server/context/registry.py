@@ -6,6 +6,16 @@ from server.context.composite import CompositeContextProvider
 from server.context.static_provider import StaticContextProvider
 
 
+# 컨텍스트 렌더/잘림 우선순위(작을수록 먼저 렌더 → 총량 상한 초과 시 나중에 잘림).
+_CONTEXT_ORDER = {
+    "team_feedback": 0,
+    "db_schema": 1,
+    "jira": 2,
+    "static": 3,
+    "graphify": 4,
+}
+
+
 def _effective(repo, settings, key):
     """per-repo 값 우선(NULL=global 상속), 양측 다 없으면 0(off). (D3)"""
     v = repo[key] if key in repo.keys() else None
@@ -106,11 +116,7 @@ def build_context_provider(repo, settings):
         try:
             from server.context.graphify_provider import GraphifyProvider
             from server.context.graphify_source import file_project_source
-            from server.context.server_data_source import (
-                activity_source,
-                open_findings_source,
-                open_prs_source,
-            )
+            from server.context.server_data_source import open_findings_source
 
             graphify_path = _ref(repo, "graphify_path")
             doc_source = (
@@ -118,13 +124,10 @@ def build_context_provider(repo, settings):
                 if graphify_path
                 else None
             )
-            # 프로젝트 문서(있으면) + 다른 열린 PR의 미결 지적 + 오픈 PR 목록 + 리뷰 활동 현황.
-            source = _compose_sources(
-                doc_source,
-                open_findings_source(),
-                open_prs_source(),
-                activity_source(),
-            )
+            # 프로젝트 문서(있으면) + 다른 열린 PR의 미결 지적(교차 PR 일관성)만 주입.
+            # open-PR 목록·리뷰 활동 통계는 결함 탐지 신호가 아니라 프롬프트를 희석하므로
+            # LLM 경로에서 제외(사람용 /learn 웹 탭에는 그대로 노출).
+            source = _compose_sources(doc_source, open_findings_source())
             providers.append(GraphifyProvider(graph_source=source))
         except Exception as e:  # never raise
             print(f"[context] graphify provider skipped: {redact_secrets(str(e))}")
@@ -140,4 +143,8 @@ def build_context_provider(repo, settings):
             )
         except Exception as e:  # never raise
             print(f"[context] feedback provider skipped: {redact_secrets(str(e))}")
+    # 렌더 순서 = 총량 상한(20K) 초과 시 꼬리부터 잘림. 결함 탐지에 가장 유용하고 작은
+    # 신호(팀 피드백 보정·diff 선택 스키마)를 앞에, 크고 정적인 문서(graphify)를 뒤에 둬
+    # 잘림이 발생해도 고가치 신호가 살아남게 한다.
+    providers.sort(key=lambda p: _CONTEXT_ORDER.get(getattr(p, "name", ""), 99))
     return CompositeContextProvider(providers)

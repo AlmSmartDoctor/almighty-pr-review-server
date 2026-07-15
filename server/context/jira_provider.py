@@ -1,9 +1,14 @@
+import time
+
 from server.context.base import ContextRequest, ContextResult
 from server.context.jira_keys import extract_keys
 
 _MAX_ISSUES = (
     5  # 아웃바운드 호출 상한(B-INV-5/8 정신): PR이 많은 키를 참조해도 폭주 방지
 )
+# Jira 총 wall-clock 예산 — gather 총예산(15s) 아래로 묶어, 느린 Jira가 all-or-nothing
+# 타임아웃을 유발해 이미 준비된 로컬 컨텍스트까지 폐기시키는 것을 방지(부분 결과 반환).
+_TOTAL_BUDGET_SEC = 8
 
 
 class JiraContextProvider:
@@ -29,7 +34,10 @@ class JiraContextProvider:
         if not keys:
             return ContextResult(provider=self.name, status="empty", text="")
         blocks = []
+        deadline = time.monotonic() + _TOTAL_BUDGET_SEC
         for key in keys[:_MAX_ISSUES]:
+            if time.monotonic() > deadline:  # 예산 초과 → 남은 키 스킵(부분 결과)
+                break
             try:
                 issue = self._client.get_issue(key)
                 body = issue.get("description") or ""

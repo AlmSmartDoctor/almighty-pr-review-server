@@ -21,13 +21,44 @@ def test_parse_extracts_fenced_json():
     assert fs[0].severity == "high"
 
 
-def test_parse_rejects_bad_severity():
-    bad = (
+def test_parse_coerces_bad_severity_and_category():
+    """모르는 severity·category는 폐기가 아니라 안전값으로 coerce(관대 파싱)."""
+    raw = (
         '```json\n{"findings":[{"file":"a","line":1,"severity":"WAT",'
-        '"category":"bug","claim":"c","rationale":"r","confidence":0.5}]}\n```'
+        '"category":"nonsense","claim":"c","rationale":"r","confidence":0.5}]}\n```'
     )
-    with pytest.raises(SchemaError):
-        parse_findings(bad, vendor="codex")
+    fs = parse_findings(raw, vendor="codex")
+    assert len(fs) == 1
+    assert fs[0].severity == "medium"
+    assert fs[0].category == "other"
+
+
+def test_parse_keeps_good_findings_when_one_is_malformed():
+    """한 항목의 오류가 나머지 유효 finding을 통째로 폐기하지 않는다(#1 회귀 가드)."""
+    raw = (
+        '```json\n{"findings":['
+        '{"file":"a.py","line":"NaN","severity":"high","category":"bug",'
+        '"claim":"c1","rationale":"r1","confidence":"bad"},'
+        '{"file":"b.py","line":2,"severity":"low","category":"style",'
+        '"claim":"c2","rationale":"r2","confidence":0.3}]}\n```'
+    )
+    fs = parse_findings(raw, vendor="claude")
+    assert [f.file for f in fs] == ["a.py", "b.py"]
+    assert fs[0].line == 0  # "NaN" → 기본 0으로 coerce
+    assert fs[0].confidence == 0.5  # "bad" → 기본 0.5로 coerce
+
+
+def test_parse_coerces_non_finite_line_and_confidence():
+    """json은 Infinity/1e999를 float('inf')로 파싱 → int(inf)는 OverflowError.
+    이게 벤더 findings 블록 전체를 폐기하지 않고 기본값으로 coerce되어야 한다(#1 회귀 가드)."""
+    raw = (
+        '```json\n{"findings":[{"file":"a.py","line":1e999,"severity":"high",'
+        '"category":"bug","claim":"c","rationale":"r","confidence":Infinity}]}\n```'
+    )
+    fs = parse_findings(raw, vendor="claude")
+    assert len(fs) == 1
+    assert fs[0].line == 0
+    assert fs[0].confidence == 0.5
 
 
 def test_parse_no_json_raises():

@@ -1437,7 +1437,9 @@ def test_open_prs_source_empty_when_none(tmp_path):
     assert src(_req(repo="acme/api", pr_number=9)) == ""
 
 
-def test_registry_graphify_composes_open_prs(tmp_path, monkeypatch):
+def test_registry_graphify_excludes_open_pr_list(tmp_path, monkeypatch):
+    """오픈 PR 목록은 결함 탐지 신호가 아니라 프롬프트를 희석하므로 LLM 경로에서 제외.
+    (사람용 /learn 웹 탭에는 그대로 노출 — open_prs_source 유닛 테스트가 별도 커버)."""
     from server import config
     from server.context.graphify_provider import GraphifyProvider
     from server.context.registry import build_context_provider
@@ -1446,11 +1448,11 @@ def test_registry_graphify_composes_open_prs(tmp_path, monkeypatch):
     _seed_pr(conn, "acme/api", 5, title="feat: 검색 개선", author="jhkim")
     conn.close()
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
-    # graphify_path·오픈 finding 없이 오픈 PR 목록만으로도 graphify가 산출(스택 검증)
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
     gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
     r = gp.fetch(_req(repo="acme/api", pr_number=9))
-    assert r.status == "ok" and "feat: 검색 개선" in r.text
+    # 오픈 finding·문서 없음 → 남는 소스 없음 → empty, 오픈 PR 제목 미주입
+    assert r.status == "empty" and "feat: 검색 개선" not in r.text
 
 
 # ── graphify 애그리게이터: 리뷰 활동 현황(처리량·최근성·실패 이력) ──────────────
@@ -1591,7 +1593,9 @@ def test_activity_source_empty_when_only_canceled_or_running(tmp_path):
     assert src(_req(repo="acme/api", pr_number=99)) == ""
 
 
-def test_registry_graphify_composes_activity(tmp_path, monkeypatch):
+def test_registry_graphify_excludes_activity(tmp_path, monkeypatch):
+    """리뷰 활동 통계는 결함 탐지 신호가 아니라 프롬프트를 희석하므로 LLM 경로에서 제외.
+    (사람용 /learn 웹 탭에는 그대로 노출 — activity_source 유닛 테스트가 별도 커버)."""
     from server import config
     from server.context.graphify_provider import GraphifyProvider
     from server.context.registry import build_context_provider
@@ -1602,9 +1606,9 @@ def test_registry_graphify_composes_activity(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
     gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
-    # 현재 PR=5 → open_findings·open_prs는 자기-제외로 "", 활동 소스만 산출
+    # 오픈 finding·문서 없음 → 남는 소스 없음 → empty, 활동 현황 미주입
     r = gp.fetch(_req(repo="acme/api", pr_number=5))
-    assert r.status == "ok" and "리뷰 활동 현황" in r.text
+    assert r.status == "empty" and "리뷰 활동 현황" not in r.text
 
 
 def test_db_feedback_source_excludes_pending(tmp_path):
