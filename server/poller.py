@@ -39,6 +39,7 @@ def poll_once(conn, *, list_prs, enqueue) -> None:
                 created_at=pr.created_at,
                 head_ref=pr.head_ref,
                 body=pr.body,
+                is_draft=pr.is_draft,
             )
             open_numbers.append(pr.number)
             if auto and has_vendor and pr_repo.needs_review(conn, pid):

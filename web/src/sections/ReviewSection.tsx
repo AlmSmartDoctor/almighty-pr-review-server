@@ -18,6 +18,7 @@ type Pr = {
   author?: string | null;
   created_at?: string | null;
   first_seen_at?: string | null;
+  is_draft?: number | boolean | null;
   prescreen: string | null;
   prescreen_duration_ms?: number | null;
   severity: string;
@@ -261,6 +262,7 @@ export function ReviewSection(props: {
               <div className="min-w-0">
                 <div className="mb-1.5 flex flex-wrap items-center gap-2">
                   <span className="font-mono text-[12px] font-bold text-muted-foreground">#{p.number}</span>
+                  {!!p.is_draft && <Badge variant="neutral">Draft</Badge>}
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); navigate(`/reviews/${p.id}`); }}

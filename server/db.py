@@ -126,6 +126,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "pull_request", "created_at", "TEXT")
     _ensure_column(conn, "pull_request", "head_ref", "TEXT")
     _ensure_column(conn, "pull_request", "body", "TEXT")
+    _ensure_column(conn, "pull_request", "is_draft", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(
         conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
     )

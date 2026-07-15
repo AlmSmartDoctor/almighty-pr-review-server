@@ -33,6 +33,7 @@ def test_list_open_prs_parses_json():
                 "createdAt": "2026-07-07T11:22:33Z",
                 "headRefName": "feature/PROJ-1",
                 "body": "Closes PROJ-1",
+                "isDraft": True,
             }
         ]
     )
@@ -49,8 +50,10 @@ def test_list_open_prs_parses_json():
     assert prs[0].created_at == "2026-07-07T11:22:33Z"
     assert prs[0].head_ref == "feature/PROJ-1"
     assert prs[0].body == "Closes PROJ-1"
+    assert prs[0].is_draft is True
     assert any("createdAt" in arg for arg in runner.calls[0][0])
     assert any("headRefName" in arg for arg in runner.calls[0][0])
+    assert any("isDraft" in arg for arg in runner.calls[0][0])
     assert any("body" in arg for arg in runner.calls[0][0])
     assert "--limit" in runner.calls[0][0]  # 재조정용 완전 오픈 셋 확보
 

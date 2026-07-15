@@ -359,3 +359,19 @@ test("post failure shows server detail", async () => {
   fireEvent.click(button);
   expect(await screen.findByText(/GitHub 권한이 부족합니다/)).toBeInTheDocument();
 });
+
+test("marks draft PRs with a Draft badge and omits it otherwise", async () => {
+  renderReview({
+    loadPrs: async () => [
+      { ...PRS[0], id: 2, number: 8, title: "wip feature", is_draft: 1 },
+    ],
+  });
+  expect(await screen.findByText("wip feature")).toBeInTheDocument();
+  expect(screen.getByText("Draft")).toBeInTheDocument();
+});
+
+test("non-draft PRs have no Draft badge", async () => {
+  renderReview({ loadPrs: async () => PRS });
+  expect(await screen.findByText("fix null")).toBeInTheDocument();
+  expect(screen.queryByText("Draft")).toBeNull();
+});

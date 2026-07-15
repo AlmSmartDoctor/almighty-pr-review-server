@@ -108,7 +108,7 @@ def list_repos(conn=Depends(get_conn)):
 def overview(conn=Depends(get_conn)):
     rows = conn.execute("""
       SELECT p.id, p.number, p.title, r.full_name AS repo,
-             p.author, p.created_at, p.first_seen_at,
+             p.author, p.created_at, p.first_seen_at, p.is_draft,
              (SELECT complexity FROM pre_screen ps WHERE ps.pr_id=p.id
                 ORDER BY ps.id DESC LIMIT 1) AS prescreen,
              (SELECT duration_ms FROM pre_screen ps WHERE ps.pr_id=p.id
@@ -138,7 +138,9 @@ def overview(conn=Depends(get_conn)):
              (SELECT error FROM review_run rr WHERE rr.pr_id=p.id
                 ORDER BY id DESC LIMIT 1) AS run_error
       FROM pull_request p JOIN repo r ON r.id=p.repo_id
-      WHERE p.state='open' ORDER BY p.updated_at DESC
+      WHERE p.state='open'
+      ORDER BY
+        COALESCE(datetime(p.created_at), datetime(p.first_seen_at)) DESC, p.id DESC
     """).fetchall()
     sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
     return [{**dict(x), "severity": sev.get(x["sev_rank"], "low")} for x in rows]
@@ -499,6 +501,7 @@ async def github_webhook(request: Request, conn=Depends(get_conn)):
         state=info["state"],
         head_ref=info["head_ref"],
         body=info["body"],
+        is_draft=info["is_draft"],
     )
     has_vendor = repo["vendor_claude_on"] or repo["vendor_codex_on"]
     if has_vendor and pr_repo.needs_review(conn, pid):

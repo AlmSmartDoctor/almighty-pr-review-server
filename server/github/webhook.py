@@ -53,4 +53,5 @@ def parse_pull_request_event(body: bytes):
         "url": pr.get("html_url") or "",
         "state": pr.get("state") or "open",
         "body": pr.get("body") or "",
+        "is_draft": bool(pr.get("draft", False)),
     }
