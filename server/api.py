@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from server import config
 from server.context import feedback_source
 from server.db import connect, init_schema
-from server.formatter import MARKER, build_comment
+from server.formatter import MARKER, build_comment, build_inline_comment
 from server.github.gh import GhClient, GitHubCliError
 from server.models import Finding
 from server.repos import (
@@ -21,6 +21,7 @@ from server.repos import (
     review_repo,
     settings_repo,
 )
+from server.review.diff_filter import commentable_lines
 from server.review.harness import (
     HarnessProfile,
     create_harness,
@@ -430,6 +431,7 @@ def _comments_to_post(conn, run_id: int):
             {
                 "vendor": vendor,
                 "body": build_comment(vendor=vendor, findings=findings),
+                "findings": findings,  # review 인라인 코멘트용(diff 라인에 붙임)
                 "new_ids": [f["id"] for f in pending if f["vendor"] == vendor],
                 "all_ids": [f["id"] for f in display if f["vendor"] == vendor],
             }
@@ -453,6 +455,29 @@ def post_health(pid: int, conn=Depends(get_conn), gh=Depends(get_gh)):
     return JSONResponse(status_code=_health_status_code(health), content=health)
 
 
+def _inline_comments(gh, repo_full: str, number: int, findings):
+    """diff에 매핑되는 finding만 review 인라인 코멘트로 변환. createReview는 diff 밖
+    라인이 하나라도 있으면 전체를 422로 거부하므로 유효 라인만 통과시킨다. diff 조회가
+    실패하면 인라인 없이 본문만으로 게시(게시 자체는 막지 않는다)."""
+    try:
+        diff = gh.diff(repo_full, number)
+    except GitHubCliError:
+        return []
+    valid = commentable_lines(diff)
+    return [
+        {"path": f.file, "line": f.line, "body": build_inline_comment(f)}
+        for f in findings
+        if f.line and f.line in valid.get(f.file, set())
+    ]
+
+
+def _create_review(gh, repo, pr, run, body: str, findings) -> dict:
+    comments = _inline_comments(gh, repo["full_name"], pr["number"], findings)
+    return gh.create_review(
+        repo["full_name"], pr["number"], run["head_sha"], body, comments
+    )
+
+
 @app.post("/api/runs/{run_id}/post")
 def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
     run = review_repo.get_run(conn, run_id)
@@ -468,23 +493,33 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
     for comment in _comments_to_post(conn, run_id):
         vendor = comment["vendor"]
         body = comment["body"]
-        # 진짜 update-or-create: 같은 PR·벤더의 기존 비대체 코멘트가 있으면 GitHub상
-        # in-place 수정, 없으면 새로 post → GitHub 화면에 중복이 남지 않음.
+        # update-or-create를 PR review 프리미티브로: 같은 PR·벤더의 기존 review가 있으면
+        # 본문만 PUT(pull_request_review.edited → PR 봇 무시 → 재게시 무알림), 없으면
+        # create(첫 게시 → 리뷰+인라인 → PR 봇 Slack 알림). 레거시 issue comment 행은
+        # review로 이어받지 못하므로 supersede하고 review를 새로 생성한다.
         prev = posted_repo.latest_for_pr_vendor(conn, pr_id=pr["id"], vendor=vendor)
+        reuse = (
+            prev is not None and prev["kind"] == "review" and prev["github_comment_id"]
+        )
         try:
-            if prev is not None and prev["github_comment_id"]:
+            if reuse:
                 try:
-                    res = gh.edit_comment(
-                        repo["full_name"], prev["github_comment_id"], body
+                    res = gh.update_review(
+                        repo["full_name"],
+                        pr["number"],
+                        prev["github_comment_id"],
+                        body,
                     )
                 except GitHubCliError as e:
                     if e.http_status != 404:
                         raise
-                    # GitHub에서 코멘트가 삭제됨 → 새로 생성으로 폴백(영구 실패 방지).
-                    res = gh.post_comment(repo["full_name"], pr["number"], body)
+                    # review가 GitHub에서 사라짐(dismiss/삭제) → 새로 생성 폴백.
+                    res = _create_review(gh, repo, pr, run, body, comment["findings"])
                 posted_repo.supersede(conn, prev["id"])
             else:
-                res = gh.post_comment(repo["full_name"], pr["number"], body)
+                res = _create_review(gh, repo, pr, run, body, comment["findings"])
+                if prev is not None:  # 레거시 issue comment 행 정리
+                    posted_repo.supersede(conn, prev["id"])
         except GitHubCliError as e:
             return JSONResponse(
                 status_code=502,
@@ -500,7 +535,6 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
                     }
                 },
             )
-        # ★개정 (codex v3 [LOW]): API JSON의 .id를 그대로 저장(URL 파싱 제거).
         posted_repo.add(
             conn,
             run_id=run_id,
@@ -511,6 +545,7 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
             body=body,
             head_sha=run["head_sha"],
             finding_ids=comment["all_ids"],
+            kind="review",
         )
         for fid in comment["new_ids"]:  # 이번에 새로 게시한 것만 posted 전환
             finding_repo.set_status(conn, fid, "posted")

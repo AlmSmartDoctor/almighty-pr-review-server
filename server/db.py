@@ -187,6 +187,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "repo", "incremental_review_on", "INTEGER")
     _ensure_column(conn, "review_run", "base_sha", "TEXT")
+    # 포스팅 프리미티브 구분 — 'issue'(레거시 issue comment) | 'review'(PR review).
+    # review 행은 github_comment_id에 review_id를 담고, 재게시 시 PUT로 본문만 갱신한다.
+    _ensure_column(conn, "posted_comment", "kind", "TEXT NOT NULL DEFAULT 'issue'")
     # prescreen 결과 재사용 키 — diff 내용 해시(full/incremental 무관하게 정확).
     _ensure_column(conn, "pre_screen", "diff_hash", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).

@@ -21,8 +21,12 @@ class PrInfo:
     is_draft: bool = False
 
 
-def _default_runner(args: list[str], **kw) -> str:
-    return subprocess.run(args, check=True, capture_output=True, text=True).stdout
+def _default_runner(args: list[str], *, env=None, input=None) -> str:
+    # env·input을 실제로 전달한다(정규화된 env 토큰 주입 + create_review의 stdin JSON
+    # 페이로드 --input -). 이전엔 **kw를 받기만 하고 흘려버려 stdin이 유실됐다.
+    return subprocess.run(
+        args, check=True, capture_output=True, text=True, env=env, input=input
+    ).stdout
 
 
 class GitHubCliError(RuntimeError):
@@ -72,16 +76,19 @@ def _http_status(text: str) -> int | None:
 
 
 class GhClient:
-    """gh CLI 얇은 래퍼. runner 주입으로 테스트 가능. write=post_comment 뿐."""
+    """gh CLI 얇은 래퍼. runner 주입으로 테스트 가능. write는 리뷰 게시 경로
+    (create_review/update_review, 폴백 post_comment/edit_comment) 뿐."""
 
     def __init__(self, runner=_default_runner, env: dict[str, str] | None = None):
         self._run = runner
         self._env = env
 
-    def _call(self, args: list[str], *, kind: str) -> str:
+    def _call(self, args: list[str], *, kind: str, stdin: str | None = None) -> str:
         env = _normalized_env(self._env)
         try:
-            return self._run(args, env=env)
+            if stdin is None:
+                return self._run(args, env=env)
+            return self._run(args, env=env, input=stdin)
         except subprocess.CalledProcessError as e:
             stderr = _redact(e.stderr, env)
             stdout = _redact(
@@ -223,5 +230,66 @@ class GhClient:
                 "{id: .id, html_url: .html_url}",
             ],
             kind="edit_comment",
+        ).strip()
+        return json.loads(out)
+
+    def create_review(
+        self,
+        repo: str,
+        number: int,
+        commit_id: str,
+        body: str,
+        comments: list[dict] | None = None,
+    ) -> dict:
+        """PR review 제출(event=COMMENT). comments=[{path,line,body}]는 diff 라인에
+        붙는 인라인 코멘트(side=RIGHT). 사내 PR 봇이 pull_request_review.submitted(본문)와
+        pull_request_review_comment.created(인라인)를 Slack 스레드로 중계한다.
+        중첩 배열이라 -f로 못 보내므로 JSON 페이로드를 stdin(--input -)으로 전달한다.
+        {id(review_id), html_url} 반환."""
+        payload: dict = {"commit_id": commit_id, "event": "COMMENT", "body": body}
+        if comments:
+            payload["comments"] = [
+                {
+                    "path": c["path"],
+                    "line": c["line"],
+                    "side": "RIGHT",
+                    "body": c["body"],
+                }
+                for c in comments
+            ]
+        out = self._call(
+            [
+                "gh",
+                "api",
+                "-X",
+                "POST",
+                f"/repos/{repo}/pulls/{number}/reviews",
+                "--input",
+                "-",
+                "--jq",
+                "{id: .id, html_url: .html_url}",
+            ],
+            kind="create_review",
+            stdin=json.dumps(payload),
+        ).strip()
+        return json.loads(out)
+
+    def update_review(self, repo: str, number: int, review_id: str, body: str) -> dict:
+        """제출된 review의 본문(요약)만 in-place 갱신(PUT). pull_request_review.edited는
+        PR 봇이 무시하므로 재게시 시 Slack 중복 알림이 없다(notify-once-on-create).
+        {id, html_url} 반환."""
+        out = self._call(
+            [
+                "gh",
+                "api",
+                "-X",
+                "PUT",
+                f"/repos/{repo}/pulls/{number}/reviews/{review_id}",
+                "-f",
+                f"body={body}",
+                "--jq",
+                "{id: .id, html_url: .html_url}",
+            ],
+            kind="update_review",
         ).strip()
         return json.loads(out)

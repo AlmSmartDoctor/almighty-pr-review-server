@@ -24,16 +24,20 @@ class HealthyGh:
     def preflight_issue(self, repo, number):
         return {"number": number}
 
+    def diff(self, repo, number):
+        # 기본은 인라인 대상 라인 없음 → review 본문만(대부분 테스트는 본문/호출수만 검증).
+        return ""
+
 
 def test_post_only_approved_findings(tmp_path):
     conn = connect(tmp_path / "p.db")
     init_schema(conn)
-    posted = []
+    created = []
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
-            posted.append((repo, number, body))
-            return {"id": 1, "html_url": "https://x/1#issuecomment-1"}
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append((repo, number, body))
+            return {"id": 1, "html_url": "https://x/pull/5#pullrequestreview-1"}
 
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_gh] = lambda: FakeGh()
@@ -82,9 +86,9 @@ def test_post_only_approved_findings(tmp_path):
 
     r = client.post(f"/api/runs/{run_id}/post")
     assert r.status_code == 200
-    # 승인분만 코멘트 본문에 포함
-    assert posted and "a.py:1" in posted[0][2]
-    assert "b.py:2" not in posted[0][2]
+    # 승인분만 review 본문에 포함
+    assert created and "a.py:1" in created[0][2]
+    assert "b.py:2" not in created[0][2]
     # 포스팅된 finding은 status=posted
     assert finding_repo.get(conn, f_ok)["status"] == "posted"
 
@@ -92,11 +96,11 @@ def test_post_only_approved_findings(tmp_path):
 def test_post_includes_edited_findings_with_edited_text(tmp_path):
     conn = connect(tmp_path / "edited.db")
     init_schema(conn)
-    posted = []
+    created = []
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
-            posted.append(body)
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
             return {"id": 1, "html_url": "https://x/1"}
 
     app.dependency_overrides[get_conn] = lambda: conn
@@ -134,8 +138,8 @@ def test_post_includes_edited_findings_with_edited_text(tmp_path):
     r = client.post(f"/api/runs/{run_id}/post")
 
     assert r.status_code == 200
-    assert posted and "edited claim" in posted[0]
-    assert "original claim" not in posted[0]
+    assert created and "edited claim" in created[0]
+    assert "original claim" not in created[0]
     assert finding_repo.get(conn, fid)["status"] == "posted"
 
 
@@ -182,19 +186,90 @@ def test_post_preview_uses_formatter_output(tmp_path):
     assert "preview claim" in comments[0]["body"]
 
 
-def test_post_updates_existing_comment_in_place(tmp_path):
-    conn = connect(tmp_path / "p2.db")
+def test_post_attaches_inline_comments_only_for_in_diff_lines(tmp_path):
+    # diff에 매핑되는 라인만 review 인라인 코멘트로 붙고, 밖의 라인은 본문에만 남는다
+    # (createReview는 diff 밖 라인이 하나라도 있으면 전체 422이므로 유효 라인만 통과).
+    conn = connect(tmp_path / "inline.db")
     init_schema(conn)
-    posted, edited = [], []
+    created = []
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
-            posted.append((repo, number, body))
+        def diff(self, repo, number):
+            return (
+                "diff --git a/a.py b/a.py\n"
+                "--- a/a.py\n+++ b/a.py\n"
+                "@@ -1,1 +1,3 @@\n ctx\n+added two\n+added three\n"
+            )
+
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(comments)
+            return {"id": 1, "html_url": "u"}
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    client = TestClient(app)
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=12,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+    f_in = finding_repo.add(
+        conn,
+        run_id=run_id,
+        vendor="claude",
+        file="a.py",
+        line=2,  # diff 신규측 라인 → 인라인 부착
+        severity="high",
+        category="bug",
+        claim="in diff",
+        rationale="r",
+        confidence=0.9,
+    )
+    f_out = finding_repo.add(
+        conn,
+        run_id=run_id,
+        vendor="claude",
+        file="b.py",
+        line=99,  # diff에 없음 → 본문만
+        severity="high",
+        category="bug",
+        claim="out of diff",
+        rationale="r",
+        confidence=0.9,
+    )
+    finding_repo.set_status(conn, f_in, "approved")
+    finding_repo.set_status(conn, f_out, "approved")
+
+    r = client.post(f"/api/runs/{run_id}/post")
+    assert r.status_code == 200
+    pairs = {(c["path"], c["line"]) for c in created[0]}
+    assert ("a.py", 2) in pairs
+    assert ("b.py", 99) not in pairs
+
+
+def test_post_updates_existing_review_in_place(tmp_path):
+    conn = connect(tmp_path / "p2.db")
+    init_schema(conn)
+    created, updated = [], []
+
+    class FakeGh(HealthyGh):
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append((repo, number, body))
             return {"id": 7, "html_url": "https://x/7"}
 
-        def edit_comment(self, repo, comment_id, body):
-            edited.append((repo, comment_id, body))
-            return {"id": int(comment_id), "html_url": f"https://x/{comment_id}"}
+        def update_review(self, repo, number, review_id, body):
+            updated.append((repo, number, review_id, body))
+            return {"id": int(review_id), "html_url": f"https://x/{review_id}"}
 
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_gh] = lambda: FakeGh()
@@ -229,7 +304,7 @@ def test_post_updates_existing_comment_in_place(tmp_path):
     )
     finding_repo.set_status(conn, f1, "approved")
     client.post(f"/api/runs/{run1}/post")
-    assert len(posted) == 1 and edited == []  # 첫 리뷰 → create
+    assert len(created) == 1 and updated == []  # 첫 리뷰 → create_review
 
     run2 = review_repo.create_run(
         conn, pr_id=pid, head_sha="s2", trigger="manual", effort="medium"
@@ -248,8 +323,8 @@ def test_post_updates_existing_comment_in_place(tmp_path):
     )
     finding_repo.set_status(conn, f2, "approved")
     client.post(f"/api/runs/{run2}/post")
-    assert len(posted) == 1  # 새 post 없음
-    assert len(edited) == 1 and edited[0][1] == "7"  # 이전 gcid로 in-place edit
+    assert len(created) == 1  # 새 review 없음
+    assert len(updated) == 1 and updated[0][2] == "7"  # 이전 review_id로 본문 PUT
     rows = conn.execute(
         "SELECT superseded_at FROM posted_comment ORDER BY id"
     ).fetchall()
@@ -258,20 +333,20 @@ def test_post_updates_existing_comment_in_place(tmp_path):
 
 
 def test_post_reposting_same_run_keeps_previously_posted_findings(tmp_path):
-    # 같은 run을 증분 승인하며 재포스팅할 때, 이전에 게시한 finding이 in-place edit
-    # 본문에서 사라지지 않아야 한다(승인+수정+기존게시 union으로 본문 재구성).
+    # 같은 run을 증분 승인하며 재게시할 때, 이전에 게시한 finding이 review 본문 PUT에서
+    # 사라지지 않아야 한다(승인+수정+기존게시 union으로 본문 재구성).
     conn = connect(tmp_path / "repost.db")
     init_schema(conn)
-    posted, edited = [], []
+    created, updated = [], []
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
-            posted.append(body)
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
             return {"id": 7, "html_url": "https://x/7"}
 
-        def edit_comment(self, repo, comment_id, body):
-            edited.append(body)
-            return {"id": int(comment_id), "html_url": f"https://x/{comment_id}"}
+        def update_review(self, repo, number, review_id, body):
+            updated.append(body)
+            return {"id": int(review_id), "html_url": f"https://x/{review_id}"}
 
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_gh] = lambda: FakeGh()
@@ -317,39 +392,39 @@ def test_post_reposting_same_run_keeps_previously_posted_findings(tmp_path):
     )
 
     finding_repo.set_status(conn, f1, "approved")
-    client.post(f"/api/runs/{run_id}/post")  # 1차: f1만 게시
-    assert len(posted) == 1 and "a.py:1" in posted[0]
+    client.post(f"/api/runs/{run_id}/post")  # 1차: f1만 게시(create)
+    assert len(created) == 1 and "a.py:1" in created[0]
 
     finding_repo.set_status(conn, f2, "approved")
-    client.post(f"/api/runs/{run_id}/post")  # 2차: f2 추가(같은 run, in-place edit)
-    assert len(posted) == 1 and len(edited) == 1  # 새 코멘트 아님, 기존 수정
-    # 재포스팅 본문에 이전 게시분(f1)과 신규(f2)가 모두 유지됨
-    assert "a.py:1" in edited[0] and "b.py:2" in edited[0]
+    client.post(f"/api/runs/{run_id}/post")  # 2차: f2 추가(같은 run, 본문 PUT)
+    assert len(created) == 1 and len(updated) == 1  # 새 review 아님, 본문 갱신
+    # 재게시 본문에 이전 게시분(f1)과 신규(f2)가 모두 유지됨
+    assert "a.py:1" in updated[0] and "b.py:2" in updated[0]
     assert finding_repo.get(conn, f1)["status"] == "posted"
     assert finding_repo.get(conn, f2)["status"] == "posted"
 
 
-def test_post_recreates_comment_when_previous_deleted_on_github(tmp_path):
-    # 봇 코멘트가 GitHub에서 수동 삭제되면 edit_comment가 404 → 새로 생성으로 폴백해
+def test_post_recreates_review_when_previous_deleted_on_github(tmp_path):
+    # 봇 review가 GitHub에서 dismiss/삭제되면 update_review가 404 → 새로 생성으로 폴백해
     # 영구 실패에 빠지지 않는다. 이전 행은 supersede된다.
     conn = connect(tmp_path / "repost-404.db")
     init_schema(conn)
-    posted = []
+    created = []
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
-            posted.append(body)
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
             return {
-                "id": 100 + len(posted),
-                "html_url": f"https://x/{100 + len(posted)}",
+                "id": 100 + len(created),
+                "html_url": f"https://x/{100 + len(created)}",
             }
 
-        def edit_comment(self, repo, comment_id, body):
+        def update_review(self, repo, number, review_id, body):
             raise GitHubCliError(
                 exit_code=1,
                 message="HTTP 404: Not Found",
                 stderr="HTTP 404: Not Found",
-                command_kind="edit_comment",
+                command_kind="update_review",
                 http_status=404,
             )
 
@@ -385,7 +460,7 @@ def test_post_recreates_comment_when_previous_deleted_on_github(tmp_path):
     )
     finding_repo.set_status(conn, f1, "approved")
     assert client.post(f"/api/runs/{run_id}/post").status_code == 200
-    assert len(posted) == 1  # 최초 생성(id 101)
+    assert len(created) == 1  # 최초 생성(id 101)
 
     f2 = finding_repo.add(
         conn,
@@ -400,10 +475,10 @@ def test_post_recreates_comment_when_previous_deleted_on_github(tmp_path):
         confidence=0.9,
     )
     finding_repo.set_status(conn, f2, "approved")
-    r2 = client.post(f"/api/runs/{run_id}/post")  # edit→404→재생성 폴백
+    r2 = client.post(f"/api/runs/{run_id}/post")  # update→404→재생성 폴백
     assert r2.status_code == 200  # 영구 실패 아님
-    assert len(posted) == 2  # 재생성됨
-    assert "a.py:1" in posted[1] and "b.py:2" in posted[1]  # union으로 유실 없음
+    assert len(created) == 2  # 재생성됨
+    assert "a.py:1" in created[1] and "b.py:2" in created[1]  # union으로 유실 없음
     rows = conn.execute(
         "SELECT github_comment_id, superseded_at FROM posted_comment ORDER BY id"
     ).fetchall()
@@ -439,12 +514,12 @@ def test_post_health_unrecognized_failure_returns_502(tmp_path):
 def test_post_groups_by_vendor(tmp_path):
     conn = connect(tmp_path / "p3.db")
     init_schema(conn)
-    posted = []
+    created = []
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
-            posted.append(body)
-            return {"id": len(posted), "html_url": "https://x"}
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
+            return {"id": len(created), "html_url": "https://x"}
 
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_gh] = lambda: FakeGh()
@@ -492,7 +567,7 @@ def test_post_groups_by_vendor(tmp_path):
     finding_repo.set_status(conn, fx, "approved")
     r = client.post(f"/api/runs/{run_id}/post")
     assert r.status_code == 200
-    assert len(posted) == 2  # 벤더별 코멘트 분리
+    assert len(created) == 2  # 벤더별 review 분리
 
 
 def _run_with_approved(conn, *, vendors=("claude",)):
@@ -586,7 +661,7 @@ def test_post_preflight_failure_does_not_write(tmp_path):
                 http_status=401,
             )
 
-        def post_comment(self, repo, number, body):
+        def create_review(self, repo, number, commit_id, body, comments):
             calls.append((repo, number, body))
 
     app.dependency_overrides[get_conn] = lambda: conn
@@ -606,13 +681,13 @@ def test_post_partial_vendor_failure_returns_posted_and_failed_detail(tmp_path):
     _, run_id = _run_with_approved(conn, vendors=("claude", "codex"))
 
     class FakeGh(HealthyGh):
-        def post_comment(self, repo, number, body):
+        def create_review(self, repo, number, commit_id, body, comments):
             if "codex claim" in body:
                 raise GitHubCliError(
                     exit_code=1,
                     message="HTTP 403: forbidden",
                     stderr="HTTP 403: forbidden",
-                    command_kind="post_comment",
+                    command_kind="create_review",
                     http_status=403,
                 )
             return {"id": 1, "html_url": "https://x/1"}

@@ -12,12 +12,13 @@ def add(
     body,
     head_sha=None,
     finding_ids=None,
+    kind="issue",
 ) -> int:
     cur = conn.execute(
         """INSERT INTO posted_comment
            (run_id, vendor, github_comment_id, url, marker, body,
-            head_sha, finding_ids, posted_at)
-           VALUES (?,?,?,?,?,?,?,?, datetime('now'))""",
+            head_sha, finding_ids, kind, posted_at)
+           VALUES (?,?,?,?,?,?,?,?,?, datetime('now'))""",
         (
             run_id,
             vendor,
@@ -27,6 +28,7 @@ def add(
             body,
             head_sha,
             json.dumps(finding_ids or []),
+            kind,
         ),
     )
     conn.commit()

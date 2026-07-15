@@ -17,6 +17,10 @@ DEFAULT_REVIEW_MODEL = "sonnet"
 DEFAULT_CODEX_MODEL = ""  # "" = codex CLI 자체 기본 모델
 DEFAULT_PRESCREEN_THRESHOLD = "moderate"  # trivial 미만이면 skip 후보
 
+# 포스팅 코멘트 최상단 배너(env-only). 설정 시 게시 코멘트 맨 위에 붙는다(테스트/스테이징
+# 표식용). 미설정("")이면 배너 없음(기본 동작 불변).
+POST_BANNER = os.environ.get("ALMIGHTY_POST_BANNER", "")
+
 # v2 서브프로젝트 B — 외부 컨텍스트 주입
 MAX_CONTEXT_CHARS_PER_SOURCE = 8_000
 MAX_CONTEXT_CHARS_TOTAL = 20_000

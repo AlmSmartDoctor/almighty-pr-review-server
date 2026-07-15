@@ -111,6 +111,65 @@ def test_edit_comment_patches_in_place():
     assert any(a[0][:2] == ["gh", "api"] for a in runner.calls)
 
 
+def test_create_review_submits_comment_event_with_inline_via_stdin():
+    runner = FakeRunner(
+        {
+            (
+                "gh",
+                "api",
+                "-X",
+                "POST",
+            ): '{"id": 555, "html_url": "https://x/pull/7#pullrequestreview-555"}',
+        }
+    )
+    client = gh.GhClient(runner=runner)
+    res = client.create_review(
+        "acme/api",
+        7,
+        "headsha",
+        "review body",
+        [{"path": "a.py", "line": 3, "body": "inline"}],
+    )
+    assert res["id"] == 555
+    argv = runner.calls[0][0]
+    assert "/repos/acme/api/pulls/7/reviews" in argv
+    assert "--input" in argv and "-" in argv  # 중첩 페이로드는 stdin으로
+    payload = json.loads(runner.calls[0][1]["input"])
+    assert payload["event"] == "COMMENT"
+    assert payload["commit_id"] == "headsha"
+    assert payload["body"] == "review body"
+    assert payload["comments"] == [
+        {"path": "a.py", "line": 3, "side": "RIGHT", "body": "inline"}
+    ]
+
+
+def test_create_review_without_comments_omits_comments_key():
+    runner = FakeRunner({("gh", "api", "-X", "POST"): '{"id": 5, "html_url": "u"}'})
+    client = gh.GhClient(runner=runner)
+    client.create_review("acme/api", 7, "sha", "body only", [])
+    payload = json.loads(runner.calls[0][1]["input"])
+    assert "comments" not in payload  # 인라인 없으면 body-only review
+
+
+def test_update_review_puts_body_only():
+    runner = FakeRunner(
+        {
+            (
+                "gh",
+                "api",
+                "-X",
+                "PUT",
+            ): '{"id": 9, "html_url": "https://x/pull/7#pullrequestreview-9"}',
+        }
+    )
+    client = gh.GhClient(runner=runner)
+    res = client.update_review("acme/api", 7, "9", "new body")
+    assert res["id"] == 9
+    argv = runner.calls[0][0]
+    assert "/repos/acme/api/pulls/7/reviews/9" in argv
+    assert "PUT" in argv
+
+
 def test_env_prefers_gh_token_then_github_token_then_pat():
     for env, expected in [
         (
@@ -128,6 +187,25 @@ def test_env_prefers_gh_token_then_github_token_then_pat():
         client = gh.GhClient(runner=runner, env=env)
         client.preflight_user()
         assert runner.calls[0][1]["env"]["GH_TOKEN"] == expected
+
+
+def test_default_runner_forwards_env_and_input(monkeypatch):
+    # create_review의 stdin(--input -) 페이로드와 정규화 env가 실제로 subprocess.run에
+    # 전달되는지 고정(이전엔 **kw를 흘려버려 유실됐음).
+    captured = {}
+
+    class _Res:
+        stdout = "ok"
+
+    def fake_run(args, **kw):
+        captured.update(kw)
+        return _Res()
+
+    monkeypatch.setattr(gh.subprocess, "run", fake_run)
+    out = gh._default_runner(["gh", "api"], env={"GH_TOKEN": "x"}, input='{"a":1}')
+    assert out == "ok"
+    assert captured["input"] == '{"a":1}'
+    assert captured["env"] == {"GH_TOKEN": "x"}
 
 
 def test_called_process_error_is_redacted_and_structured():

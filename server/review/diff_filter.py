@@ -9,6 +9,9 @@ import re
 # `diff --git a/<path> b/<path>` 파일 블록 헤더.
 _FILE_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+?)$", re.MULTILINE)
 
+# hunk 헤더 `@@ -l,s +l,s @@` — 신규(RIGHT)측 시작 라인번호를 캡처.
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,\d+)? @@")
+
 # basename 완전일치로 거르는 lockfile류.
 DEFAULT_IGNORE = frozenset(
     {
@@ -52,6 +55,34 @@ def split_file_blocks(diff: str) -> list[tuple[str, str]]:
         # 리네임 등으로 a/b 경로가 다를 수 있으니 b(대상) 경로를 파일 식별자로 사용.
         blocks.append((m.group("b"), diff[m.start() : end]))
     return blocks
+
+
+def commentable_lines(diff: str) -> dict[str, set[int]]:
+    """PR review 인라인 코멘트를 달 수 있는 파일별 RIGHT-side(신규 파일) 라인 집합.
+    GitHub은 diff에 등장한 라인에만 review 코멘트를 허용하고, createReview는 유효하지
+    않은 라인이 하나라도 있으면 요청 전체를 422로 거부한다. 그래서 게시 전에 이 집합으로
+    finding 라인을 걸러 유효한 것만 인라인 부착한다.
+
+    hunk 헤더의 +시작에서 신규 라인번호를 시작해 추가(+)·문맥( ) 라인마다 1씩 증가시키고,
+    삭제(-) 라인은 신규측 번호를 증가시키지 않는다. 파일 헤더(+++/---)는 첫 @@ 이전이라
+    카운터가 None → 자연히 무시된다."""
+    out: dict[str, set[int]] = {}
+    for path, block in split_file_blocks(diff):
+        if not path:
+            continue
+        lines = out.setdefault(path, set())
+        new_no: int | None = None
+        for ln in block.splitlines():
+            if ln.startswith("@@"):
+                m = _HUNK_HEADER.match(ln)
+                new_no = int(m.group("start")) if m else None
+            elif new_no is None:
+                continue  # 첫 hunk 이전(파일 헤더 등) → 신규측 라인 아님
+            elif ln.startswith("+") or ln.startswith(" "):  # 추가·문맥 → 신규측 라인
+                lines.add(new_no)
+                new_no += 1
+            # 삭제(-)·"\ No newline"·빈 줄 → 신규측 번호 불변
+    return out
 
 
 def _is_noise(path: str) -> bool:

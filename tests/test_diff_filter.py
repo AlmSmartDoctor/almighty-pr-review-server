@@ -1,5 +1,6 @@
 from server.review.diff_filter import (
     chunk_by_budget,
+    commentable_lines,
     filter_reviewable,
     split_file_blocks,
 )
@@ -65,6 +66,32 @@ def test_filter_ignore_dir_matches_path_segment_not_substring():
         "src/vendor/lib.py",
     ):
         assert filter_reviewable(_block(path)) == "", path
+
+
+def test_commentable_lines_tracks_added_and_context_right_side():
+    # @@ -1,2 +10,4 @@ → 신규측 10부터: 문맥(10)·추가(11)·삭제(신규측 불변)·추가(12)·문맥(13)
+    diff = _block(
+        "a.py",
+        body="@@ -1,2 +10,4 @@\n ctx10\n+add11\n-removed\n+add12\n cvtx13\n",
+    )
+    lines = commentable_lines(diff)
+    assert lines["a.py"] == {10, 11, 12, 13}
+
+
+def test_commentable_lines_multi_file_and_multi_hunk():
+    diff = _block(
+        "a.py", body="@@ -1 +1 @@\n+one\n@@ -5,0 +5,2 @@\n+five\n+six\n"
+    ) + _block("b.py", body="@@ -1 +3 @@\n+three\n")
+    lines = commentable_lines(diff)
+    assert lines["a.py"] == {1, 5, 6}
+    assert lines["b.py"] == {3}
+
+
+def test_commentable_lines_ignores_file_header_plusminus_and_empty():
+    # +++/--- 파일 헤더(첫 @@ 이전)는 +/-로 시작해도 신규측 라인으로 계수되면 안 된다.
+    diff = _block("a.py", body="--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+only\n")
+    assert commentable_lines(diff)["a.py"] == {1}
+    assert commentable_lines("") == {}
 
 
 def test_chunk_small_diff_is_single_fast_path():
