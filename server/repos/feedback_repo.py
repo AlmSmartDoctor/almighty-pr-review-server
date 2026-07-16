@@ -1,4 +1,4 @@
-"""서브프로젝트 C — Slack 반응 학습 신호의 write-side(seams.NullMemoryStore를 구체화).
+"""서브프로젝트 C — Slack 반응 학습 신호의 write-side.
 코드베이스 컨벤션대로 클래스가 아닌 함수 모듈. 두 테이블을 다룬다:
   slack_post      — 리뷰를 게시한 Slack 메시지(run ↔ channel:ts) 매핑
   feedback_signal — 그 메시지에 달린 👍/👎 현재 상태(added=INSERT, removed=DELETE)

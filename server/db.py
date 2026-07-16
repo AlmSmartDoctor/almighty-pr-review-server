@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS repo (
   vendor_claude_on INTEGER NOT NULL DEFAULT 1,
   vendor_codex_on INTEGER NOT NULL DEFAULT 1,
   merge_enabled INTEGER NOT NULL DEFAULT 0,
-  auto_post INTEGER NOT NULL DEFAULT 0,
   harness_name TEXT NOT NULL DEFAULT 'default',
   local_path TEXT,                                -- ★개정: 로컬 clone 경로(worktree 소스). 등록 시 검증
   last_polled_at TEXT
