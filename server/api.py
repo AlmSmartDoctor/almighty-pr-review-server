@@ -734,6 +734,21 @@ def trigger_review(pid: int, conn=Depends(get_conn)):
     return {"job_id": job_id}
 
 
+@app.post("/api/prs/{pid}/cancel-review")
+def cancel_review(pid: int, conn=Depends(get_conn)):
+    """대기 중(재시도 backoff 포함) 리뷰 잡 취소. running은 벤더 subprocess를
+    중단할 수 없어 409 — 완주 후 결과를 버리는 쪽이 아니라 시작 자체를 막는 게 목적."""
+    job = conn.execute(
+        "SELECT * FROM review_job WHERE pr_id=? ORDER BY id DESC LIMIT 1", (pid,)
+    ).fetchone()
+    if job is None or job["status"] not in ("queued", "running"):
+        raise HTTPException(404, "대기 중인 리뷰 잡이 없습니다")
+    if job["status"] == "running":
+        raise HTTPException(409, "이미 실행 중인 리뷰는 취소할 수 없습니다")
+    job_repo.mark_canceled(conn, job["id"], error="사용자가 취소")
+    return {"job_id": job["id"], "status": "canceled"}
+
+
 @app.post("/api/webhooks/github")
 async def github_webhook(request: Request, conn=Depends(get_conn)):
     """GitHub pull_request 웹훅 수신 → poller와 동일 로직으로 리뷰 job enqueue.

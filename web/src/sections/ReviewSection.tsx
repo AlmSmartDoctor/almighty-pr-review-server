@@ -563,6 +563,20 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       .finally(() => setTriggering(false));
   };
 
+  const cancelReview = () => {
+    setTriggering(true);
+    setMessage("");
+    api.cancelReview(pr.id)
+      .then(() => {
+        setAwaitingBase(undefined);
+        setMessage("대기 중 리뷰를 취소했습니다.");
+        return onRefresh();
+      })
+      .catch(() => setMessage("취소에 실패했습니다."))
+      .finally(() => setTriggering(false));
+  };
+  const cancelable = pr.job_status === "queued";
+
   if (!runId) {
     return (
       <div>
@@ -602,6 +616,11 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       >
         <NeedBadge value={pr.prescreen} />
         <Button variant="outline" size="sm" onClick={triggerReview} disabled={triggering}>수동 리뷰</Button>
+        {cancelable && (
+          <Button variant="outline" size="sm" onClick={cancelReview} disabled={triggering}>
+            대기 중 리뷰 취소
+          </Button>
+        )}
       </DetailHead>
 
       {failed.length > 0 && (

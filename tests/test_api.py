@@ -709,3 +709,32 @@ def test_vendor_result_raw_endpoint(tmp_path):
     assert ok.status_code == 200 and "벤더 원문 출력입니다" in ok.text
     assert client.get(f"/api/vendor-results/{vr_without}/raw").status_code == 404
     assert client.get("/api/vendor-results/99999/raw").status_code == 404
+
+
+def test_cancel_queued_review(tmp_path):
+    from server.repos import job_repo, pr_repo, repo_repo
+
+    client, conn = _client(tmp_path)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    assert client.post(f"/api/prs/{pid}/cancel-review").status_code == 404  # 잡 없음
+
+    job_id = job_repo.enqueue(conn, pr_id=pid, head_sha="s1", trigger="auto")
+    r = client.post(f"/api/prs/{pid}/cancel-review")
+    assert r.status_code == 200
+    j = conn.execute("SELECT * FROM review_job WHERE id=?", (job_id,)).fetchone()
+    assert j["status"] == "canceled" and "취소" in j["error"]
+
+    # running 잡은 취소 불가(벤더 subprocess를 중단할 수 없음) → 409
+    conn.execute("UPDATE review_job SET status='running' WHERE id=?", (job_id,))
+    conn.commit()
+    assert client.post(f"/api/prs/{pid}/cancel-review").status_code == 409

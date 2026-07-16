@@ -22,6 +22,7 @@ vi.mock("../api", () => ({
     patchFinding: async () => ({}),
     postRun: async () => ({}),
     triggerReview: async () => ({ job_id: 42 }),
+    cancelReview: async () => ({ job_id: 42, status: "canceled" }),
     retryVendors: async () => ({ job_id: 43 }),
   },
 }));
@@ -456,4 +457,21 @@ test("vendor trace links to raw output when preserved", async () => {
   const rawLink = await screen.findByRole("link", { name: "원문 보기" });
   expect(rawLink).toHaveAttribute("href", "/api/vendor-results/31/raw");
   expect(screen.getAllByRole("link", { name: "원문 보기" })).toHaveLength(1); // raw 없는 벤더는 링크 없음
+});
+
+test("queued job shows cancel button and calls cancel API", async () => {
+  const cancel = vi.spyOn(api, "cancelReview").mockResolvedValue({ job_id: 9, status: "canceled" });
+  const pr = { ...PRS[0], job_status: "queued" };
+  renderReview({ loadPrs: async () => [pr], loadFindings: async () => [], loadVendors: async () => [] });
+  fireEvent.click(await screen.findByText("fix null"));
+  fireEvent.click(await screen.findByRole("button", { name: "대기 중 리뷰 취소" }));
+  await waitFor(() => expect(cancel).toHaveBeenCalledWith(1));
+  expect(await screen.findByText("대기 중 리뷰를 취소했습니다.")).toBeInTheDocument();
+});
+
+test("no cancel button without queued job", async () => {
+  renderReview({ loadPrs: async () => PRS, loadFindings: async () => [], loadVendors: async () => [] });
+  fireEvent.click(await screen.findByText("fix null"));
+  await screen.findByText("전체 실행");
+  expect(screen.queryByRole("button", { name: "대기 중 리뷰 취소" })).toBeNull();
 });

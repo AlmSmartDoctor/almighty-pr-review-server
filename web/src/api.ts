@@ -48,5 +48,6 @@ export const api = {
     fetch(`/api/findings/${id}`, writeJson("PATCH", body)).then(json),
   postRun: (id: number) => fetch(`/api/runs/${id}/post`, { method: "POST" }).then(json),
   triggerReview: (prId: number) => fetch(`/api/prs/${prId}/review`, { method: "POST" }).then(json),
+  cancelReview: (prId: number) => fetch(`/api/prs/${prId}/cancel-review`, { method: "POST" }).then(json),
   retryVendors: (runId: number) => fetch(`/api/runs/${runId}/retry-vendors`, { method: "POST" }).then(json),
 };
