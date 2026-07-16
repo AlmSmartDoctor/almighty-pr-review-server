@@ -23,6 +23,7 @@ export type HarnessPut = {
 };
 
 export const api = {
+  deepHealth: () => fetch("/api/health/deep").then(json),
   repos: () => fetch("/api/repos").then(json),
   addRepo: (body: { full_name: string; local_path?: string }) =>
     fetch("/api/repos", writeJson("POST", body)).then(json),

@@ -8,6 +8,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { EnvStatus } from "./components/env-status";
 import { ReviewSection } from "./sections/ReviewSection";
 import { HarnessSection } from "./sections/HarnessSection";
 import { SettingsSection } from "./sections/SettingsSection";
@@ -90,10 +91,7 @@ export default function App() {
           })}
         </nav>
 
-        <div className="mt-auto flex items-center gap-2 border-t border-border px-3 pt-3 text-[11.5px] text-muted-foreground max-md:hidden">
-          <span className="size-2 rounded-full bg-ok shadow-[0_0_0_3px_var(--color-ok-soft)]" />
-          로컬 서버 · v1
-        </div>
+        <EnvStatus />
       </aside>
 
       <main className="min-w-0 flex-1 overflow-x-hidden">

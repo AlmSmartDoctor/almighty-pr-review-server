@@ -393,6 +393,15 @@ def get_slack():
     return _slack
 
 
+@app.get("/api/health/deep")
+def health_deep(conn=Depends(get_conn), gh=Depends(get_gh)) -> dict:
+    """gh 인증·벤더 CLI 존재·DB 접근 실측 점검. /api/health는 dev.sh readiness
+    폴링용 즉답으로 유지하고, 대시보드는 이 결과로 환경 이상을 표시한다."""
+    from server.health import deep_health
+
+    return deep_health(conn, gh)
+
+
 def _github_error_message(error: GitHubCliError) -> str:
     if error.http_status == 401:
         return "GitHub 인증이 필요합니다. GH_TOKEN, GITHUB_TOKEN, GITHUB_PERSONAL_ACCESS_TOKEN 중 하나를 확인하세요."
