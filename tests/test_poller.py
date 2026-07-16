@@ -246,3 +246,60 @@ def test_poll_loop_reads_interval_from_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("server.poller.asyncio.wait_for", fake_wait_for)
     asyncio.run(poll_loop(db, interval_sec=999, stop_event=stop))
     assert seen == [123]  # interval_sec 폴백(999) 아니라 설정값(123) 사용
+
+
+def test_poll_once_skips_draft_pr_by_default(db):
+    repo_repo.add(db, full_name="acme/api")
+    prs = [
+        PrInfo(7, "t", "a", "s7", "main", "u", "open", is_draft=True),
+        PrInfo(8, "t", "a", "s8", "main", "u", "open"),
+    ]
+    enqueued = []
+    poll_once(
+        db, list_prs=lambda repo: prs, enqueue=lambda pr_id: enqueued.append(pr_id)
+    )
+    drafted = db.execute(
+        "SELECT id FROM pull_request WHERE number=7"
+    ).fetchone()  # draft도 upsert는 됨(오버뷰 노출)
+    ready = db.execute("SELECT id FROM pull_request WHERE number=8").fetchone()
+    assert drafted is not None and enqueued == [ready["id"]]
+
+    # draft가 ready로 전환되면 다음 폴링에 enqueue
+    prs[0] = PrInfo(7, "t", "a", "s7", "main", "u", "open", is_draft=False)
+    poll_once(
+        db, list_prs=lambda repo: prs, enqueue=lambda pr_id: enqueued.append(pr_id)
+    )
+    assert drafted["id"] in enqueued
+
+
+def test_poll_once_reviews_draft_when_skip_off_globally(db):
+    from server.repos import settings_repo
+
+    settings_repo.update(db, skip_draft_on=0)
+    repo_repo.add(db, full_name="acme/api")
+    enqueued = []
+    poll_once(
+        db,
+        list_prs=lambda repo: [
+            PrInfo(7, "t", "a", "s7", "main", "u", "open", is_draft=True)
+        ],
+        enqueue=lambda pr_id: enqueued.append(pr_id),
+    )
+    assert enqueued == [1]
+
+
+def test_poll_once_repo_override_beats_global_skip(db):
+    from server.repos import settings_repo
+
+    settings_repo.update(db, skip_draft_on=0)
+    rid = repo_repo.add(db, full_name="acme/api")
+    repo_repo.update(db, rid, skip_draft_on=1)  # 레포가 skip을 다시 켬
+    enqueued = []
+    poll_once(
+        db,
+        list_prs=lambda repo: [
+            PrInfo(7, "t", "a", "s7", "main", "u", "open", is_draft=True)
+        ],
+        enqueue=lambda pr_id: enqueued.append(pr_id),
+    )
+    assert enqueued == []

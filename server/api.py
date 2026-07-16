@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from server import config
 from server.context import feedback_source, jira_keys
+from server.context.registry import _effective
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment, build_inline_comment
 from server.github.gh import GhClient, GitHubCliError
@@ -257,6 +258,7 @@ class RepoPatch(BaseModel):
     context_feedback_on: int | None = None
     verify_singles_on: int | None = None
     incremental_review_on: int | None = None
+    skip_draft_on: int | None = None
     static_context_path: str | None = None
     jira_project_keys: str | None = None
     db_schema_path: str | None = None
@@ -275,6 +277,7 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         "context_feedback_on",
         "verify_singles_on",
         "incremental_review_on",
+        "skip_draft_on",
         "claude_model",
         "claude_effort",
         "codex_model",
@@ -308,6 +311,7 @@ class SettingsPatch(BaseModel):
     context_feedback_on: int | None = None
     verify_singles_on: int | None = None
     incremental_review_on: int | None = None
+    skip_draft_on: int | None = None
 
 
 @app.patch("/api/settings")
@@ -753,7 +757,12 @@ async def github_webhook(request: Request, conn=Depends(get_conn)):
         is_draft=info["is_draft"],
     )
     has_vendor = repo["vendor_claude_on"] or repo["vendor_codex_on"]
-    if has_vendor and pr_repo.needs_review(conn, pid):
+    skip_draft = _effective(repo, settings_repo.get(conn), "skip_draft_on")
+    if (
+        has_vendor
+        and not (skip_draft and info["is_draft"])
+        and pr_repo.needs_review(conn, pid)
+    ):
         job_repo.enqueue(conn, pr_id=pid, head_sha=info["head_sha"], trigger="auto")
         return {"status": "enqueued", "pr": info["number"]}
     return {"status": "skipped", "pr": info["number"]}

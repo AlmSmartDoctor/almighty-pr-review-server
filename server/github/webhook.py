@@ -3,7 +3,7 @@ import hmac
 import json
 
 # 새 head sha가 생기거나(open/synchronize) PR이 재개(reopened)될 때만 리뷰 트리거.
-_REVIEW_ACTIONS = frozenset({"opened", "synchronize", "reopened"})
+_REVIEW_ACTIONS = frozenset({"opened", "synchronize", "reopened", "ready_for_review"})
 
 
 def verify_signature(secret: str, body: bytes, header: "str | None") -> bool:

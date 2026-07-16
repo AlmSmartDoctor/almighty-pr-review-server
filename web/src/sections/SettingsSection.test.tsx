@@ -297,3 +297,28 @@ test("repo harness select is populated from the harness list", async () => {
     expect(patchRepo).toHaveBeenCalledWith(7, { harness_name: "security-focus" }),
   );
 });
+
+test("toggles draft skip globally and per repo", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 };
+  const patchSettings = vi
+    .spyOn(api, "patchSettings")
+    .mockResolvedValue({ ...settings, skip_draft_on: 0 });
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
+    async (_id, patch) => ({ ...repo, ...patch }),
+  );
+  render(<SettingsSection load={async () => ({ ...settings, skip_draft_on: 1 })} loadRepos={async () => [repo]} />);
+
+  const toggle = await screen.findByRole("switch", { name: "draft 건너뛰기" });
+  expect(toggle).toBeChecked();
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() =>
+    expect(patchSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ skip_draft_on: 0 }),
+    ),
+  );
+
+  const override = screen.getByRole("combobox", { name: "acme/api draft 건너뛰기" });
+  fireEvent.change(override, { target: { value: "1" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { skip_draft_on: 1 }));
+});

@@ -222,3 +222,26 @@ def test_webhook_repo_lookup_is_case_insensitive(tmp_path, monkeypatch):
     r = _post(client, body, sig=_sign(body))
     assert r.status_code == 200 and r.json()["status"] == "enqueued"
     assert _job_count(conn) == 1
+
+
+def test_webhook_skips_draft_pr(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "GITHUB_WEBHOOK_SECRET", _SECRET)
+    client, conn = _client(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")
+    payload = json.loads(_pr_body())
+    payload["pull_request"]["draft"] = True
+    body = json.dumps(payload).encode()
+    r = _post(client, body, sig=_sign(body))
+    assert r.status_code == 200 and r.json()["status"] == "skipped"
+    assert _job_count(conn) == 0
+
+
+def test_webhook_ready_for_review_action_enqueues(tmp_path, monkeypatch):
+    # draft → ready 전환 시 웹훅으로도 즉시 리뷰가 시작돼야 한다(폴링 대기 불필요).
+    monkeypatch.setattr(config, "GITHUB_WEBHOOK_SECRET", _SECRET)
+    client, conn = _client(tmp_path)
+    repo_repo.add(conn, full_name="acme/api")
+    body = _pr_body(action="ready_for_review")
+    r = _post(client, body, sig=_sign(body))
+    assert r.status_code == 200 and r.json()["status"] == "enqueued"
+    assert _job_count(conn) == 1

@@ -23,6 +23,7 @@ type Settings = {
   prescreen_gate_threshold: string;
   verify_singles_on?: number;
   incremental_review_on?: number;
+  skip_draft_on?: number;
   context_static_on?: number;
   context_jira_on?: number;
   context_db_schema_on?: number;
@@ -52,6 +53,7 @@ type Repo = {
   merge_enabled?: number;
   verify_singles_on?: number | null;
   incremental_review_on?: number | null;
+  skip_draft_on?: number | null;
   harness_name?: string;
   context_static_on?: number | null;
   context_jira_on?: number | null;
@@ -226,6 +228,10 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
             <Field title="변경만 재리뷰" help="재리뷰 시 직전 완료된 리뷰 이후의 변경분만 리뷰(전체 재리뷰 대신). 큰 PR의 후속 커밋에서 시간·비용 절감">
               <Switch aria-label="변경만 재리뷰" checked={!!draft.incremental_review_on}
                       onCheckedChange={(v) => setDraft({ ...draft, incremental_review_on: v ? 1 : 0 })} />
+            </Field>
+            <Field title="draft 건너뛰기" help="draft PR은 자동 리뷰하지 않고 ready로 전환되면 리뷰. 수동 트리거는 항상 가능">
+              <Switch aria-label="draft 건너뛰기" checked={!!draft.skip_draft_on}
+                      onCheckedChange={(v) => setDraft({ ...draft, skip_draft_on: v ? 1 : 0 })} />
             </Field>
             <Field title="사전 스크리닝 모델" help="diff만 보고 변경 복잡도를 평가">
               <div className="w-48">
@@ -481,6 +487,12 @@ function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange
                              value={repo.incremental_review_on}
                              inheritedOn={!!settings.incremental_review_on}
                              onChange={(v) => onPatch({ incremental_review_on: v })} />
+        </RepoField>
+        <RepoField label="draft 건너뛰기">
+          <RepoInheritToggle ariaLabel={`${repo.full_name} draft 건너뛰기`}
+                             value={repo.skip_draft_on}
+                             inheritedOn={!!settings.skip_draft_on}
+                             onChange={(v) => onPatch({ skip_draft_on: v })} />
         </RepoField>
       </div>
 

@@ -213,6 +213,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "posted_comment", "kind", "TEXT NOT NULL DEFAULT 'issue'")
     # prescreen 결과 재사용 키 — diff 내용 해시(full/incremental 무관하게 정확).
     _ensure_column(conn, "pre_screen", "diff_hash", "TEXT")
+    # draft PR 자동 리뷰 skip — 전역 기본 ON(draft=미완성 선언) + per-repo override(NULL=상속).
+    # 수동 트리거는 게이트 밖(사람이 draft를 알고 누른 것).
+    _ensure_column(conn, "app_settings", "skip_draft_on", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "repo", "skip_draft_on", "INTEGER")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(

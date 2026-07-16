@@ -15,6 +15,7 @@ ALLOWED = {
     "context_feedback_on",
     "verify_singles_on",
     "incremental_review_on",
+    "skip_draft_on",
 }
 
 

@@ -665,3 +665,20 @@ def test_retry_vendors_409_when_run_not_done(tmp_path):
     review_repo.finish_run(conn, run_id, "failed", error="all vendors failed")
     r = client.post(f"/api/runs/{run_id}/retry-vendors")
     assert r.status_code == 409
+
+
+def test_patch_skip_draft_toggle(tmp_path):
+    client, _ = _client(tmp_path)
+    assert client.get("/api/settings").json()["skip_draft_on"] == 1  # 기본 skip
+    assert (
+        client.patch("/api/settings", json={"skip_draft_on": 0}).json()["skip_draft_on"]
+        == 0
+    )
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    assert created["skip_draft_on"] is None  # NULL = 전역 상속
+    assert (
+        client.patch(f"/api/repos/{created['id']}", json={"skip_draft_on": 1}).json()[
+            "skip_draft_on"
+        ]
+        == 1
+    )
