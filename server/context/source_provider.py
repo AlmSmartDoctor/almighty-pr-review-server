@@ -1,15 +1,14 @@
 from server.context.base import ContextRequest, ContextResult
 
 
-class DBSchemaProvider:
-    """변경 파일 관련 테이블 스키마(DDL)를 주입하는 provider. 실 DB 접근은 유예 —
-    schema_source(req)->str 를 주입받아 렌더한다. 소스 미주입=skipped, 실패=empty.
-    NEVER raises (best-effort degrade)."""
+class SourceBackedProvider:
+    """source(req)->str 를 주입받아 렌더하는 공통 provider(db_schema/graphify/
+    team_feedback이 공유). 소스 미주입=skipped, 실패=empty. NEVER raises
+    (best-effort degrade)."""
 
-    name = "db_schema"
-
-    def __init__(self, *, schema_source=None):
-        self._source = schema_source
+    def __init__(self, name: str, *, source=None):
+        self.name = name
+        self._source = source
 
     def fetch(self, req: ContextRequest) -> ContextResult:
         if self._source is None:

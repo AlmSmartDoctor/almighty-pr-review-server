@@ -269,25 +269,11 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
 
         # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리.
         # 예산 초과 diff는 파일 경계 청크로 나눠 벤더당 순차 리뷰 후 finding 합침(통째 취소 대신 스케일).
-        chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
-        if len(chunks) > 1:
+        prompts = _build_prompts(pr, diff, context_text)
+        if len(prompts) > 1:
             print(
-                f"[pipeline] diff chunked into {len(chunks)} parts ({len(diff)} chars)"
+                f"[pipeline] diff chunked into {len(prompts)} parts ({len(diff)} chars)"
             )
-        multi = len(chunks) > 1
-        prompts = [
-            _build_prompt(
-                pr,
-                c,
-                context_text,
-                chunk_note=(
-                    f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if multi else ""
-                ),
-                # 청크로 나뉜 경우에만 PR 전체 변경 파일을 알려 교차파일 결함 탐지를 돕는다.
-                changed_files=(changed_files if multi else ()),
-            )
-            for i, c in enumerate(chunks)
-        ]
 
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
@@ -305,27 +291,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
                 )
             )
 
-    all_findings = []  # (vendor_result_id, finding)
-    succeeded, errors = 0, []
-    for vendor, fs, err, dur in results:
-        vr_id = vr_ids[vendor]
-        if err is not None:
-            errors.append(f"{vendor}: {err}")
-            conn.execute(
-                "UPDATE vendor_result SET status='failed', error=?, duration_ms=? "
-                "WHERE id=?",
-                (err, dur, vr_id),
-            )
-        else:
-            succeeded += 1
-            conn.execute(
-                "UPDATE vendor_result SET status='done', duration_ms=? WHERE id=?",
-                (dur, vr_id),
-            )
-            for f in fs:
-                f.vendor_result_id = vr_id  # ★개정: id() 매핑 제거, 명시 부착
-                all_findings.append((vr_id, f))
-    conn.commit()
+    all_findings, succeeded, errors = _record_vendor_results(conn, results, vr_ids)
 
     # ★개정 (codex v4 [HIGH]): enabled 벤더가 **전원 실패**면 run을 done으로
     # 오판하지 않는다. 예외로 승격 → review_pr가 run을 failed로 마감하고
@@ -361,6 +327,42 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
     # 재실행(양 벤더 재실행). 벤더별 follow-up 자동 재시도는 v-next.
     review_repo.finish_run(conn, run_id, "done")
     pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
+
+
+def _build_prompts(pr, diff, context_text: str) -> list[str]:
+    """예산 초과 diff를 파일 경계 청크로 나눠 청크별 프롬프트를 만든다.
+    청크로 나뉜 경우에만 PR 전체 변경 파일을 알려 교차파일 결함 탐지를 돕는다."""
+    chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
+    multi = len(chunks) > 1
+    changed_files = parse_changed_files(diff)
+    return [
+        _build_prompt(
+            pr,
+            c,
+            context_text,
+            chunk_note=(f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if multi else ""),
+            changed_files=(changed_files if multi else ()),
+        )
+        for i, c in enumerate(chunks)
+    ]
+
+
+def _record_vendor_results(conn, results, vr_ids):
+    """벤더 실행 결과를 vendor_result 행에 반영하고 (vr_id, finding) 쌍을 모은다.
+    _execute_run(전원 실패 판정용 succeeded/errors 집계)과 retry가 공유."""
+    findings, succeeded, errors = [], 0, []
+    for vendor, fs, err, dur in results:
+        vr_id = vr_ids[vendor]
+        if err is not None:
+            errors.append(f"{vendor}: {err}")
+            review_repo.finish_vendor_result(conn, vr_id, error=err, duration_ms=dur)
+        else:
+            succeeded += 1
+            review_repo.finish_vendor_result(conn, vr_id, duration_ms=dur)
+            for f in fs:
+                f.vendor_result_id = vr_id  # ★개정: id() 매핑 제거, 명시 부착
+                findings.append((vr_id, f))
+    return findings, succeeded, errors
 
 
 async def _run_vendor(ad, prompts, *, pool, wt, hp, rt):
@@ -461,19 +463,7 @@ async def _retry_failed_vendors(conn, *, run, pr, repo, settings, deps) -> None:
     if not diff.strip():
         return
     context_text = run["context_text"] or ""
-    chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
-    multi = len(chunks) > 1
-    changed_files = parse_changed_files(diff)
-    prompts = [
-        _build_prompt(
-            pr,
-            c,
-            context_text,
-            chunk_note=(f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if multi else ""),
-            changed_files=(changed_files if multi else ()),
-        )
-        for i, c in enumerate(chunks)
-    ]
+    prompts = _build_prompts(pr, diff, context_text)
 
     with checkout(
         deps.worktree,
@@ -500,25 +490,7 @@ async def _retry_failed_vendors(conn, *, run, pr, repo, settings, deps) -> None:
                 )
             )
 
-    new_findings = []
-    for vendor, fs, err, dur in results:
-        vr_id = vr_ids[vendor]
-        if err is not None:
-            conn.execute(
-                "UPDATE vendor_result SET status='failed', error=?, duration_ms=? "
-                "WHERE id=?",
-                (err, dur, vr_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE vendor_result SET status='done', error=NULL, duration_ms=? "
-                "WHERE id=?",
-                (dur, vr_id),
-            )
-            for f in fs:
-                f.vendor_result_id = vr_id
-                new_findings.append((vr_id, f))
-    conn.commit()
+    new_findings, _, _ = _record_vendor_results(conn, results, vr_ids)
 
     _persist(conn, run_id, new_findings)  # consensus는 'single'로 들어감
     # merge 표시가 켜져 있으면 (기존 성공분 + 새로 채운 벤더) 전체에 대해 consensus를

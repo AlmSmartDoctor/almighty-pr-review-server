@@ -428,37 +428,36 @@ def test_jira_provider_renders_acceptance_criteria():
 
 
 def test_db_schema_provider_renders_injected_source():
-    from server.context.db_schema_provider import DBSchemaProvider
+    from server.context.source_provider import SourceBackedProvider
 
-    r = DBSchemaProvider(schema_source=lambda req: "CREATE TABLE users (...);").fetch(
-        _req()
-    )
+    r = SourceBackedProvider(
+        "db_schema", source=lambda req: "CREATE TABLE users (...);"
+    ).fetch(_req())
     assert r.status == "ok" and "CREATE TABLE" in r.text
 
 
 def test_db_schema_provider_skipped_without_source():
-    from server.context.db_schema_provider import DBSchemaProvider
+    from server.context.source_provider import SourceBackedProvider
 
-    r = DBSchemaProvider().fetch(_req())
+    r = SourceBackedProvider("db_schema").fetch(_req())
     assert r.status == "skipped" and r.text == ""
 
 
 def test_db_schema_provider_degrades_on_source_error():
-    from server.context.db_schema_provider import DBSchemaProvider
+    from server.context.source_provider import SourceBackedProvider
 
     def boom(req):
         raise RuntimeError("boom")
 
-    r = DBSchemaProvider(schema_source=boom).fetch(_req())
+    r = SourceBackedProvider("db_schema", source=boom).fetch(_req())
     assert r.status == "empty" and r.text == ""
 
 
 def test_registry_includes_db_schema_provider():
     from server.context.registry import build_context_provider
-    from server.context.db_schema_provider import DBSchemaProvider
 
     c = build_context_provider({"context_db_schema_on": 1}, {"context_db_schema_on": 0})
-    assert any(isinstance(p, DBSchemaProvider) for p in c.providers)
+    assert any(p.name == "db_schema" for p in c.providers)
 
 
 def test_parse_changed_files_extracts_paths():
@@ -570,7 +569,6 @@ def test_file_schema_source_degrades_when_missing(tmp_path):
 
 def test_registry_db_schema_source_wired_from_path(tmp_path):
     from server.context.registry import build_context_provider
-    from server.context.db_schema_provider import DBSchemaProvider
 
     (tmp_path / "schema.sql").write_text(_SCHEMA, encoding="utf-8")
     repo = {
@@ -579,7 +577,7 @@ def test_registry_db_schema_source_wired_from_path(tmp_path):
         "local_path": str(tmp_path),
     }
     c = build_context_provider(repo, {"context_db_schema_on": 0})
-    dbp = next(p for p in c.providers if isinstance(p, DBSchemaProvider))
+    dbp = next(p for p in c.providers if p.name == "db_schema")
     r = dbp.fetch(_req(changed_files=("src/models/user.py",)))
     assert r.status == "ok" and "CREATE TABLE users" in r.text
     assert dbp.fetch(_req(changed_files=("unrelated/thing.py",))).status == "empty"
@@ -687,37 +685,36 @@ def test_file_schema_source_extracts_quoted_qualified_name(tmp_path):
 
 
 def test_graphify_provider_renders_injected_source():
-    from server.context.graphify_provider import GraphifyProvider
+    from server.context.source_provider import SourceBackedProvider
 
-    r = GraphifyProvider(graph_source=lambda req: "# 프로젝트 개요\n진행중").fetch(
-        _req()
-    )
+    r = SourceBackedProvider(
+        "graphify", source=lambda req: "# 프로젝트 개요\n진행중"
+    ).fetch(_req())
     assert r.status == "ok" and "프로젝트 개요" in r.text
 
 
 def test_graphify_provider_skipped_without_source():
-    from server.context.graphify_provider import GraphifyProvider
+    from server.context.source_provider import SourceBackedProvider
 
-    r = GraphifyProvider().fetch(_req())
+    r = SourceBackedProvider("graphify").fetch(_req())
     assert r.status == "skipped" and r.text == ""
 
 
 def test_graphify_provider_degrades_on_source_error():
-    from server.context.graphify_provider import GraphifyProvider
+    from server.context.source_provider import SourceBackedProvider
 
     def boom(req):
         raise RuntimeError("boom")
 
-    r = GraphifyProvider(graph_source=boom).fetch(_req())
+    r = SourceBackedProvider("graphify", source=boom).fetch(_req())
     assert r.status == "empty" and r.text == ""
 
 
 def test_registry_includes_graphify_provider():
     from server.context.registry import build_context_provider
-    from server.context.graphify_provider import GraphifyProvider
 
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
-    assert any(isinstance(p, GraphifyProvider) for p in c.providers)
+    assert any(p.name == "graphify" for p in c.providers)
 
 
 def test_file_project_source_injects_whole_doc_regardless_of_changed_files(tmp_path):
@@ -762,7 +759,6 @@ def test_file_project_source_resolves_relative_to_root(tmp_path):
 def test_registry_graphify_source_wired_from_path(tmp_path, monkeypatch):
     from server import config
     from server.context.registry import build_context_provider
-    from server.context.graphify_provider import GraphifyProvider
 
     _feedback_db(tmp_path).close()  # 미결 지적 없는 빈 앱 DB → open_findings ""
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
@@ -773,7 +769,7 @@ def test_registry_graphify_source_wired_from_path(tmp_path, monkeypatch):
         "local_path": str(tmp_path),
     }
     c = build_context_provider(repo, {"context_graphify_on": 0})
-    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    gp = next(p for p in c.providers if p.name == "graphify")
     assert (
         gp.fetch(_req()).status == "ok" and "프로젝트 현황 X" in gp.fetch(_req()).text
     )
@@ -783,37 +779,36 @@ def test_registry_graphify_source_wired_from_path(tmp_path, monkeypatch):
 
 
 def test_feedback_provider_renders_injected_source():
-    from server.context.feedback_provider import FeedbackContextProvider
+    from server.context.source_provider import SourceBackedProvider
 
-    r = FeedbackContextProvider(feedback_source=lambda req: "팀 피드백 요약").fetch(
-        _req()
-    )
+    r = SourceBackedProvider(
+        "team_feedback", source=lambda req: "팀 피드백 요약"
+    ).fetch(_req())
     assert r.status == "ok" and "팀 피드백" in r.text
 
 
 def test_feedback_provider_skipped_without_source():
-    from server.context.feedback_provider import FeedbackContextProvider
+    from server.context.source_provider import SourceBackedProvider
 
-    r = FeedbackContextProvider().fetch(_req())
+    r = SourceBackedProvider("team_feedback").fetch(_req())
     assert r.status == "skipped" and r.text == ""
 
 
 def test_feedback_provider_degrades_on_source_error():
-    from server.context.feedback_provider import FeedbackContextProvider
+    from server.context.source_provider import SourceBackedProvider
 
     def boom(req):
         raise RuntimeError("boom")
 
-    r = FeedbackContextProvider(feedback_source=boom).fetch(_req())
+    r = SourceBackedProvider("team_feedback", source=boom).fetch(_req())
     assert r.status == "empty" and r.text == ""
 
 
 def test_registry_includes_feedback_provider():
     from server.context.registry import build_context_provider
-    from server.context.feedback_provider import FeedbackContextProvider
 
     c = build_context_provider({"context_feedback_on": 1}, {"context_feedback_on": 0})
-    assert any(isinstance(p, FeedbackContextProvider) for p in c.providers)
+    assert any(p.name == "team_feedback" for p in c.providers)
 
 
 def _fb_rows(*tuples):
@@ -1335,7 +1330,6 @@ def test_open_findings_source_empty_when_none(tmp_path):
 
 def test_registry_graphify_composes_open_findings_without_path(tmp_path, monkeypatch):
     from server import config
-    from server.context.graphify_provider import GraphifyProvider
     from server.context.registry import build_context_provider
 
     conn = _feedback_db(tmp_path)
@@ -1346,7 +1340,7 @@ def test_registry_graphify_composes_open_findings_without_path(tmp_path, monkeyp
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
     # graphify_path 없음 — 오픈 finding 요약만으로 graphify가 산출(스택 검증)
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
-    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    gp = next(p for p in c.providers if p.name == "graphify")
     r = gp.fetch(_req(repo="acme/api", pr_number=9))
     assert r.status == "ok" and "미결 버그" in r.text
 
@@ -1370,7 +1364,6 @@ def _seed_pr(conn, full_name, number, *, title, author, state="open"):
 def test_registry_graphify_excludes_open_pr_list(tmp_path, monkeypatch):
     """오픈 PR 목록은 결함 탐지 신호가 아니라 프롬프트를 희석하므로 어느 경로에도 주입하지 않는다."""
     from server import config
-    from server.context.graphify_provider import GraphifyProvider
     from server.context.registry import build_context_provider
 
     conn = _feedback_db(tmp_path)
@@ -1378,7 +1371,7 @@ def test_registry_graphify_excludes_open_pr_list(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
-    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    gp = next(p for p in c.providers if p.name == "graphify")
     r = gp.fetch(_req(repo="acme/api", pr_number=9))
     # 오픈 finding·문서 없음 → 남는 소스 없음 → empty, 오픈 PR 제목 미주입
     assert r.status == "empty" and "feat: 검색 개선" not in r.text
@@ -1387,7 +1380,6 @@ def test_registry_graphify_excludes_open_pr_list(tmp_path, monkeypatch):
 def test_registry_graphify_excludes_activity(tmp_path, monkeypatch):
     """리뷰 활동 통계는 결함 탐지 신호가 아니라 프롬프트를 희석하므로 어느 경로에도 주입하지 않는다."""
     from server import config
-    from server.context.graphify_provider import GraphifyProvider
     from server.context.registry import build_context_provider
 
     conn = _feedback_db(tmp_path)
@@ -1395,7 +1387,7 @@ def test_registry_graphify_excludes_activity(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fb.db"))
     c = build_context_provider({"context_graphify_on": 1}, {"context_graphify_on": 0})
-    gp = next(p for p in c.providers if isinstance(p, GraphifyProvider))
+    gp = next(p for p in c.providers if p.name == "graphify")
     # 오픈 finding·문서 없음 → 남는 소스 없음 → empty, 활동 현황 미주입
     r = gp.fetch(_req(repo="acme/api", pr_number=5))
     assert r.status == "empty" and "리뷰 활동 현황" not in r.text

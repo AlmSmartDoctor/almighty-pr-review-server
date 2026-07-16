@@ -83,8 +83,8 @@ def build_context_provider(repo, settings):
             print(f"[context] jira provider skipped: {redact_secrets(str(e))}")
     if _effective(repo, settings, "context_db_schema_on"):
         try:
-            from server.context.db_schema_provider import DBSchemaProvider
             from server.context.db_schema_source import file_schema_source
+            from server.context.source_provider import SourceBackedProvider
 
             db_schema_path = _ref(repo, "db_schema_path")
             source = (
@@ -92,14 +92,14 @@ def build_context_provider(repo, settings):
                 if db_schema_path
                 else None
             )
-            providers.append(DBSchemaProvider(schema_source=source))
+            providers.append(SourceBackedProvider("db_schema", source=source))
         except Exception as e:  # never raise
             print(f"[context] db_schema provider skipped: {redact_secrets(str(e))}")
     if _effective(repo, settings, "context_graphify_on"):
         try:
-            from server.context.graphify_provider import GraphifyProvider
             from server.context.graphify_source import file_project_source
             from server.context.server_data_source import open_findings_source
+            from server.context.source_provider import SourceBackedProvider
 
             graphify_path = _ref(repo, "graphify_path")
             doc_source = (
@@ -111,18 +111,18 @@ def build_context_provider(repo, settings):
             # open-PR 목록·리뷰 활동 통계는 결함 탐지 신호가 아니라 프롬프트를 희석하므로
             # 주입하지 않는다(어느 경로에도 노출 안 함 — 해당 소스는 제거됨).
             source = _compose_sources(doc_source, open_findings_source())
-            providers.append(GraphifyProvider(graph_source=source))
+            providers.append(SourceBackedProvider("graphify", source=source))
         except Exception as e:  # never raise
             print(f"[context] graphify provider skipped: {redact_secrets(str(e))}")
     if _effective(repo, settings, "context_feedback_on"):
         try:
-            from server.context.feedback_provider import FeedbackContextProvider
             from server.context.feedback_source import db_feedback_source
+            from server.context.source_provider import SourceBackedProvider
 
             # per-repo 경로 없음 — 소스가 앱 DB에서 이 레포 결정을 읽는다.
             # 결정이 없으면 소스가 ""를 반환해 자동 미주입.
             providers.append(
-                FeedbackContextProvider(feedback_source=db_feedback_source())
+                SourceBackedProvider("team_feedback", source=db_feedback_source())
             )
         except Exception as e:  # never raise
             print(f"[context] feedback provider skipped: {redact_secrets(str(e))}")

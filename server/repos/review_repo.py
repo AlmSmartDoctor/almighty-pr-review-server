@@ -72,18 +72,35 @@ def add_vendor_result(
     vendor,
     status,
     duration_ms=None,
-    tokens=None,
     raw_path=None,
     error=None,
 ) -> int:
     cur = conn.execute(
         """INSERT INTO vendor_result
-           (run_id, vendor, status, duration_ms, tokens, raw_path, error, started_at)
-           VALUES (?,?,?,?,?,?,?, datetime('now'))""",
-        (run_id, vendor, status, duration_ms, tokens, raw_path, error),
+           (run_id, vendor, status, duration_ms, raw_path, error, started_at)
+           VALUES (?,?,?,?,?,?, datetime('now'))""",
+        (run_id, vendor, status, duration_ms, raw_path, error),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def finish_vendor_result(conn, vr_id, *, error=None, duration_ms=None):
+    """벤더 실행 종료 반영: error가 있으면 failed, 없으면 done(+error=NULL —
+    부분 재시도 성공 시 이전 실패 흔적을 지운다; 첫 실행에선 이미 NULL이라 no-op)."""
+    if error is not None:
+        conn.execute(
+            "UPDATE vendor_result SET status='failed', error=?, duration_ms=? "
+            "WHERE id=?",
+            (error, duration_ms, vr_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE vendor_result SET status='done', error=NULL, duration_ms=? "
+            "WHERE id=?",
+            (duration_ms, vr_id),
+        )
+    conn.commit()
 
 
 def get_run(conn, run_id):

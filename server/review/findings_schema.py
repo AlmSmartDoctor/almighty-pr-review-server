@@ -1,12 +1,10 @@
 import json
-import re
 
 from server.models import Finding
+from server.review.json_block import last_json_block
 
 SEVERITIES = {"critical", "high", "medium", "low"}
 CATEGORIES = {"bug", "security", "perf", "style", "other"}
-
-_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 class SchemaError(ValueError):
@@ -21,13 +19,12 @@ def parse_findings(raw: str, *, vendor: str) -> list[Finding]:
     file·claim이 없는 항목만 버린다. 구조적 실패(펜스 없음/JSON 깨짐/findings 비배열)만 raise해
     벤더 실패로 노출한다. 빈 배열은 정상(이슈 없음)이지만, 항목이 있었는데 전부 버려지면 raise
     (파싱 불능을 조용한 초록불로 오판하지 않음)."""
-    matches = _FENCE.findall(raw)
-    if not matches:
-        raise SchemaError("응답에 JSON 블록이 없음")
     try:
-        data = json.loads(matches[-1])
+        data = last_json_block(raw)
     except json.JSONDecodeError as e:
         raise SchemaError(f"JSON 파싱 실패: {e}") from e
+    except ValueError as e:
+        raise SchemaError(str(e)) from e
     items = data.get("findings")
     if not isinstance(items, list):
         raise SchemaError("findings 배열 없음")

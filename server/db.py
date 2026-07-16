@@ -7,8 +7,6 @@ CREATE TABLE IF NOT EXISTS repo (
   full_name TEXT NOT NULL UNIQUE,
   enabled INTEGER NOT NULL DEFAULT 1,
   trigger_mode TEXT NOT NULL DEFAULT 'auto',      -- auto|manual
-  poll_interval_sec INTEGER NOT NULL DEFAULT 60,
-  default_effort TEXT NOT NULL DEFAULT 'medium',
   vendor_claude_on INTEGER NOT NULL DEFAULT 1,
   vendor_codex_on INTEGER NOT NULL DEFAULT 1,
   merge_enabled INTEGER NOT NULL DEFAULT 0,
@@ -46,7 +44,7 @@ CREATE TABLE IF NOT EXISTS vendor_result (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER NOT NULL REFERENCES review_run(id),
   vendor TEXT NOT NULL,                            -- claude|codex
-  status TEXT, duration_ms INTEGER, tokens INTEGER,
+  status TEXT, duration_ms INTEGER,
   raw_path TEXT, error TEXT
 );
 CREATE TABLE IF NOT EXISTS finding (
@@ -121,7 +119,6 @@ CREATE TABLE IF NOT EXISTS app_settings (
   default_effort TEXT NOT NULL DEFAULT 'medium',
   concurrency_limit INTEGER NOT NULL DEFAULT 2,
   default_poll_interval INTEGER NOT NULL DEFAULT 60,
-  approval_gate_on INTEGER NOT NULL DEFAULT 1,
   prescreen_model TEXT NOT NULL DEFAULT 'haiku',
   review_model TEXT NOT NULL DEFAULT 'sonnet',
   codex_model TEXT NOT NULL DEFAULT '',

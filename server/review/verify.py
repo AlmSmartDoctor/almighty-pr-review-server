@@ -1,15 +1,14 @@
 import json
-import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from server.review.json_block import last_json_block
 
 VERIFY_SCHEMA_HINT = (
     "위 지적이 실제 결함인지 회의적으로 재검증하라. 근거가 약하거나 오탐이면 refuted=true. "
     '반드시 마지막에 ```json 블록으로 {"refuted":true|false,"rationale":"판단 근거"} 만 출력.'
 )
-
-_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 class VerdictError(ValueError):
@@ -36,13 +35,12 @@ class VerifyContext:
 
 def parse_verdict(raw: str) -> Verdict:
     """CLI stdout에서 마지막 ```json 블록의 verdict를 추출·검증."""
-    matches = _FENCE.findall(raw)
-    if not matches:
-        raise VerdictError("응답에 JSON 블록이 없음")
     try:
-        data = json.loads(matches[-1])
+        data = last_json_block(raw)
     except json.JSONDecodeError as e:
         raise VerdictError(f"JSON 파싱 실패: {e}") from e
+    except ValueError as e:
+        raise VerdictError(str(e)) from e
     if not isinstance(data, dict) or "refuted" not in data:
         raise VerdictError("refuted 필드 없음")
     return Verdict(

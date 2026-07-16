@@ -1,11 +1,10 @@
-import json
-import re
 import subprocess
 from dataclasses import dataclass
 
+from server.review.json_block import last_json_block
+
 _ORDER = {"trivial": 0, "moderate": 1, "complex": 2}
 THRESHOLDS = tuple(_ORDER)  # 설정 API 검증용 — 밖의 값은 decide()에서 KeyError
-_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 # CLI 출력이 파싱 불가일 때의 보수적 기본값. 비결정적 실패라 캐시 재사용 금지
 # (다음 런이 CLI를 재시도해 self-heal 하도록) — pipeline이 이 사유로 식별.
@@ -66,17 +65,15 @@ def prescreen(
     if len(diff) > MAX_INLINE_DIFF_CHARS:
         return PreScreenResult("complex", 1.0, diff_too_large_reason(diff))
     out = runner(["claude", "-p", PROMPT + diff, "--model", model], env=env, cwd=cwd)
-    m = _FENCE.findall(out)
-    if m:
-        try:
-            d = json.loads(m[-1])
-            complexity = d.get("complexity", "moderate")
-            if complexity in _ORDER:
-                return PreScreenResult(
-                    complexity, float(d.get("score", 0.5)), str(d.get("reason", ""))
-                )
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+    try:
+        d = last_json_block(out)
+        complexity = d.get("complexity", "moderate")
+        if complexity in _ORDER:
+            return PreScreenResult(
+                complexity, float(d.get("score", 0.5)), str(d.get("reason", ""))
+            )
+    except (ValueError, TypeError):
+        pass
     return PreScreenResult("moderate", 0.5, PRESCREEN_FALLBACK_REASON)
 
 
