@@ -219,7 +219,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
               <Input type="number" min={15} step={5} className="w-24 text-right" value={draft.default_poll_interval}
                      onChange={(e) => setDraft({ ...draft, default_poll_interval: Number(e.target.value) })} />
             </Field>
-            <Field title="교차확인" help="한 벤더만 낸 critical/high 지적을 다른 벤더로 반박 검증하고, 반박되면 신뢰도를 낮춤">
+            <Field title="교차확인" help="한 벤더만 낸 critical/high 지적을 다른 벤더가 반박하고, 저자 벤더가 변호한다. 저자가 수긍하면 신뢰도를 낮추고, 방어하면 견해 대립(신뢰도 유지)으로 표시">
               <Switch aria-label="교차확인" checked={!!draft.verify_singles_on}
                       onCheckedChange={(v) => setDraft({ ...draft, verify_singles_on: v ? 1 : 0 })} />
             </Field>

@@ -609,10 +609,14 @@ async def _verify_singles(deps, merged, *, repo, pr, diff, harness) -> None:
         )
         return
     for m, v in zip(targets, verdicts):
-        m.finding.verify_status = "refuted" if v.refuted else "confirmed"
-        m.finding.verify_rationale = v.rationale
-        if v.refuted:
+        if v.refuted:  # 저자도 수긍한 오탐 → 신뢰도 반감
+            m.finding.verify_status = "refuted"
             m.finding.confidence = round(m.finding.confidence * 0.5, 3)
+        elif getattr(v, "contested", False):  # 저자가 방어 → 대립, 반감하지 않음
+            m.finding.verify_status = "contested"
+        else:
+            m.finding.verify_status = "confirmed"
+        m.finding.verify_rationale = v.rationale
 
 
 def _build_prompt(

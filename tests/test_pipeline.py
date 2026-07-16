@@ -888,6 +888,33 @@ def test_pipeline_verify_confirmed_keeps_confidence(db):
     assert f["confidence"] == 0.9
 
 
+def test_pipeline_verify_contested_keeps_confidence(db):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=55, head_sha="s55", verify_singles_on=1)
+    # 반박당했지만 저자가 방어 → contested: 진짜 finding이므로 신뢰도를 반감하지 않는다.
+    verify = FakeVerify(
+        [Verdict(refuted=False, contested=True, rationale="반박 vs 변호")]
+    )
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude",
+                [Finding("claude", "a.py", 1, "critical", "bug", "c", "r", 0.9)],
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    f = finding_repo.list_for_run(db, run_id)[0]
+    assert f["verify_status"] == "contested"
+    assert f["confidence"] == 0.9  # 반감하지 않음
+
+
 def test_pipeline_verify_skips_consensus_findings(db):
     from server.review.verify import Verdict
 

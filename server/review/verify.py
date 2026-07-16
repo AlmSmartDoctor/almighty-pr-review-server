@@ -20,6 +20,7 @@ class VerdictError(ValueError):
 class Verdict:
     refuted: bool
     rationale: str = ""
+    contested: bool = False  # 반박당했으나 저자가 방어 → 견해 대립(반감하지 않음)
 
 
 @dataclass
@@ -61,6 +62,57 @@ def build_verify_prompt(finding, diff: str) -> str:
     )
 
 
+def build_rebuttal_prompt(finding, diff: str, challenge: str) -> str:
+    """반박당한 지적의 저자 벤더에게 변호 기회를 준다. 스키마 힌트(오탐이면 refuted=true)에
+    맞춰, 반박이 타당해 지적이 오탐이면 refuted=true, 반박이 틀렸고 지적이 유효하면 false."""
+    return (
+        "# 리뷰 지적에 대한 반박 재검토\n"
+        f"- 파일: {finding.file}:{finding.line}\n"
+        f"- 심각도/분류: {finding.severity}/{finding.category}\n"
+        f"- 원래 주장: {finding.claim}\n"
+        f"- 원래 근거: {finding.rationale}\n\n"
+        f"## 다른 벤더의 반박\n{challenge}\n\n"
+        f"## Diff\n```diff\n{diff}\n```\n"
+        "이 반박이 타당한가? 지적이 실제로 오탐이면 refuted=true, 반박이 틀렸고 "
+        "지적이 유효하면 refuted=false. 필요하면 레포를 읽어 확인하라(수정 금지)."
+    )
+
+
+async def _debate(finding, *, refuter, author, diff, harness, workdir, runtime_dir):
+    """2라운드 디베이트: 상대 벤더가 반박(1R) → 반박되면 저자 벤더가 변호(2R).
+    - 반박 안 됨 → confirmed(반대 의견 없음)
+    - 반박됨 + 저자 수긍 → refuted(호출부가 confidence 반감)
+    - 반박됨 + 저자 방어 → contested(반감하지 않고 사람에게 노출)
+    검증/디베이트 실패는 리뷰 결과를 삭제하지 않도록 보수적으로 degrade한다(B-INV-4/8)."""
+
+    async def ask(ad, prompt):
+        return await ad.verify(
+            prompt=prompt, workdir=workdir, harness=harness, runtime_dir=runtime_dir
+        )
+
+    if refuter is None:
+        return Verdict(refuted=False)
+    try:
+        r1 = await ask(refuter, build_verify_prompt(finding, diff))
+    except Exception:
+        return Verdict(refuted=False)  # degrade: 확정 취급(삭제 아님)
+    if not r1.refuted:
+        return Verdict(refuted=False, rationale=r1.rationale)  # 반대 의견 없음
+    if author is None or author is refuter:
+        return Verdict(refuted=True, rationale=r1.rationale)  # 변호할 저자 없음
+    try:
+        r2 = await ask(author, build_rebuttal_prompt(finding, diff, r1.rationale))
+    except Exception:
+        return Verdict(refuted=True, rationale=r1.rationale)  # 변호 실패 → 반박 유지
+    if r2.refuted:  # 저자도 오탐 인정 → 반박 확정
+        return Verdict(refuted=True, rationale=r1.rationale)
+    return Verdict(  # 저자가 방어 → 견해 대립(반감하지 않음), 양측 근거 보존
+        refuted=False,
+        contested=True,
+        rationale=f"반박: {r1.rationale} / 저자 변호: {r2.rationale}",
+    )
+
+
 def _pick_verifier(by_vendor: dict, author_vendor: str):
     """저자가 자기 지적을 변호하지 않도록 다른 벤더를 우선 검증자로 쓴다."""
     for name, ad in by_vendor.items():
@@ -89,20 +141,17 @@ def make_verifier(adapters, worktree, clone=None):
             with tempfile.TemporaryDirectory(prefix="almighty-vf-") as rt:
                 ctx.harness.prepare_runtime(runtime_dir=rt)
                 for m in targets:
-                    ad = _pick_verifier(by_vendor, m.vendor)
-                    if ad is None:
-                        verdicts.append(Verdict(refuted=False))
-                        continue
-                    try:
-                        v = await ad.verify(
-                            prompt=build_verify_prompt(m, ctx.diff),
-                            workdir=Path(str(wt)),
+                    verdicts.append(
+                        await _debate(
+                            m,
+                            refuter=_pick_verifier(by_vendor, m.vendor),
+                            author=by_vendor.get(m.vendor),
+                            diff=ctx.diff,
                             harness=ctx.harness,
+                            workdir=Path(str(wt)),
                             runtime_dir=rt,
                         )
-                    except Exception:
-                        v = Verdict(refuted=False)  # degrade: 확정 취급(삭제 아님)
-                    verdicts.append(v)
+                    )
         return verdicts
 
     return verify
