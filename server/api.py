@@ -224,7 +224,6 @@ def learn(conn=Depends(get_conn)):
 class RepoPatch(BaseModel):
     enabled: int | None = None
     trigger_mode: str | None = None
-    default_effort: str | None = None
     claude_model: str | None = None
     claude_effort: str | None = None
     codex_model: str | None = None
@@ -692,8 +691,6 @@ def get_harness(name: str):
         "system_prompt": hp.system_prompt,
         "claude_allowed_tools": hp.claude_allowed_tools,
         "codex_sandbox": hp.codex_sandbox,
-        "model": hp.model,
-        "effort": hp.effort,
     }
 
 

@@ -7,8 +7,6 @@ const harness = {
   system_prompt: "원본 리뷰 지침",
   claude_allowed_tools: ["Read", "Grep", "Glob"],
   codex_sandbox: "read-only",
-  model: "default",
-  effort: "medium",
 };
 
 test("loads and saves the default harness prompt", async () => {

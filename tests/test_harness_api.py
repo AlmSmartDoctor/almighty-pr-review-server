@@ -19,9 +19,7 @@ def _seed_default_harness(harness_dir):
             }
         )
     )
-    (d / "config.json").write_text(
-        json.dumps({"model": "sonnet", "effort": "medium", "prescreen_model": "haiku"})
-    )
+    (d / "config.json").write_text(json.dumps({"prescreen_model": "haiku"}))
 
 
 def test_get_and_update_harness_prompt(tmp_path, monkeypatch):
@@ -65,7 +63,7 @@ def test_put_creates_new_harness_scaffolded_from_default(tmp_path, monkeypatch):
     assert body["system_prompt"] == "보안 집중"
     # config/tools는 default에서 복사됨
     assert body["claude_allowed_tools"] == ["Read", "Grep", "Glob"]
-    assert body["model"] == "sonnet"
+    assert body["codex_sandbox"] == "read-only"
     assert sorted(client.get("/api/harness").json()["harnesses"]) == [
         "default",
         "security-focus",

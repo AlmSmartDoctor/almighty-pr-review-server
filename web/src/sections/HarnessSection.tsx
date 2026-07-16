@@ -16,8 +16,6 @@ type Harness = {
   system_prompt: string;
   claude_allowed_tools: string[];
   codex_sandbox: string;
-  model: string;
-  effort: string;
 };
 
 export function HarnessSection({ load, save, loadList }: {
@@ -111,7 +109,7 @@ export function HarnessSection({ load, save, loadList }: {
             <Button variant="outline" onClick={createNew}><Plus /> 새 하네스</Button>
           </div>
           <StatusLine className="pt-2">
-            새 하네스는 default의 도구 allowlist·모델 설정을 복사해 만들어집니다. 레포별 하네스는 설정 화면에서 지정합니다.
+            새 하네스는 default의 도구 allowlist·샌드박스 설정을 복사해 만들어집니다. 모델·effort는 설정 화면에서, 레포별 하네스도 설정 화면에서 지정합니다.
           </StatusLine>
         </CardContent>
       </Card>
@@ -141,12 +139,6 @@ export function HarnessSection({ load, save, loadList }: {
             </Field>
             <Field title="Codex sandbox" help="쓰기 작업은 서버 승인 포스팅만 허용">
               <Badge variant="codex">{harness.codex_sandbox}</Badge>
-            </Field>
-            <Field title="모델 / effort" help={`${harness.name} 하네스 설정`}>
-              <div className="flex flex-wrap justify-end gap-1.5">
-                <Badge variant="neutral">{harness.model}</Badge>
-                <Badge variant="neutral">{harness.effort}</Badge>
-              </div>
             </Field>
           </div>
 

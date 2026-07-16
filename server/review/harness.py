@@ -56,29 +56,26 @@ class HarnessProfile:
     system_prompt: str
     claude_allowed_tools: list[str]
     codex_sandbox: str
-    mcp: str
-    model: str
-    effort: str  # claude reasoning effort(--effort)
-    prescreen_model: str
-    codex_model: str  # "" = codex CLI 자체 기본 모델(--model 미전달)
-    codex_effort: str = ""  # codex reasoning effort(-c model_reasoning_effort)
+    model: str  # pipeline._apply_models가 레포·전역 설정으로 채움(하네스엔 미보관)
+    effort: str  # 〃 claude reasoning effort(--effort)
+    codex_model: str  # 〃 "" = codex CLI 자체 기본 모델(--model 미전달)
+    codex_effort: str = ""  # 〃 codex reasoning effort(-c model_reasoning_effort)
 
     @classmethod
     def load(cls, name: str) -> "HarnessProfile":
+        # 하네스 = system_prompt + 도구 allowlist + 샌드박스. 모델/effort는 보관하지 않고
+        # pipeline._apply_models가 레포·전역 설정으로 전량 채운다(그래서 여기선 "").
         base = config.HARNESS_DIR / name
         tools = json.loads((base / "tools-allowlist.json").read_text())
-        cfg = json.loads((base / "config.json").read_text())
         return cls(
             name=name,
             system_prompt=(base / "review-system-prompt.md").read_text(),
             claude_allowed_tools=tools["claude_allowed_tools"],
             codex_sandbox=tools["codex_sandbox"],
-            mcp=tools.get("mcp", "none"),
-            model=cfg["model"],
-            effort=cfg["effort"],
-            prescreen_model=cfg.get("prescreen_model", "haiku"),
-            codex_model=cfg.get("codex_model", ""),
-            codex_effort=cfg.get("codex_effort", cfg["effort"]),
+            model="",
+            effort="",
+            codex_model="",
+            codex_effort="",
         )
 
     # 인증에 필요한 env allowlist(키체인 접근 등). 정확한 목록은 Task 0.5 실증값.

@@ -28,7 +28,6 @@ def list_enabled(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 ALLOWED = {
     "enabled",
     "trigger_mode",
-    "default_effort",
     "claude_model",
     "claude_effort",
     "codex_model",
