@@ -14,6 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 type Harness = {
   name: string;
   system_prompt: string;
+  vendor_prompts?: Record<string, string>;
   claude_allowed_tools: string[];
   codex_sandbox: string;
 };
@@ -30,14 +31,23 @@ export function HarnessSection({ load, save, loadList }: {
   const [selected, setSelected] = useState("default");
   const [harness, setHarness] = useState<Harness | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [claudePrompt, setClaudePrompt] = useState("");
+  const [codexPrompt, setCodexPrompt] = useState("");
   const [newName, setNewName] = useState("");
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
 
+  const apply = (h: Harness) => {
+    setHarness(h);
+    setPrompt(h.system_prompt);
+    setClaudePrompt(h.vendor_prompts?.claude ?? "");
+    setCodexPrompt(h.vendor_prompts?.codex ?? "");
+  };
+
   const loadHarness = (name: string) => {
     setErr("");
     return loader(name)
-      .then((h) => { setHarness(h); setPrompt(h.system_prompt); })
+      .then(apply)
       .catch(() => setErr("하네스를 불러오지 못했습니다."));
   };
 
@@ -46,11 +56,16 @@ export function HarnessSection({ load, save, loadList }: {
   }, []);
   useEffect(() => { loadHarness(selected); }, [selected]);
 
+  const body = () => ({
+    system_prompt: prompt,
+    vendor_prompts: { claude: claudePrompt, codex: codexPrompt },
+  });
+
   const persist = () => {
     setErr("");
     setStatus("");
-    saver(selected, { system_prompt: prompt })
-      .then((h) => { setHarness(h); setPrompt(h.system_prompt); setStatus("하네스를 저장했습니다."); })
+    saver(selected, body())
+      .then((h) => { apply(h); setStatus("하네스를 저장했습니다."); })
       .catch(() => setErr("하네스 저장에 실패했습니다."));
   };
 
@@ -60,7 +75,7 @@ export function HarnessSection({ load, save, loadList }: {
     if (names.includes(name)) { setErr("이미 존재하는 하네스입니다."); return; }
     setErr("");
     setStatus("");
-    saver(name, { system_prompt: prompt })
+    saver(name, body())
       .then((h) => {
         setNewName("");
         setNames((ns) => (ns.includes(h.name) ? ns : [...ns, h.name].sort()));
@@ -72,7 +87,11 @@ export function HarnessSection({ load, save, loadList }: {
 
   if (!harness) return <p className="text-sm text-muted-foreground">불러오는 중...</p>;
 
-  const dirty = prompt !== harness.system_prompt;
+  const vp = harness.vendor_prompts ?? {};
+  const dirty =
+    prompt !== harness.system_prompt ||
+    claudePrompt !== (vp.claude ?? "") ||
+    codexPrompt !== (vp.codex ?? "");
   const options = names.includes(selected) ? names : [selected, ...names];
 
   return (
@@ -121,13 +140,31 @@ export function HarnessSection({ load, save, loadList }: {
         </CardHeader>
         <CardContent className="pt-1">
           <div className="divide-y divide-border">
-            <Field title="리뷰 지침" help="Claude / Codex 공통 system prompt" vertical>
+            <Field title="리뷰 지침" help="공통 system prompt (벤더별 오버라이드가 없을 때 사용)" vertical>
               <Textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 aria-label="리뷰 system prompt"
                 spellCheck={false}
                 className="min-h-[280px] font-mono text-[13px] leading-relaxed"
+              />
+            </Field>
+            <Field title="Claude 전용 지침" help="비우면 공통 지침 사용" vertical>
+              <Textarea
+                value={claudePrompt}
+                onChange={(e) => setClaudePrompt(e.target.value)}
+                aria-label="Claude 전용 지침"
+                spellCheck={false}
+                className="min-h-[160px] font-mono text-[13px] leading-relaxed"
+              />
+            </Field>
+            <Field title="Codex 전용 지침" help="비우면 공통 지침 사용" vertical>
+              <Textarea
+                value={codexPrompt}
+                onChange={(e) => setCodexPrompt(e.target.value)}
+                aria-label="Codex 전용 지침"
+                spellCheck={false}
+                className="min-h-[160px] font-mono text-[13px] leading-relaxed"
               />
             </Field>
             <Field title="Claude allowlist" help="read-only 도구만 허용">
@@ -148,7 +185,7 @@ export function HarnessSection({ load, save, loadList }: {
             </Button>
             <Button
               variant="outline"
-              onClick={() => { setPrompt(harness.system_prompt); setStatus("변경을 되돌렸습니다."); }}
+              onClick={() => { apply(harness); setStatus("변경을 되돌렸습니다."); }}
               disabled={!dirty}
             >
               <RotateCcw /> 되돌리기

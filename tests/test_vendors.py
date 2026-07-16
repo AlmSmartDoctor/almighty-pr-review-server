@@ -164,6 +164,28 @@ def test_claude_adapter_omits_effort_when_unknown_value(tmp_path):
     assert "--effort" not in args
 
 
+def test_adapter_uses_per_vendor_system_prompt_with_shared_fallback(tmp_path):
+    hp = HarnessProfile.load("default")
+    hp.vendor_prompts = {"claude": "클로드 전용 지침"}
+    # claude → 자기 오버라이드가 프롬프트 앞에 붙는다
+    r1 = fake_runner(FAKE_OUT)
+    asyncio.run(
+        ClaudeAdapter(runner=r1).review(
+            prompt="리뷰해", workdir=tmp_path, harness=hp, runtime_dir=str(tmp_path)
+        )
+    )
+    claude_full = r1.calls[0]["args"][r1.calls[0]["args"].index("-p") + 1]
+    assert claude_full.startswith("클로드 전용 지침")
+    # codex → 오버라이드 없음 → 공통 지침으로 폴백(positional 마지막 인자)
+    r2 = fake_runner(FAKE_OUT)
+    asyncio.run(
+        CodexAdapter(runner=r2).review(
+            prompt="리뷰해", workdir=tmp_path, harness=hp, runtime_dir=str(tmp_path)
+        )
+    )
+    assert r2.calls[0]["args"][-1].startswith(hp.system_prompt)
+
+
 def test_default_runner_timeout_raises_vendor_timeout():
     with pytest.raises(VendorTimeout):
         asyncio.run(_default_runner(["sleep", "5"], timeout=0.2))

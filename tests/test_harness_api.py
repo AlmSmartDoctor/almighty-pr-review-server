@@ -122,3 +122,42 @@ def test_get_missing_harness_404(tmp_path, monkeypatch):
     _seed_default_harness(config.HARNESS_DIR)
     client = TestClient(app)
     assert client.get("/api/harness/nonexistent").status_code == 404
+
+
+def test_get_harness_includes_empty_vendor_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    assert client.get("/api/harness/default").json()["vendor_prompts"] == {}
+
+
+def test_put_and_get_per_vendor_prompt_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    r = client.put(
+        "/api/harness/default", json={"vendor_prompts": {"claude": "클로드 전용"}}
+    )
+    assert r.status_code == 200
+    got = client.get("/api/harness/default").json()
+    assert got["vendor_prompts"] == {"claude": "클로드 전용"}
+    assert got["system_prompt"] == "원본 리뷰 지침"  # 공통 지침은 그대로
+
+
+def test_put_empty_vendor_prompt_reverts_to_shared(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    client.put(
+        "/api/harness/default", json={"vendor_prompts": {"codex": "코덱스 전용"}}
+    )
+    client.put("/api/harness/default", json={"vendor_prompts": {"codex": ""}})
+    assert client.get("/api/harness/default").json()["vendor_prompts"] == {}
+
+
+def test_put_invalid_vendor_key_rejected_400(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "HARNESS_DIR", tmp_path / "harness")
+    _seed_default_harness(config.HARNESS_DIR)
+    client = TestClient(app)
+    r = client.put("/api/harness/default", json={"vendor_prompts": {"gpt": "x"}})
+    assert r.status_code == 400

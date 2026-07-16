@@ -3,13 +3,14 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from server import config
 
 _HARNESS_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _HARNESS_FILES = ("config.json", "tools-allowlist.json", "review-system-prompt.md")
+VENDORS = ("claude", "codex")
 
 
 def validate_harness_name(name: str) -> str:
@@ -17,6 +18,27 @@ def validate_harness_name(name: str) -> str:
     if not _HARNESS_NAME_RE.fullmatch(name):
         raise ValueError(f"invalid harness name: {name!r}")
     return name
+
+
+def _vendor_prompt_file(vendor: str) -> str:
+    if vendor not in VENDORS:
+        raise ValueError(f"invalid vendor: {vendor!r}")
+    return f"review-system-prompt.{vendor}.md"
+
+
+def set_vendor_prompt(name: str, vendor: str, text: str) -> None:
+    """하네스에 벤더별 system prompt 오버라이드를 기록한다. text가 비면 오버라이드
+    파일을 제거해 공통 지침으로 되돌린다."""
+    validate_harness_name(name)
+    fname = _vendor_prompt_file(vendor)
+    base = config.HARNESS_DIR / name
+    if not base.is_dir():
+        raise ValueError(f"harness not found: {name!r}")
+    dest = base / fname
+    if text:
+        dest.write_text(text)
+    elif dest.exists():
+        dest.unlink()
 
 
 def list_harnesses() -> list[str]:
@@ -60,6 +82,12 @@ class HarnessProfile:
     effort: str  # 〃 claude reasoning effort(--effort)
     codex_model: str  # 〃 "" = codex CLI 자체 기본 모델(--model 미전달)
     codex_effort: str = ""  # 〃 codex reasoning effort(-c model_reasoning_effort)
+    # 벤더별 system prompt 오버라이드(파일 있을 때만). 없으면 공통 지침으로 폴백.
+    vendor_prompts: dict[str, str] = field(default_factory=dict)
+
+    def system_prompt_for(self, vendor: str) -> str:
+        """벤더별 오버라이드가 있으면 그것, 없으면 공통 지침으로 폴백."""
+        return self.vendor_prompts.get(vendor) or self.system_prompt
 
     @classmethod
     def load(cls, name: str) -> "HarnessProfile":
@@ -67,6 +95,11 @@ class HarnessProfile:
         # pipeline._apply_models가 레포·전역 설정으로 전량 채운다(그래서 여기선 "").
         base = config.HARNESS_DIR / name
         tools = json.loads((base / "tools-allowlist.json").read_text())
+        vendor_prompts = {
+            v: (base / _vendor_prompt_file(v)).read_text()
+            for v in VENDORS
+            if (base / _vendor_prompt_file(v)).exists()
+        }
         return cls(
             name=name,
             system_prompt=(base / "review-system-prompt.md").read_text(),
@@ -76,6 +109,7 @@ class HarnessProfile:
             effort="",
             codex_model="",
             codex_effort="",
+            vendor_prompts=vendor_prompts,
         )
 
     # 인증에 필요한 env allowlist(키체인 접근 등). 정확한 목록은 Task 0.5 실증값.

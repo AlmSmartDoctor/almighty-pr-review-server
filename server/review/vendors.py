@@ -56,7 +56,7 @@ class _BaseAdapter:
     async def review(
         self, *, prompt: str, workdir: Path, harness: HarnessProfile, runtime_dir: str
     ) -> list[Finding]:
-        full = f"{harness.system_prompt}\n\n{prompt}\n\n{PROMPT_SCHEMA_HINT}"
+        full = f"{harness.system_prompt_for(self.vendor)}\n\n{prompt}\n\n{PROMPT_SCHEMA_HINT}"
         env = harness.isolated_env(runtime_dir=runtime_dir)  # ★개정: allowlist env
         out = await self._run(
             self._build_argv(full, harness),
@@ -71,7 +71,7 @@ class _BaseAdapter:
     ):
         from server.review.verify import VERIFY_SCHEMA_HINT, parse_verdict
 
-        full = f"{harness.system_prompt}\n\n{prompt}\n\n{VERIFY_SCHEMA_HINT}"
+        full = f"{harness.system_prompt_for(self.vendor)}\n\n{prompt}\n\n{VERIFY_SCHEMA_HINT}"
         env = harness.isolated_env(runtime_dir=runtime_dir)
         out = await self._run(
             self._build_argv(full, harness),

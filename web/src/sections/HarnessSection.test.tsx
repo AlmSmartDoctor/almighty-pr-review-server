@@ -23,8 +23,32 @@ test("loads and saves the default harness prompt", async () => {
   fireEvent.click(screen.getByRole("button", { name: "하네스 저장" }));
 
   await waitFor(() =>
-    expect(save).toHaveBeenCalledWith("default", { system_prompt: "새 리뷰 지침" }));
+    expect(save).toHaveBeenCalledWith("default", {
+      system_prompt: "새 리뷰 지침",
+      vendor_prompts: { claude: "", codex: "" },
+    }));
   expect(await screen.findByText("하네스를 저장했습니다.")).toBeInTheDocument();
+});
+
+test("edits per-vendor prompt overrides and saves them", async () => {
+  const withVendor = { ...harness, vendor_prompts: { claude: "클로드 전용" } };
+  const save = vi.fn(async (_name: string, body: object) => ({ ...withVendor, ...body }));
+
+  render(<HarnessSection load={async () => withVendor} save={save} />);
+
+  const claude = await screen.findByLabelText("Claude 전용 지침");
+  expect(claude).toHaveValue("클로드 전용");
+  const codex = screen.getByLabelText("Codex 전용 지침");
+  expect(codex).toHaveValue(""); // 오버라이드 없음 → 빈 값(공통 지침 사용)
+
+  fireEvent.change(codex, { target: { value: "코덱스 전용" } });
+  fireEvent.click(screen.getByRole("button", { name: "하네스 저장" }));
+
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith("default", {
+      system_prompt: "원본 리뷰 지침",
+      vendor_prompts: { claude: "클로드 전용", codex: "코덱스 전용" },
+    }));
 });
 
 test("switches harness selection and creates a new one", async () => {

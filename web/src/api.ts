@@ -17,6 +17,11 @@ const writeJson = (method: string, body: object) => ({
   body: JSON.stringify(body),
 });
 
+export type HarnessPut = {
+  system_prompt?: string;
+  vendor_prompts?: Record<string, string>;
+};
+
 export const api = {
   repos: () => fetch("/api/repos").then(json),
   addRepo: (body: { full_name: string; local_path?: string }) =>
@@ -31,7 +36,7 @@ export const api = {
   models: () => fetch("/api/models").then(json),
   harnesses: () => fetch("/api/harness").then(json).then((r) => r.harnesses as string[]),
   harness: (name: string) => fetch(`/api/harness/${name}`).then(json),
-  putHarness: (name: string, body: object) =>
+  putHarness: (name: string, body: HarnessPut) =>
     fetch(`/api/harness/${name}`, writeJson("PUT", body)).then(json),
   runFindings: (id: number) => fetch(`/api/runs/${id}/findings`).then(json),
   runVendorResults: (id: number) => fetch(`/api/runs/${id}/vendor-results`).then(json),
