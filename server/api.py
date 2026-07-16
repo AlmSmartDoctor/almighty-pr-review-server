@@ -468,40 +468,34 @@ def _post_health(conn, pid: int, gh) -> dict:
         "issue": {"ok": False, "number": pr["number"], "error": None},
         "message": "",
     }
-    try:
-        user = gh.preflight_user()
-        health["auth"].update({"ok": True, "login": user.get("login")})
-    except GitHubCliError as e:
-        health["auth"].update(
-            {"error": _github_error_message(e), "status": e.http_status}
-        )
-        health["message"] = health["auth"]["error"]
-        return health
-
-    try:
-        repo_info = gh.preflight_repo(repo["full_name"])
-        health["repo"].update(
-            {"ok": True, "full_name": repo_info.get("full_name", repo["full_name"])}
-        )
-    except GitHubCliError as e:
-        health["repo"].update(
-            {"error": _github_error_message(e), "status": e.http_status}
-        )
-        health["message"] = health["repo"]["error"]
-        return health
-
-    try:
-        issue = gh.preflight_issue(repo["full_name"], pr["number"])
-        health["issue"].update(
-            {"ok": True, "number": issue.get("number", pr["number"])}
-        )
-    except GitHubCliError as e:
-        health["issue"].update(
-            {"error": _github_error_message(e), "status": e.http_status}
-        )
-        health["message"] = health["issue"]["error"]
-        return health
-
+    checks = [  # 순서 = 원인 좁히기 순(인증 → 레포 접근 → PR 존재), 첫 실패에서 중단
+        ("auth", lambda: {"login": gh.preflight_user().get("login")}),
+        (
+            "repo",
+            lambda: {
+                "full_name": gh.preflight_repo(repo["full_name"]).get(
+                    "full_name", repo["full_name"]
+                )
+            },
+        ),
+        (
+            "issue",
+            lambda: {
+                "number": gh.preflight_issue(repo["full_name"], pr["number"]).get(
+                    "number", pr["number"]
+                )
+            },
+        ),
+    ]
+    for section, check in checks:
+        try:
+            health[section].update({"ok": True, **check()})
+        except GitHubCliError as e:
+            health[section].update(
+                {"error": _github_error_message(e), "status": e.http_status}
+            )
+            health["message"] = health[section]["error"]
+            return health
     health["ok"] = True
     health["message"] = "GitHub 포스팅 가능"
     return health
