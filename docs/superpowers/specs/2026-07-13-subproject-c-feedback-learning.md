@@ -83,8 +83,12 @@ finding 한 건의 사람 판단을 다음으로 분류한다:
 
 ## 후속 증분 (같은 seam에 스택)
 
-- **Slack 반응 루프:** 리뷰를 Slack에 게시하고 👍/👎를 수집 → finding.status로 포착 안 되는 신호이므로
-  이때 `NullMemoryStore`(write-side)를 구체화해 이벤트를 적재하고, 같은 `feedback_source` 계열로 요약한다.
+- **Slack 반응 루프 [구현됨]:** 리뷰 게시(`POST /api/runs/{id}/post`) 직후 `chat.postMessage`로 Slack 채널에
+  요약을 올리고(`server/slack/client.py`, run↔channel:ts를 `slack_post`에 저장, 멱등), `POST /api/webhooks/slack`가
+  `reaction_added`/`reaction_removed`를 v0 서명 검증 후 verdict로 매핑해 `feedback_signal`에 현재-상태로 적재한다.
+  `feedback_source.slack_counts`/`slack_feedback_line`이 이 신호를 LLM 요약과 `/api/learn`에 블렌드한다.
+  write-side는 `NullMemoryStore`(seam)가 아니라 코드베이스 컨벤션인 함수 모듈 `server/repos/feedback_repo.py`로
+  구체화했다(클래스 seam은 team-mode용으로 미사용 유지). 라이브(봇 토큰/서명 시크릿)는 env-only 게이트, 나머지는 hermetic.
 - **Slack 규약 수집:** 채널 메시지/규약을 별도 소스로 추가.
 - **결정 메타 강화:** 필요 시 `finding.decided_at`/`decided_by` + append-only `finding_decision` 감사
   테이블을 추가해 시간순·리뷰어별 학습을 가능케 한다(현재는 `set_status`가 in-place 덮어쓰기라

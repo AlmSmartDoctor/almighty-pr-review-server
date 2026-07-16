@@ -45,6 +45,23 @@ GitHub 레포/조직 설정 → Webhooks → Add webhook:
 
 검증은 `X-Hub-Signature-256`(HMAC-SHA256, raw body 기준) 상수시간 비교다. 시크릿 미설정이면 수신 자체를 거부한다(503). 서명 불일치는 401, 대상 아님(다른 이벤트·action, 미등록/`manual` 레포)은 2xx로 무시한다.
 
+## Slack 반응 학습 (서브프로젝트 C)
+
+리뷰를 게시할 때(대시보드 "포스팅") 서버가 Slack 채널에도 요약을 올리고, 팀이 그 메시지에 남기는 👍/👎 반응을 학습 신호로 수집한다. `finding.status`(승인/기각/수정)로는 포착되지 않는, 대시보드를 쓰지 않는 팀원의 평가까지 반영해 다음 리뷰 프롬프트를 보정한다(부정 반응이 우세하면 지적 강도를 낮춘다). 반응 집계는 `/learn` 탭에도 노출된다.
+
+라이브 연결은 **env-only**(sqlite 금지). 미설정이면 게시가 자동 비활성이고, 나머지 기능은 그대로 동작한다:
+```bash
+ALMIGHTY_SLACK_BOT_TOKEN=<xoxb-... chat:write 권한 봇 토큰>
+ALMIGHTY_SLACK_SIGNING_SECRET=<Slack 앱 Signing Secret>
+ALMIGHTY_SLACK_CHANNEL=<게시할 채널 ID 또는 #채널명>
+```
+Slack 앱 설정:
+- **OAuth & Permissions** → Bot Token Scopes에 `chat:write` 추가, 워크스페이스에 설치 후 봇을 대상 채널에 초대.
+- **Event Subscriptions** → Request URL을 `https://<서버 공개주소>/api/webhooks/slack`로(외부 노출을 위해 리버스 프록시/터널 필요). URL 검증 챌린지는 자동 응답한다.
+- **Subscribe to bot events**에 `reaction_added`, `reaction_removed` 추가.
+
+수신 검증은 `X-Slack-Signature`(`v0:{timestamp}:{body}` HMAC-SHA256, raw body 기준) 상수시간 비교다. Signing Secret 미설정이면 수신 거부(503), 서명 불일치는 401, 우리가 게시하지 않은 메시지·관심 밖 이모지는 2xx로 무시한다. 반응은 우리가 게시한 메시지에만 귀속되며(다른 채널 메시지는 무시), 레포별로 격리된다. 봇 토큰/서명 시크릿은 실패 로그에서도 제거(redact)된다. PR 봇 relay와 채널이 겹치면 알림이 중복될 수 있으니 반응 수집용 채널을 분리하는 걸 권장한다. 상세: `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
+
 ## 외부 컨텍스트 / Jira 연동
 
 ### Static 컨텍스트 (외부 의존 0)
@@ -53,7 +70,7 @@ GitHub 레포/조직 설정 → Webhooks → Add webhook:
 - `경로` 입력에 파일 경로를 넣는다. 경로는 레포의 `local_path` 하위로 제한된다(base-dir allowlist, 임의 절대경로 차단). 토글만 켜고 경로가 비어 있으면 프로바이더는 등록되지 않는다.
 
 ### 자가 학습 (팀 피드백, 외부 의존 0)
-이 레포의 과거 리뷰에서 **사람이 finding에 내린 판단**(승인/기각/수정)을 요약해 이후 리뷰 프롬프트에 "팀이 이런 지적을 이렇게 판단해 왔다"는 보정 신호로 주입한다. 학습 데이터는 이미 서버 DB의 `finding` 테이블(대시보드에서 승인/기각/수정한 결과)에 있으므로 별도 설정이나 외부 연동이 필요 없다. 설정 화면 → 외부 컨텍스트 → **자가 학습(팀 피드백)** 토글(또는 레포별 오버라이드 셀의 `피드백`)만 켜면 된다. 레포별로 격리되며(다른 레포 피드백은 섞이지 않음), 결정이 3건 미만이면 신뢰할 패턴이 아니라 주입하지 않는다. 상세: `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
+이 레포의 과거 리뷰에서 **사람이 finding에 내린 판단**(승인/기각/수정)을 요약해 이후 리뷰 프롬프트에 "팀이 이런 지적을 이렇게 판단해 왔다"는 보정 신호로 주입한다. 학습 데이터는 이미 서버 DB의 `finding` 테이블(대시보드에서 승인/기각/수정한 결과)에 있으므로 별도 설정이나 외부 연동이 필요 없다. 설정 화면 → 외부 컨텍스트 → **자가 학습(팀 피드백)** 토글(또는 레포별 오버라이드 셀의 `피드백`)만 켜면 된다. 레포별로 격리되며(다른 레포 피드백은 섞이지 않음), 결정이 3건 미만이면 신뢰할 패턴이 아니라 주입하지 않는다. Slack 반응까지 신호로 쓰려면 위 **Slack 반응 학습** 섹션을 참고한다. 상세: `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
 
 ### Jira 연동
 Jira 이슈를 리뷰 프롬프트에 주입하려면 필수 env 3개와 필요시 수용기준 필드를 설정한다(sqlite에는 절대 저장하지 않음, env-only). 레포별 `jira_project_keys`는 같은 오버라이드 셀의 `Jira키` 입력으로 설정한다:

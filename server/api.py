@@ -13,6 +13,7 @@ from server.formatter import MARKER, build_comment, build_inline_comment
 from server.github.gh import GhClient, GitHubCliError
 from server.models import Finding
 from server.repos import (
+    feedback_repo,
     finding_repo,
     job_repo,
     posted_repo,
@@ -200,18 +201,20 @@ def _jira_links(*texts: str | None) -> list[dict]:
 
 @app.get("/api/learn")
 def learn(conn=Depends(get_conn)):
-    """레포별 팀 판단(수용·수정·기각) 집계 — /learn 탭이 열람하는 학습 신호.
-    finding 사람 결정이 있는 레포만, 결정 수 많은 순으로 반환."""
+    """레포별 팀 판단(수용·수정·기각) + Slack 반응 집계 — /learn 탭이 열람하는 학습 신호.
+    finding 사람 결정 또는 Slack 반응이 있는 레포만, 결정 수 많은 순으로 반환."""
     repos = conn.execute("SELECT full_name FROM repo ORDER BY full_name").fetchall()
     out = []
     for r in repos:
         stats = feedback_source.repo_feedback_stats(conn, r["full_name"])
-        if not stats["total"]:
+        slack = feedback_source.slack_counts(conn, r["full_name"])
+        if not stats["total"] and not (slack["positive"] or slack["negative"]):
             continue
         out.append(
             {
                 "repo": r["full_name"],
                 **stats,
+                "slack_reactions": slack,
                 "recent_decisions": feedback_source.recent_decisions(
                     conn, r["full_name"]
                 ),
@@ -373,6 +376,20 @@ def get_gh():
     if _gh is None:
         _gh = GhClient()
     return _gh
+
+
+_slack = None
+
+
+def get_slack():
+    """봇 토큰이 설정된 경우에만 Slack 클라이언트를 만든다(미설정=None → 게시 자동 비활성).
+    토큰은 env-only이므로 여기서만 참조하고 sqlite엔 넣지 않는다."""
+    global _slack
+    if _slack is None and config.SLACK_BOT_TOKEN:
+        from server.slack.client import SlackClient
+
+        _slack = SlackClient(token=config.SLACK_BOT_TOKEN)
+    return _slack
 
 
 def _github_error_message(error: GitHubCliError) -> str:
@@ -540,8 +557,48 @@ def _create_review(gh, repo, pr, run, body: str, findings) -> dict:
     )
 
 
+def _post_to_slack(conn, slack, repo, pr, run_id):
+    """게시된 리뷰를 Slack에 요약 게시하고 run↔메시지 매핑을 저장한다(👍/👎 반응 학습 신호 수집).
+    슬랙 미설정/이미 게시한 run이면 스킵(멱등). 실패는 절대 게시 응답을 깨지 않는다(best-effort,
+    B-INV-4/8과 동일 원칙). GitHub 게시가 모두 성공한 뒤(loop 이후)에만 호출된다."""
+    if slack is None or not config.SLACK_CHANNEL:
+        return
+    if feedback_repo.has_slack_post(conn, run_id):
+        return
+    try:
+        from server.slack.format import build_slack_message
+
+        shown = [
+            f
+            for f in finding_repo.list_for_run(conn, run_id)
+            if f["status"] in DISPLAYED_FINDING_STATUSES
+        ]
+        if not shown:
+            return
+        res = slack.post_message(
+            channel=config.SLACK_CHANNEL,
+            text=build_slack_message(
+                full_name=repo["full_name"],
+                number=pr["number"],
+                url=pr["url"] or "",
+                findings=shown,
+            ),
+        )
+        if res.get("channel") and res.get("ts"):
+            feedback_repo.record_slack_post(
+                conn, run_id=run_id, channel=res["channel"], ts=res["ts"]
+            )
+    except Exception as e:  # never break posting — 토큰 유출 방지 위해 로그도 redact
+        msg = str(e)
+        if config.SLACK_BOT_TOKEN:
+            msg = msg.replace(config.SLACK_BOT_TOKEN, "[redacted]")
+        print(f"[slack] post skipped: {msg}")
+
+
 @app.post("/api/runs/{run_id}/post")
-def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
+def post_run(
+    run_id: int, conn=Depends(get_conn), gh=Depends(get_gh), slack=Depends(get_slack)
+):
     run = review_repo.get_run(conn, run_id)
     pr = pr_repo.get(conn, run["pr_id"])
     repo = repo_repo.get(conn, pr["repo_id"])
@@ -612,6 +669,10 @@ def post_run(run_id: int, conn=Depends(get_conn), gh=Depends(get_gh)):
         for fid in comment["new_ids"]:  # 이번에 새로 게시한 것만 posted 전환
             finding_repo.set_status(conn, fid, "posted")
         posted.append({"vendor": vendor, "url": res["html_url"]})
+    if (
+        posted
+    ):  # GitHub 게시 성공분이 있을 때만 Slack 반응 수집용 요약 게시(best-effort)
+        _post_to_slack(conn, slack, repo, pr, run_id)
     return {"posted": posted}
 
 
@@ -666,6 +727,62 @@ async def github_webhook(request: Request, conn=Depends(get_conn)):
         job_repo.enqueue(conn, pr_id=pid, head_sha=info["head_sha"], trigger="auto")
         return {"status": "enqueued", "pr": info["number"]}
     return {"status": "skipped", "pr": info["number"]}
+
+
+@app.post("/api/webhooks/slack")
+async def slack_webhook(request: Request, conn=Depends(get_conn)):
+    """Slack Events 수신 → 우리가 게시한 리뷰 메시지의 👍/👎를 학습 신호로 적재.
+    HMAC(v0) 검증 후 url_verification 챌린지 응답, reaction_added/removed만 처리한다.
+    우리가 게시하지 않은 메시지·관심 밖 이모지는 무시(200). finding.status로 포착 안 되는
+    외부 신호를 feedback_signal에 현재-상태로 기록한다(서브프로젝트 C)."""
+    from server.slack.webhook import (
+        is_fresh,
+        parse_event,
+        verdict_for,
+        verify_signature,
+    )
+
+    body = await request.body()
+    ts = request.headers.get("X-Slack-Request-Timestamp")
+    if not config.SLACK_SIGNING_SECRET:
+        raise HTTPException(
+            status_code=503, detail="slack signing secret not configured"
+        )
+    if not verify_signature(
+        config.SLACK_SIGNING_SECRET,
+        ts,
+        body,
+        request.headers.get("X-Slack-Signature"),
+    ):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    if not is_fresh(ts):  # 서명은 유효해도 오래된(>5분) 요청은 재생 공격 → 거부
+        raise HTTPException(status_code=401, detail="stale timestamp")
+    event = parse_event(body)
+    if event is None:
+        return {"status": "ignored"}
+    if event["type"] == "url_verification":
+        return {"challenge": event["challenge"]}
+    verdict = verdict_for(event["reaction"])
+    if verdict is None:
+        return {"status": "ignored"}  # 관심 밖 이모지
+    run_id = feedback_repo.run_for_message(
+        conn, channel=event["channel"], ts=event["ts"]
+    )
+    if run_id is None:
+        return {"status": "ignored"}  # 우리가 게시한 리뷰 메시지가 아님
+    if event["action"] == "added":
+        feedback_repo.add_reaction(
+            conn,
+            run_id=run_id,
+            slack_user=event["user"],
+            reaction=event["reaction"],
+            verdict=verdict,
+        )
+    else:
+        feedback_repo.remove_reaction(
+            conn, run_id=run_id, slack_user=event["user"], reaction=event["reaction"]
+        )
+    return {"status": "recorded", "verdict": verdict}
 
 
 @app.get("/api/harness")

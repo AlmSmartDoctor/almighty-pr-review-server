@@ -158,8 +158,42 @@ def recent_decisions(conn, full_name) -> list:
     ]
 
 
+# 서브프로젝트 C(Slack 반응 루프): finding.status로 포착 안 되는 외부 신호. 레포 스코프로
+# verdict별 현재 반응 수 집계. slack_post/feedback_signal이 아직 없어도(빈 결과) 안전.
+_SLACK_COUNT_QUERY = """
+SELECT fs.verdict AS verdict, COUNT(*) AS n
+FROM feedback_signal fs
+JOIN review_run rr ON rr.id = fs.run_id
+JOIN pull_request p ON p.id = rr.pr_id
+JOIN repo r ON r.id = p.repo_id
+WHERE r.full_name = ? COLLATE NOCASE AND fs.source = 'slack'
+GROUP BY fs.verdict
+"""
+
+
+def slack_counts(conn, full_name) -> dict:
+    """이 레포의 Slack 반응을 verdict별로 집계한다(/learn·LLM 공용)."""
+    out = {"positive": 0, "negative": 0}
+    for row in conn.execute(_SLACK_COUNT_QUERY, (full_name,)).fetchall():
+        if row["verdict"] in out:
+            out[row["verdict"]] = row["n"]
+    return out
+
+
+def slack_feedback_line(counts) -> str:
+    """Slack 반응 집계를 LLM 보정용 한 줄로 렌더. 반응이 하나도 없으면 ""(미주입).
+    finding 결정 수와 무관하게(그 신호는 finding.status로 포착 안 됨) 독립적으로 주입한다."""
+    pos, neg = counts.get("positive", 0), counts.get("negative", 0)
+    if pos + neg == 0:
+        return ""
+    return (
+        f"이 레포에 게시된 리뷰에 대한 팀의 Slack 반응: 👍 유용 {pos}건 · 👎 불필요 {neg}건 "
+        "(부정 반응이 우세하면 지적 강도·우선순위를 낮춰 조정)."
+    )
+
+
 def db_feedback_source(*, db_path=None):
-    """이 레포의 과거 사람 판단을 앱 DB에서 읽어 요약하는 feedback_source(req)->str 를 만든다.
+    """이 레포의 과거 사람 판단(+ Slack 반응)을 앱 DB에서 읽어 요약하는 feedback_source(req)->str.
     read-only SELECT + short-lived 커넥션(worker 진행 중에도 WAL 하에서 안전)."""
     path = db_path if db_path is not None else config.DB_PATH
 
@@ -167,8 +201,12 @@ def db_feedback_source(*, db_path=None):
         conn = connect(path)
         try:
             rows = conn.execute(_QUERY, (req.repo, _MAX_DECISIONS)).fetchall()
+            counts = slack_counts(conn, req.repo)
         finally:
             conn.close()
-        return summarize_feedback(rows)
+        parts = [
+            p for p in (summarize_feedback(rows), slack_feedback_line(counts)) if p
+        ]
+        return "\n\n".join(parts)
 
     return source

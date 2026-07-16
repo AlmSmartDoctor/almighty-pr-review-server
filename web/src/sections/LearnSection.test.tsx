@@ -36,6 +36,7 @@ const feedback = [
         decided_at: "2026-07-14 08:40",
       },
     ],
+    slack_reactions: { positive: 8, negative: 2 },
   },
   {
     repo: "acme/web",
@@ -76,6 +77,23 @@ test("shows recent decision activity timeline", async () => {
   // edited verdict → 수정 배지로 노출(승인/기각만 렌더되던 회귀 방지)
   const editedRow = screen.getByText("수정한 지적").closest("li")!;
   expect(within(editedRow).getByText("수정")).toBeInTheDocument();
+});
+
+test("shows slack reaction tallies for the active repo", async () => {
+  render(<LearnSection load={async () => feedback} />);
+  expect(await screen.findByText("Slack 반응")).toBeInTheDocument();
+  // 라벨과 수치가 같은 행에 함께 렌더(배지 바로 다음 형제 span이 카운트)
+  const positive = screen.getByText("👍 유용").parentElement!;
+  expect(within(positive).getByText("8")).toBeInTheDocument();
+  const negative = screen.getByText("👎 불필요").parentElement!;
+  expect(within(negative).getByText("2")).toBeInTheDocument();
+});
+
+test("hides slack reactions for a repo with none", async () => {
+  render(<LearnSection load={async () => feedback} />);
+  await screen.findByText("변수명 개선");
+  fireEvent.click(screen.getByRole("tab", { name: /acme\/web/ }));
+  expect(screen.queryByText("Slack 반응")).not.toBeInTheDocument();
 });
 
 test("switches repo tab and re-scopes the view", async () => {

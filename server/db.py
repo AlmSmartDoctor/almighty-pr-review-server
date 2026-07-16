@@ -78,6 +78,28 @@ CREATE TABLE IF NOT EXISTS posted_comment (
   finding_ids TEXT,                               -- ★개정: 포함 finding id(JSON)
   superseded_at TEXT                              -- ★개정: 재리뷰로 대체된 시점
 );
+-- 서브프로젝트 C(Slack 반응 루프): 리뷰를 게시한 Slack 메시지 매핑(run ↔ channel:ts).
+-- 반응 웹훅이 (channel, ts)로 run을 역참조해 레포 스코프 학습 신호로 귀속시킨다.
+CREATE TABLE IF NOT EXISTS slack_post (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES review_run(id),
+  channel TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  posted_at TEXT NOT NULL,
+  UNIQUE(channel, ts)                             -- 한 메시지 = 한 매핑(멱등)
+);
+-- 서브프로젝트 C: finding.status로 포착 안 되는 외부 학습 신호(Slack 👍/👎). 현재-상태 모델
+-- (reaction_added = INSERT OR IGNORE, reaction_removed = DELETE). run_id로 레포 스코프.
+CREATE TABLE IF NOT EXISTS feedback_signal (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES review_run(id),
+  source TEXT NOT NULL,                            -- 'slack'
+  slack_user TEXT NOT NULL,
+  reaction TEXT NOT NULL,                          -- 원본 emoji 이름(colon 없이)
+  verdict TEXT NOT NULL,                           -- positive|negative
+  created_at TEXT NOT NULL,
+  UNIQUE(run_id, source, slack_user, reaction)     -- 한 사람·한 이모지 = 한 신호
+);
 -- ★개정: 스케줄링 상태(review_job)와 실행 이력(review_run) 분리.
 CREATE TABLE IF NOT EXISTS review_job (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

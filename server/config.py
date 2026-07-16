@@ -56,3 +56,9 @@ JIRA_ACCEPTANCE_CRITERIA_FIELD = os.environ.get(
 
 # GitHub 웹훅 공유 시크릿(env-only). 미설정이면 "" → 웹훅 수신 자체를 거부(503).
 GITHUB_WEBHOOK_SECRET = os.environ.get("ALMIGHTY_GITHUB_WEBHOOK_SECRET", "")
+
+# 서브프로젝트 C — Slack 반응 루프(env-only). 게시한 리뷰에 달린 👍/👎를 학습 신호로 수집.
+# BOT_TOKEN/CHANNEL 미설정이면 게시 자동 비활성, SIGNING_SECRET 미설정이면 반응 웹훅 거부(503).
+SLACK_BOT_TOKEN = os.environ.get("ALMIGHTY_SLACK_BOT_TOKEN", "")
+SLACK_SIGNING_SECRET = os.environ.get("ALMIGHTY_SLACK_SIGNING_SECRET", "")
+SLACK_CHANNEL = os.environ.get("ALMIGHTY_SLACK_CHANNEL", "")

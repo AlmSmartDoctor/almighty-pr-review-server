@@ -30,6 +30,7 @@ type Decision = {
   pr_number: number;
   decided_at: string;
 };
+type SlackReactionCounts = { positive: number; negative: number };
 type RepoFeedback = {
   repo: string;
   total: number;
@@ -38,6 +39,7 @@ type RepoFeedback = {
   rejected_examples: Example[];
   edited_examples: Example[];
   recent_decisions: Decision[];
+  slack_reactions?: SlackReactionCounts;
 };
 
 export function LearnSection({ load }: { load?: () => Promise<RepoFeedback[]> }) {
@@ -178,6 +180,11 @@ function RepoFeedbackView({ data }: { data: RepoFeedback }) {
         </CardContent>
       </Card>
 
+      {data.slack_reactions &&
+        (data.slack_reactions.positive > 0 || data.slack_reactions.negative > 0) && (
+          <SlackReactions counts={data.slack_reactions} />
+        )}
+
       {data.approved_examples.length > 0 && (
         <ExampleCard
           title="팀이 수용한 지적"
@@ -244,6 +251,29 @@ function RecentDecisions({ decisions }: { decisions: Decision[] }) {
             </li>
           ))}
         </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SlackReactions({ counts }: { counts: SlackReactionCounts }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Slack 반응</CardTitle>
+        <StatusLine inline>게시된 리뷰에 팀이 남긴 평가</StatusLine>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-6 text-[13px]">
+          <span className="flex items-center gap-2">
+            <Badge variant="ok">👍 유용</Badge>
+            <span className="font-bold tabular-nums text-ok">{counts.positive}</span>
+          </span>
+          <span className="flex items-center gap-2">
+            <Badge variant="danger">👎 불필요</Badge>
+            <span className="font-bold tabular-nums text-danger">{counts.negative}</span>
+          </span>
+        </div>
       </CardContent>
     </Card>
   );
