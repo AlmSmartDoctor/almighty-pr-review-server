@@ -51,7 +51,9 @@ class PipelineDeps:
         [str, str], tuple
     ]  # (diff, model) -> (complexity, score, reason)
     repo_local_path: str
-    clone: Callable = None  # (full_name, dest)->None; local_path 없을 때 온디맨드 clone
+    clone: Callable = (
+        None  # (full_name, dest)->None; local_path 없을 때 서비스 전용 clone
+    )
     context: object = field(default_factory=NoOpContextProvider)
     pool: RunnerPool = None  # ★개정: 벤더 병렬 실행 세마포어(없으면 생성)
     gh_compare_diff: Callable = None  # (repo, base, head)->diff; None=증분 미지원
@@ -66,13 +68,19 @@ def _col(repo, key, default):
     return v if v not in (None, "") else default
 
 
-def _apply_models(hp, repo) -> None:
-    """레포별·벤더별 모델/effort를 하네스에 적용(전역값 미사용). 미설정(NULL/'')이면
-    코드 기본값으로 폴백 — 레포마다 독립적으로 claude/codex 모델·effort를 지정한다."""
-    hp.model = _col(repo, "claude_model", config.DEFAULT_REVIEW_MODEL)
-    hp.effort = _col(repo, "claude_effort", DEFAULT_EFFORT)
-    hp.codex_model = _col(repo, "codex_model", config.DEFAULT_CODEX_MODEL)
-    hp.codex_effort = _col(repo, "codex_effort", DEFAULT_EFFORT)
+def _apply_models(hp, repo, settings) -> None:
+    """모델/effort를 하네스에 적용. 레포별 값(NULL/'')이면 전역 기본값(app_settings)으로,
+    전역도 없으면 코드 기본값으로 폴백한다 — 전역 기본을 두고 레포가 상속·재정의한다."""
+    g_model = _col(settings, "review_model", config.DEFAULT_REVIEW_MODEL)
+    g_effort = _col(settings, "default_effort", DEFAULT_EFFORT)
+    # 전역 effort는 벤더별로 분리되고, 미설정이면 공용 default_effort로 폴백한다.
+    g_claude_effort = _col(settings, "claude_effort", g_effort)
+    g_codex_effort = _col(settings, "codex_effort", g_effort)
+    g_codex = _col(settings, "codex_model", config.DEFAULT_CODEX_MODEL)
+    hp.model = _col(repo, "claude_model", g_model)
+    hp.effort = _col(repo, "claude_effort", g_claude_effort)
+    hp.codex_model = _col(repo, "codex_model", g_codex)
+    hp.codex_effort = _col(repo, "codex_effort", g_codex_effort)
 
 
 async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> int:
@@ -86,7 +94,15 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
         pr_id=pr_id,
         head_sha=pr["head_sha"],
         trigger=trigger,
-        effort=_col(repo, "codex_effort", DEFAULT_EFFORT),
+        effort=_col(
+            repo,
+            "codex_effort",
+            _col(
+                settings,
+                "codex_effort",
+                _col(settings, "default_effort", DEFAULT_EFFORT),
+            ),
+        ),
         merge_enabled=repo["merge_enabled"],
     )
     try:
@@ -101,8 +117,10 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
 
 async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
     hp = HarnessProfile.load(repo["harness_name"])
-    _apply_models(hp, repo)  # 레포별·벤더별 모델/effort(전역 미사용)
-    prescreen_model = settings["prescreen_model"]
+    _apply_models(hp, repo, settings)  # 레포별 모델/effort(미설정 시 전역 기본 상속)
+    # 빈 문자열('')이면 코드 기본값으로 폴백 — 설정 UI가 자유입력 콤보박스라 비워질 수
+    # 있고, 빈 --model은 prescreen CLI를 400으로 깨뜨린다(전 리뷰 실패).
+    prescreen_model = _col(settings, "prescreen_model", config.DEFAULT_PRESCREEN_MODEL)
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
     # sync subprocess(gh/prescreen)를 to_thread로 오프로드 → 이벤트루프 비블록
@@ -402,7 +420,7 @@ async def _retry_failed_vendors(conn, *, run, pr, repo, settings, deps) -> None:
         return  # 재시도할 실패 벤더 없음(엔드포인트에서 거르지만 방어적)
 
     hp = HarnessProfile.load(repo["harness_name"])
-    _apply_models(hp, repo)
+    _apply_models(hp, repo, settings)
     pool = deps.pool or RunnerPool(limit=settings["concurrency_limit"])
 
     # 원 run이 본 것과 동일한 diff 기준선(base_sha면 증분, 없으면 full) + 저장된 컨텍스트 재사용.

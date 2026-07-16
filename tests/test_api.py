@@ -26,6 +26,55 @@ def test_add_and_list_repos(tmp_path):
     assert lst[0]["full_name"] == "acme/api"
 
 
+def test_list_models_from_backend(tmp_path):
+    client, _ = _client(tmp_path)
+    m = client.get("/api/models").json()
+    assert "gpt-5.6-sol" in m["codex"] and "sonnet" in m["claude"]
+    assert m["claude_efforts"] and m["codex_efforts"]
+
+
+def test_add_repo_normalizes_full_name(tmp_path):
+    client, _ = _client(tmp_path)
+    r = client.post(
+        "/api/repos", json={"full_name": "  https://github.com/acme/api.git/  "}
+    )
+    assert r.status_code == 201 and r.json()["full_name"] == "acme/api"
+
+
+def test_add_repo_rejects_malformed_full_name(tmp_path):
+    client, _ = _client(tmp_path)
+    assert (
+        client.post("/api/repos", json={"full_name": "not-a-repo"}).status_code == 400
+    )
+
+
+def test_overview_includes_pr_url_and_jira_links(tmp_path, monkeypatch):
+    from server import config as cfg
+
+    monkeypatch.setattr(cfg, "JIRA_BASE_URL", "https://jira.example.com/")
+    client, conn = _client(tmp_path)
+    from server.repos import pr_repo, repo_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="PROJ-42 버그 수정",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="https://github.com/acme/api/pull/7",
+    )
+    row = client.get("/api/overview").json()[0]
+    assert row["url"] == "https://github.com/acme/api/pull/7"
+    assert {
+        "key": "PROJ-42",
+        "url": "https://jira.example.com/browse/PROJ-42",
+    } in row["jira_links"]
+    assert "body" not in row  # 본문은 키 추출에만 쓰고 응답엔 싣지 않음
+
+
 def test_patch_repo_updates_local_path_and_enabled(tmp_path):
     client, _ = _client(tmp_path)
     created = client.post(
@@ -206,11 +255,14 @@ def test_patch_verify_singles_toggle(tmp_path):
     )
 
 
-def test_new_repo_seeds_default_effort_from_global(tmp_path):
+def test_new_repo_leaves_model_effort_null_to_inherit_global(tmp_path):
+    # 새 레포는 모델/effort를 seed하지 않는다 — NULL이면 리뷰 시 전역 기본값을 상속한다.
     client, _ = _client(tmp_path)
-    client.patch("/api/settings", json={"default_effort": "xhigh"}).raise_for_status()
     created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
-    assert created["default_effort"] == "xhigh"
+    assert created["claude_model"] is None
+    assert created["claude_effort"] is None
+    assert created["codex_model"] is None
+    assert created["codex_effort"] is None
 
 
 def test_patch_incremental_review_toggle(tmp_path):

@@ -29,7 +29,7 @@ class VerifyContext:
     head_sha: str
     pr_number: int
     harness: object
-    repo_full_name: str = ""  # local_path 없을 때 온디맨드 clone 대상
+    repo_full_name: str = ""  # local_path 없을 때 서비스 전용 clone 대상
 
 
 def parse_verdict(raw: str) -> Verdict:

@@ -170,7 +170,8 @@ def test_update_review_puts_body_only():
     assert "PUT" in argv
 
 
-def test_env_prefers_gh_token_then_github_token_then_pat():
+def test_env_prefers_gh_token_then_github_token():
+    # GH_TOKEN·GITHUB_TOKEN은 gh가 네이티브로 읽는 표준 변수 → 항상 GH_TOKEN으로 노출.
     for env, expected in [
         (
             {
@@ -181,12 +182,24 @@ def test_env_prefers_gh_token_then_github_token_then_pat():
             "gh",
         ),
         ({"GITHUB_TOKEN": "gt", "GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}, "gt"),
-        ({"GITHUB_PERSONAL_ACCESS_TOKEN": "pat"}, "pat"),
     ]:
         runner = FakeRunner({("gh", "api", "user"): '{"login": "me"}'})
         client = gh.GhClient(runner=runner, env=env)
         client.preflight_user()
         assert runner.calls[0][1]["env"]["GH_TOKEN"] == expected
+
+
+def test_pat_promoted_only_without_native_gh_auth(monkeypatch):
+    # 비표준 GITHUB_PERSONAL_ACCESS_TOKEN은 gh 자체 인증(keyring)이 없을 때만 GH_TOKEN으로
+    # 승격한다. keyring 로그인이 있으면 약한 PAT가 그것을 덮어써 조직 private 레포를 404로
+    # 깨뜨리므로 승격하지 않는다(프리뷰·포스팅 회귀 방지).
+    for has_native, promoted in [(False, True), (True, False)]:
+        monkeypatch.setattr(gh, "_gh_has_native_auth", lambda: has_native)
+        runner = FakeRunner({("gh", "api", "user"): '{"login": "me"}'})
+        client = gh.GhClient(runner=runner, env={"GITHUB_PERSONAL_ACCESS_TOKEN": "pat"})
+        client.preflight_user()
+        env = runner.calls[0][1]["env"]
+        assert (env.get("GH_TOKEN") == "pat") is promoted
 
 
 def test_default_runner_forwards_env_and_input(monkeypatch):

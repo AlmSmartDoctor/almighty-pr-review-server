@@ -8,5 +8,6 @@ __pycache__/
 web/node_modules/
 web/dist/
 harness/**/runtime/
+.clones/
 .env
 .env.*

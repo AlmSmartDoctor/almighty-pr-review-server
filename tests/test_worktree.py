@@ -39,23 +39,31 @@ def test_checkout_uses_local_path_and_skips_clone():
     assert str(seen["repo"]) == "/local/x" and seen["sha"] == "s1"
 
 
-def test_checkout_clones_when_no_local_path_and_cleans_up():
-    seen, cloned = {}, {}
+def test_checkout_uses_persistent_service_clone(tmp_path, monkeypatch):
+    from server import config as cfg
+
+    monkeypatch.setattr(cfg, "CLONE_DIR", tmp_path / "clones")
+    seen, calls = {}, []
+
+    def clone(full_name, dest):
+        calls.append((full_name, dest))
+        Path(dest, ".git").mkdir(parents=True)  # 영구 clone 흉내(재사용 판정용)
+
     with _spy_worktree(seen) as wt:
-
-        def clone(full_name, dest):
-            cloned["full_name"] = full_name
-            cloned["dest"] = dest
-
         with checkout(
             wt, clone, local_path=None, full_name="acme/api", sha="s1", pr_number=7
         ) as out:
             assert out == "WT"
-    assert cloned["full_name"] == "acme/api"
-    # worktree는 clone된 임시 repo_dir(dest) 위에서 열린다
-    assert str(seen["repo"]) == cloned["dest"]
-    # 임시 clone 디렉토리는 종료 시 제거됨
-    assert not Path(cloned["dest"]).parent.exists()
+        # 재리뷰: 이미 clone이 있으면 재-clone하지 않고 재사용한다
+        with checkout(
+            wt, clone, local_path=None, full_name="acme/api", sha="s2"
+        ) as out:
+            assert out == "WT"
+
+    clone_dir = tmp_path / "clones" / "acme__api"
+    assert [c[0] for c in calls] == ["acme/api"]  # 두 번째는 재-clone 안 함
+    assert str(seen["repo"]) == str(clone_dir)  # worktree는 영구 clone 위에서 열림
+    assert clone_dir.exists()  # 영구 — 리뷰 종료 후에도 유지
 
 
 def test_checkout_raises_when_no_local_path_and_no_clone():

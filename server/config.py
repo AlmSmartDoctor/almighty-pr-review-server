@@ -4,18 +4,36 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "almighty.db"
 HARNESS_DIR = BASE_DIR / "harness"
+# 서비스 전용 영구 clone 루트. 리뷰는 사용자의 라이브 체크아웃이 아니라 여기 clone에서
+# worktree를 뜬다(사용자 작업 경로가 실시간으로 바뀌어도 리뷰가 영향받지 않게).
+CLONE_DIR = BASE_DIR / ".clones"
 
 # §10 추천 기본값
 DEFAULT_EFFORT = "medium"
-DEFAULT_CONCURRENCY = 2
-DEFAULT_POLL_INTERVAL_SEC = 60
 # 폴러가 한 번에 조회하는 열린 PR 상한. 이 값 미만이 반환되면 완전한 오픈 셋으로
 # 간주해 사라진 PR을 closed로 재조정한다(상한에 걸리면 오검-close 방지로 재조정 skip).
 POLL_OPEN_PR_LIMIT = 200
-DEFAULT_PRESCREEN_MODEL = "haiku"
 DEFAULT_REVIEW_MODEL = "sonnet"
+DEFAULT_PRESCREEN_MODEL = "haiku"
 DEFAULT_CODEX_MODEL = ""  # "" = codex CLI 자체 기본 모델
-DEFAULT_PRESCREEN_THRESHOLD = "moderate"  # trivial 미만이면 skip 후보
+
+# 설정 UI가 GET /api/models로 주입받는 선택 가능한 모델·effort "제안" 목록.
+# UI는 콤보박스(제안 + 자유 입력)라 여기 없는 정확한 모델 ID도 직접 타이핑할 수 있다.
+# 별칭(opus/sonnet/…)은 최신 모델로 자동 매핑되고, 풀네임은 특정 버전에 고정된다.
+CLAUDE_MODELS = [
+    "opus",
+    "sonnet",
+    "haiku",
+    "fable",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+]
+# codex는 gpt-5.6 계열의 변형(sol/terra/luna)이 실제 모델 ID다. 변형 없는 "gpt-5.6"은
+# codex가 fallback 메타데이터로 처리해 성능이 저하되므로 제안 목록에서 제외한다.
+CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 
 # 포스팅 코멘트 최상단 배너(env-only). 설정 시 게시 코멘트 맨 위에 붙는다(테스트/스테이징
 # 표식용). 미설정("")이면 배너 없음(기본 동작 불변).

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from server import config
-from server.context import feedback_source
+from server.context import feedback_source, jira_keys
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment, build_inline_comment
 from server.github.gh import GhClient, GitHubCliError
@@ -82,6 +82,40 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/models")
+def list_models() -> dict:
+    """설정 UI가 시작 시 주입받는 선택 가능한 모델·effort 목록(백엔드가 단일 소스).
+    새 모델은 config.py만 갱신하면 프론트 수정 없이 드롭다운에 반영된다."""
+    return {
+        "claude": config.CLAUDE_MODELS,
+        "codex": config.CODEX_MODELS,
+        "claude_efforts": config.CLAUDE_EFFORTS,
+        "codex_efforts": config.CODEX_EFFORTS,
+    }
+
+
+def _normalize_full_name(raw: str) -> str:
+    """owner/repo만 남긴다: 공백·URL 접두어·후행 슬래시·.git 제거. 형태 불량이면 ValueError.
+    정규화 없이 gh api /repos/{...}에 넘기면 이런 사소한 입력 오류가 404로 새어나온다."""
+    name = (raw or "").strip()
+    for prefix in (
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "github.com/",
+    ):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    name = name.strip("/")
+    if name.endswith(".git"):
+        name = name[:-4]
+    parts = name.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("owner/repo 형식이 필요합니다")
+    return name
+
+
 class RepoIn(BaseModel):
     full_name: str
     local_path: str | None = None  # ★개정: worktree 소스 경로
@@ -89,18 +123,13 @@ class RepoIn(BaseModel):
 
 @app.post("/api/repos", status_code=201)
 def add_repo(body: RepoIn, conn=Depends(get_conn)):
-    # 레포별·벤더별 모델/effort를 코드 기본값으로 seed(전역값 미사용, 이후 레포별 재정의).
-    # local_path는 선택 — 비우면 리뷰 시 gh로 PR 브랜치를 온디맨드 clone한다.
-    rid = repo_repo.add(
-        conn,
-        full_name=body.full_name,
-        local_path=body.local_path,
-        default_effort=settings_repo.get(conn)["default_effort"],
-        claude_model=config.DEFAULT_REVIEW_MODEL,
-        claude_effort=config.DEFAULT_EFFORT,
-        codex_model=config.DEFAULT_CODEX_MODEL,
-        codex_effort=config.DEFAULT_EFFORT,
-    )
+    # local_path는 선택 — 비우면 리뷰 시 서비스 전용 clone에서 PR 브랜치를 체크아웃한다.
+    # 모델/effort는 seed하지 않는다(NULL=전역 기본값 상속, 이후 레포별로 재정의 가능).
+    try:
+        full_name = _normalize_full_name(body.full_name)
+    except ValueError:
+        raise HTTPException(400, "owner/repo 형식으로 입력하세요.")
+    rid = repo_repo.add(conn, full_name=full_name, local_path=body.local_path or None)
     return dict(repo_repo.get(conn, rid))
 
 
@@ -113,6 +142,7 @@ def list_repos(conn=Depends(get_conn)):
 def overview(conn=Depends(get_conn)):
     rows = conn.execute("""
       SELECT p.id, p.number, p.title, r.full_name AS repo,
+             p.url, p.head_ref, p.body,
              p.author, p.created_at, p.first_seen_at, p.is_draft,
              (SELECT complexity FROM pre_screen ps WHERE ps.pr_id=p.id
                 ORDER BY ps.id DESC LIMIT 1) AS prescreen,
@@ -148,7 +178,24 @@ def overview(conn=Depends(get_conn)):
         COALESCE(datetime(p.created_at), datetime(p.first_seen_at)) DESC, p.id DESC
     """).fetchall()
     sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
-    return [{**dict(x), "severity": sev.get(x["sev_rank"], "low")} for x in rows]
+    out = []
+    for x in rows:
+        row = dict(x)
+        body = row.pop("body", None)  # jira 키 추출에만 쓰고 응답 본문엔 싣지 않음
+        row["severity"] = sev.get(row["sev_rank"], "low")
+        row["jira_links"] = _jira_links(row.get("head_ref"), row.get("title"), body)
+        out.append(row)
+    return out
+
+
+def _jira_links(*texts: str | None) -> list[dict]:
+    """PR 텍스트에서 찾은 Jira 키를 브라우저 링크로. base_url 미설정이면 [](링크 미노출)."""
+    base = config.JIRA_BASE_URL.rstrip("/")
+    if not base:
+        return []
+    return [
+        {"key": k, "url": f"{base}/browse/{k}"} for k in jira_keys.find_keys(*texts)
+    ]
 
 
 @app.get("/api/learn")
@@ -203,6 +250,7 @@ class RepoPatch(BaseModel):
 @app.patch("/api/repos/{rid}")
 def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
     fields = body.model_dump(exclude_none=True)
+    # None이 '상속(전역 기본값)으로 되돌림'을 뜻하는 필드는 exclude_none에서 되살린다.
     for key in (
         "context_static_on",
         "context_jira_on",
@@ -211,6 +259,10 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         "context_feedback_on",
         "verify_singles_on",
         "incremental_review_on",
+        "claude_model",
+        "claude_effort",
+        "codex_model",
+        "codex_effort",
     ):
         if key in body.model_fields_set and getattr(body, key) is None:
             fields[key] = None
@@ -225,6 +277,8 @@ def get_settings(conn=Depends(get_conn)):
 
 class SettingsPatch(BaseModel):
     default_effort: str | None = None
+    claude_effort: str | None = None
+    codex_effort: str | None = None
     concurrency_limit: int | None = None
     default_poll_interval: int | None = None
     prescreen_model: str | None = None
@@ -328,6 +382,15 @@ def _github_error_message(error: GitHubCliError) -> str:
     if error.http_status == 403:
         return "GitHub 권한이 부족하거나 SSO 승인이 필요합니다."
     if error.http_status == 404:
+        # 404는 어느 preflight에서 났는지로 갈라 원인을 좁혀준다(GitHub은 접근권 없는
+        # 비공개 레포도 존재를 숨기려 404를 준다 → repo-404는 접근권/SSO도 함께 안내).
+        if error.command_kind == "preflight_issue":
+            return "해당 PR을 찾을 수 없습니다. PR 번호와 레포가 맞는지 확인하세요."
+        if error.command_kind in ("preflight_repo", "clone", "diff", "compare_diff"):
+            return (
+                "레포를 찾을 수 없거나 이 토큰으로 접근할 수 없습니다. "
+                "레포 이름 오타·비공개 접근 권한·조직 SSO 승인 여부를 확인하세요."
+            )
         return "GitHub repo 또는 PR에 접근할 수 없습니다."
     return error.message
 

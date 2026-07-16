@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { Plus, RotateCcw, Save } from "lucide-react";
 import { api } from "../api";
 import { PageHead } from "@/components/page-head";
@@ -13,6 +13,8 @@ import { Switch } from "@/components/ui/switch";
 
 type Settings = {
   default_effort: string;
+  claude_effort?: string | null;
+  codex_effort?: string | null;
   concurrency_limit: number;
   default_poll_interval: number;
   prescreen_model: string;
@@ -68,26 +70,40 @@ const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
   { key: "context_feedback_on", label: "피드백" },
 ];
 
-const MODELS = ["opus", "sonnet", "haiku", "fable"];
-const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
-const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"];
-// 저장된 값이 별칭 목록에 없더라도(전체 모델 ID·레거시 값) 선택칸이 비지 않도록 앞에 붙인다.
+type Models = {
+  claude: string[];
+  codex: string[];
+  claude_efforts: string[];
+  codex_efforts: string[];
+};
+
+// 서버 /api/models가 단일 소스. fetch 실패 시에만 쓰는 폴백(엔드포인트 미배포 등 대비).
+const FALLBACK_MODELS: Models = {
+  claude: ["opus", "sonnet", "haiku", "fable", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"],
+  codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  claude_efforts: ["low", "medium", "high", "xhigh", "max"],
+  codex_efforts: ["minimal", "low", "medium", "high", "xhigh"],
+};
+
+// 저장된 값이 목록에 없더라도(전체 모델 ID·레거시 값) 선택칸이 비지 않도록 앞에 붙인다.
 const optionsWith = (known: string[], current: string) =>
   current && !known.includes(current) ? [current, ...known] : known;
 
-export function SettingsSection({ load, loadRepos, loadHarnesses }: {
+export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: {
   load?: () => Promise<Settings>;
   loadRepos?: () => Promise<Repo[]>;
   loadHarnesses?: () => Promise<string[]>;
+  loadModels?: () => Promise<Models>;
 }) {
   const loader = load ?? api.settings;
   const repoLoader = loadRepos ?? api.repos;
   const harnessLoader = loadHarnesses ?? api.harnesses;
+  const modelsLoader = loadModels ?? api.models;
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [harnessNames, setHarnessNames] = useState<string[]>([]);
+  const [models, setModels] = useState<Models>(FALLBACK_MODELS);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
 
@@ -100,6 +116,10 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
   useEffect(() => { refreshRepos(); }, []);
   useEffect(() => {
     Promise.resolve().then(harnessLoader).then(setHarnessNames).catch(() => setHarnessNames([]));
+  }, []);
+  useEffect(() => {
+    // 서버에서 선택 가능한 모델 목록을 주입받는다. 실패하면 폴백 목록 유지.
+    Promise.resolve().then(modelsLoader).then(setModels).catch(() => setModels(FALLBACK_MODELS));
   }, []);
 
   if (!draft || !settings) return <p className="text-sm text-muted-foreground">불러오는 중...</p>;
@@ -174,6 +194,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
                   key={r.id}
                   repo={r}
                   settings={settings}
+                  models={models}
                   harnessNames={harnessNames}
                   onPatch={(patch) => patchRepo(r, patch)}
                   onLocalChange={(patch) => setRepos((rs) => rs.map((x) => (x.id === r.id ? { ...x, ...patch } : x)))}
@@ -207,9 +228,36 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
                       onCheckedChange={(v) => setDraft({ ...draft, incremental_review_on: v ? 1 : 0 })} />
             </Field>
             <Field title="사전 스크리닝 모델" help="diff만 보고 변경 복잡도를 평가">
+              <div className="w-48">
+                <ModelCombo ariaLabel="사전 스크리닝 모델" value={draft.prescreen_model} options={models.claude}
+                            onChange={(v) => setDraft({ ...draft, prescreen_model: v })} />
+              </div>
+            </Field>
+            <Field title="기본 모델 (Claude)" help="레포가 모델을 상속할 때 쓰는 전역 Claude 모델">
+              <div className="w-48">
+                <ModelCombo ariaLabel="기본 Claude 모델" value={draft.review_model} options={models.claude}
+                            onChange={(v) => setDraft({ ...draft, review_model: v })} />
+              </div>
+            </Field>
+            <Field title="기본 모델 (Codex)" help="레포가 모델을 상속할 때 쓰는 전역 Codex 모델">
+              <div className="w-48">
+                <ModelCombo ariaLabel="기본 Codex 모델" value={draft.codex_model} options={models.codex}
+                            placeholder="codex 기본" onChange={(v) => setDraft({ ...draft, codex_model: v })} />
+              </div>
+            </Field>
+            <Field title="기본 Claude effort" help="레포가 effort를 상속할 때 쓰는 전역 Claude 기본값">
               <div className="w-40">
-                <NativeSelect value={draft.prescreen_model} onChange={(e) => setDraft({ ...draft, prescreen_model: e.target.value })}>
-                  {optionsWith(MODELS, draft.prescreen_model).map((x) => <option key={x} value={x}>{x}</option>)}
+                <NativeSelect aria-label="기본 Claude effort" value={draft.claude_effort ?? draft.default_effort}
+                              onChange={(e) => setDraft({ ...draft, claude_effort: e.target.value })}>
+                  {optionsWith(models.claude_efforts, draft.claude_effort ?? draft.default_effort).map((x) => <option key={x} value={x}>{x}</option>)}
+                </NativeSelect>
+              </div>
+            </Field>
+            <Field title="기본 Codex effort" help="레포가 effort를 상속할 때 쓰는 전역 Codex 기본값">
+              <div className="w-40">
+                <NativeSelect aria-label="기본 Codex effort" value={draft.codex_effort ?? draft.default_effort}
+                              onChange={(e) => setDraft({ ...draft, codex_effort: e.target.value })}>
+                  {optionsWith(models.codex_efforts, draft.codex_effort ?? draft.default_effort).map((x) => <option key={x} value={x}>{x}</option>)}
                 </NativeSelect>
               </div>
             </Field>
@@ -272,9 +320,69 @@ export function SettingsSection({ load, loadRepos, loadHarnesses }: {
   );
 }
 
-function RepoCard({ repo, settings, harnessNames, onPatch, onLocalChange }: {
+// 모델은 콤보박스(제안 목록 + 자유 입력)로 고른다 — CLI가 모델 목록을 노출하지 않아
+// datalist에 없는 정확한 ID(예: gpt-5.6-terra, claude-opus-4-8)도 직접 타이핑할 수 있어야 한다.
+// 전역 필드는 onChange로 상위 draft를 갱신하고(저장 버튼이 커밋), 레포별 필드는 onCommit만
+// 주어 편집 중엔 로컬 버퍼만 바꾸고 blur에 커밋한다 — 편집 중 상위 repos를 미리 바꾸지 않아야
+// 저장 실패 시 optimistic 롤백이 입력값이 아닌 직전 저장값을 정확히 되돌린다.
+function ModelCombo({ ariaLabel, value, options, placeholder, onChange, onCommit, className }: {
+  ariaLabel: string;
+  value: string;
+  options: string[];
+  placeholder?: string;
+  onChange?: (v: string) => void;
+  onCommit?: (v: string) => void;
+  className?: string;
+}) {
+  const listId = useId();
+  const editing = onCommit != null;
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  return (
+    <>
+      <Input
+        aria-label={ariaLabel}
+        list={listId}
+        className={className}
+        value={editing ? draft : value}
+        placeholder={placeholder}
+        onChange={(e) => (editing ? setDraft(e.target.value) : onChange?.(e.target.value))}
+        onBlur={editing ? () => onCommit(draft) : undefined}
+      />
+      <datalist id={listId}>
+        {options.map((x) => <option key={x} value={x} />)}
+      </datalist>
+    </>
+  );
+}
+
+function InheritSelect({ ariaLabel, value, options, inheritLabel, onChange, className }: {
+  ariaLabel: string;
+  value: string | null | undefined;
+  options: string[];
+  inheritLabel: string;
+  onChange: (v: string | null) => void;
+  className?: string;
+}) {
+  // 저장값이 목록에 없으면(레거시·전체 ID) 선택칸이 비지 않게 앞에 붙인다.
+  const opts = value && !options.includes(value) ? [value, ...options] : options;
+  return (
+    <NativeSelect
+      aria-label={ariaLabel}
+      className={className}
+      value={value == null ? "__inherit__" : value}
+      onChange={(e) => onChange(e.target.value === "__inherit__" ? null : e.target.value)}
+    >
+      <option value="__inherit__">{inheritLabel}</option>
+      {opts.map((x) => <option key={x} value={x}>{x}</option>)}
+    </NativeSelect>
+  );
+}
+
+function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange }: {
   repo: Repo;
   settings: Settings;
+  models: Models;
   harnessNames: string[];
   onPatch: (patch: Partial<Repo>) => void;
   onLocalChange: (patch: Partial<Repo>) => void;
@@ -282,11 +390,22 @@ function RepoCard({ repo, settings, harnessNames, onPatch, onLocalChange }: {
   const harnessOptions = harnessNames.includes(repo.harness_name ?? "default")
     ? harnessNames
     : [repo.harness_name ?? "default", ...harnessNames];
+  const gClaude = settings.review_model || "sonnet";
+  const gCodex = settings.codex_model || "codex 기본";
+  const gClaudeEffort = settings.claude_effort || settings.default_effort || "medium";
+  const gCodexEffort = settings.codex_effort || settings.default_effort || "medium";
   return (
     <div className="rounded-lg border border-border p-4">
       <div className="flex items-center justify-between gap-3">
         <span className="font-mono text-[13px] font-semibold">{repo.full_name}</span>
-        <RepoToggle label="활성" checked={!!repo.enabled} onChange={(v) => onPatch({ enabled: v })} />
+        <div className="flex items-center gap-4">
+          <RepoToggle
+            label="자동 리뷰"
+            checked={(repo.trigger_mode ?? "auto") === "auto"}
+            onChange={(v) => onPatch({ trigger_mode: v ? "auto" : "manual" })}
+          />
+          <RepoToggle label="활성" checked={!!repo.enabled} onChange={(v) => onPatch({ enabled: v })} />
+        </div>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2">
@@ -295,14 +414,7 @@ function RepoCard({ repo, settings, harnessNames, onPatch, onLocalChange }: {
         <RepoToggle label="병합" checked={!!repo.merge_enabled} onChange={(v) => onPatch({ merge_enabled: v })} />
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
-        <RepoField label="트리거">
-          <NativeSelect aria-label={`${repo.full_name} 트리거`} value={repo.trigger_mode ?? "auto"} className="h-8"
-                        onChange={(e) => onPatch({ trigger_mode: e.target.value })}>
-            <option value="auto">auto</option>
-            <option value="manual">manual</option>
-          </NativeSelect>
-        </RepoField>
+      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
         <RepoField label="하네스">
           <NativeSelect aria-label={`${repo.full_name} 하네스`} value={repo.harness_name ?? "default"} className="h-8"
                         onChange={(e) => onPatch({ harness_name: e.target.value })}>
@@ -310,39 +422,38 @@ function RepoCard({ repo, settings, harnessNames, onPatch, onLocalChange }: {
           </NativeSelect>
         </RepoField>
         <RepoField label="Claude 모델">
-          <NativeSelect aria-label={`${repo.full_name} Claude 모델`} value={repo.claude_model ?? "sonnet"} className="h-8"
-                        onChange={(e) => onPatch({ claude_model: e.target.value })}>
-            {optionsWith(MODELS, repo.claude_model ?? "sonnet").map((x) => <option key={x} value={x}>{x}</option>)}
-          </NativeSelect>
+          <ModelCombo ariaLabel={`${repo.full_name} Claude 모델`} className="h-8"
+                      value={repo.claude_model ?? ""} options={models.claude}
+                      placeholder={`상속 (${gClaude})`}
+                      onCommit={(v) => onPatch({ claude_model: v.trim() || null })} />
         </RepoField>
         <RepoField label="Claude effort">
-          <NativeSelect aria-label={`${repo.full_name} Claude effort`} value={repo.claude_effort ?? "medium"} className="h-8"
-                        onChange={(e) => onPatch({ claude_effort: e.target.value })}>
-            {CLAUDE_EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
-          </NativeSelect>
+          <InheritSelect ariaLabel={`${repo.full_name} Claude effort`} className="h-8"
+                         value={repo.claude_effort} options={models.claude_efforts}
+                         inheritLabel={`상속 (${gClaudeEffort})`}
+                         onChange={(v) => onPatch({ claude_effort: v })} />
         </RepoField>
         <RepoField label="Codex 모델">
-          <NativeSelect aria-label={`${repo.full_name} Codex 모델`} value={repo.codex_model ?? ""} className="h-8"
-                        onChange={(e) => onPatch({ codex_model: e.target.value })}>
-            <option value="">기본값 (codex 자체)</option>
-            {optionsWith(CODEX_MODELS, repo.codex_model ?? "").map((x) => <option key={x} value={x}>{x}</option>)}
-          </NativeSelect>
+          <ModelCombo ariaLabel={`${repo.full_name} Codex 모델`} className="h-8"
+                      value={repo.codex_model ?? ""} options={models.codex}
+                      placeholder={`상속 (${gCodex})`}
+                      onCommit={(v) => onPatch({ codex_model: v.trim() || null })} />
         </RepoField>
         <RepoField label="Codex effort">
-          <NativeSelect aria-label={`${repo.full_name} Codex effort`} value={repo.codex_effort ?? "medium"} className="h-8"
-                        onChange={(e) => onPatch({ codex_effort: e.target.value })}>
-            {CODEX_EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
-          </NativeSelect>
+          <InheritSelect ariaLabel={`${repo.full_name} Codex effort`} className="h-8"
+                         value={repo.codex_effort} options={models.codex_efforts}
+                         inheritLabel={`상속 (${gCodexEffort})`}
+                         onChange={(v) => onPatch({ codex_effort: v })} />
         </RepoField>
       </div>
 
       <div className="mt-3">
-        <RepoField label="로컬 경로 (선택 · 비우면 리뷰 시 온디맨드 clone)">
+        <RepoField label="로컬 경로 (선택 · 비우면 서비스 전용 clone 사용 · 권장)">
           <Input
             value={repo.local_path ?? ""}
             aria-label={`${repo.full_name} local_path`}
             className="h-8"
-            placeholder="/로컬/clone/경로"
+            placeholder="비워두면 서비스가 자체 clone 사용"
             onChange={(e) => onLocalChange({ local_path: e.target.value })}
             onBlur={(e) => onPatch({ local_path: e.target.value })}
           />

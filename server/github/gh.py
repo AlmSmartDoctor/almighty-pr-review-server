@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -47,15 +48,44 @@ class GitHubCliError(RuntimeError):
         self.http_status = http_status
 
 
+_native_auth: bool | None = None
+
+
+def _gh_has_native_auth() -> bool:
+    """gh가 env 토큰 없이도 자체 인증(keyring `gh auth login`)을 갖고 있는지.
+    `gh auth token`은 keyring/config 토큰을 stdout으로 주고 로그인이 없으면 non-zero다.
+    프로세스 전역 상태라 1회만 조회하고 캐시한다."""
+    global _native_auth
+    if _native_auth is None:
+        try:
+            subprocess.run(
+                ["gh", "auth", "token"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            _native_auth = True
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            _native_auth = False
+    return _native_auth
+
+
 def _normalized_env(base: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     if base is not None:
         env.update(base)
-    if not env.get("GH_TOKEN"):
-        for key in ("GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"):
-            if env.get(key):
-                env["GH_TOKEN"] = env[key]
-                break
+    if env.get("GH_TOKEN"):
+        return env
+    # gh는 GITHUB_TOKEN을 네이티브로 읽으므로 GH_TOKEN 승격은 precedence를 바꾸지 않는다.
+    if env.get("GITHUB_TOKEN"):
+        env["GH_TOKEN"] = env["GITHUB_TOKEN"]
+        return env
+    # GITHUB_PERSONAL_ACCESS_TOKEN은 gh가 읽지 않는 비표준 변수다. 예전엔 무조건 GH_TOKEN으로
+    # 승격했는데, 이 PAT가 keyring 로그인보다 약하면(조직 private 레포에 404) 정상 인증을
+    # 덮어써 프리뷰·포스팅이 깨졌다. → gh가 자체 인증을 못 가진 headless일 때만 폴백 승격한다.
+    pat = env.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if pat and not _gh_has_native_auth():
+        env["GH_TOKEN"] = pat
     return env
 
 
@@ -68,10 +98,19 @@ def _redact(text: str | None, env: dict[str, str]) -> str:
     return out
 
 
+# gh는 실패 시 `(HTTP 404)`(사람용)와 JSON 본문 `"status":"404"`(API)를 남긴다.
+# 실제 상태 코드를 그 형식에서 읽는다 — 예전처럼 아무 "404" 부분문자열을 집으면
+# stderr에 우연히 섞인 숫자(SHA·라인번호·PR번호)를 오분류해 엉뚱한 안내를 준다.
+_HTTP_RE = re.compile(r"\(HTTP (\d{3})\)")
+_STATUS_RE = re.compile(r'"status"\s*:\s*"(\d{3})"')
+_HTTP_LOOSE_RE = re.compile(r"\bHTTP[ /][0-9.]*\s*(\d{3})\b")
+
+
 def _http_status(text: str) -> int | None:
-    for code in (401, 403, 404):
-        if str(code) in text:
-            return code
+    for rx in (_HTTP_RE, _STATUS_RE, _HTTP_LOOSE_RE):
+        m = rx.search(text)
+        if m:
+            return int(m.group(1))
     return None
 
 

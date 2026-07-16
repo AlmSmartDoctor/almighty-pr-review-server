@@ -36,6 +36,7 @@ test("sets per-repo claude model and effort", async () => {
 
   const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
   fireEvent.change(model, { target: { value: "opus" } });
+  fireEvent.blur(model);
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { claude_model: "opus" }));
 
   const effort = screen.getByRole("combobox", { name: "acme/api Claude effort" });
@@ -85,13 +86,50 @@ test("sets per-repo codex model and effort", async () => {
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
 
   const model = await screen.findByRole("combobox", { name: "acme/api Codex 모델" });
-  expect(model).toHaveDisplayValue("기본값 (codex 자체)");
-  fireEvent.change(model, { target: { value: "gpt-5.4" } });
-  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { codex_model: "gpt-5.4" }));
+  expect(model.getAttribute("placeholder")).toContain("상속");  // 미설정 → 전역 기본값 상속
+  fireEvent.change(model, { target: { value: "gpt-5.6-terra" } });
+  fireEvent.blur(model);
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { codex_model: "gpt-5.6-terra" }));
 
   const effort = screen.getByRole("combobox", { name: "acme/api Codex effort" });
   fireEvent.change(effort, { target: { value: "high" } });
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { codex_effort: "high" }));
+});
+
+test("toggles auto-review (trigger_mode) as a switch", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, trigger_mode: "auto" };
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  const toggle = await screen.findByRole("switch", { name: "자동 리뷰" });
+  expect(toggle).toBeChecked();
+  fireEvent.click(toggle);
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { trigger_mode: "manual" }));
+});
+
+test("per-repo model select can restore inheritance", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, claude_model: "opus" };
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
+  expect(model).toHaveDisplayValue("opus");
+  fireEvent.change(model, { target: { value: "" } });
+  fireEvent.blur(model);
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { claude_model: null }));
+});
+
+test("failed per-repo model patch rolls back to the prior saved value", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, claude_model: "opus" };
+  vi.spyOn(api, "patchRepo").mockRejectedValue(new Error("network"));
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
+  expect(model).toHaveDisplayValue("opus");
+  fireEvent.change(model, { target: { value: "haiku" } });
+  fireEvent.blur(model);
+  // 저장 실패 → 입력값("haiku")이 아니라 직전 저장값("opus")으로 되돌아가야 한다.
+  await waitFor(() => expect(model).toHaveDisplayValue("opus"));
 });
 
 test("renders repositories and toggles enabled state", async () => {

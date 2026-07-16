@@ -1,5 +1,7 @@
 ALLOWED = {
     "default_effort",
+    "claude_effort",
+    "codex_effort",
     "concurrency_limit",
     "default_poll_interval",
     "prescreen_model",

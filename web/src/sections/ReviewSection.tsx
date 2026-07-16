@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Check, Pencil, RotateCw, Send, X } from "lucide-react";
+import { Check, ExternalLink, Pencil, RotateCw, Send, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "../api";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
@@ -10,11 +10,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { StatusLine } from "@/components/status-line";
 
+type JiraLink = { key: string; url: string };
+
 type Pr = {
   id: number;
   number: number;
   title: string;
   repo: string;
+  url?: string | null;
+  jira_links?: JiraLink[];
   author?: string | null;
   created_at?: string | null;
   first_seen_at?: string | null;
@@ -67,6 +71,10 @@ type PostHealth = {
 
 const SEV_LABEL: Record<string, string> = {
   critical: "CRITICAL", high: "HIGH", medium: "MEDIUM", low: "LOW",
+};
+
+const FINDING_STATUS_LABEL: Record<string, string> = {
+  pending: "대기", approved: "승인", dismissed: "기각", edited: "수정", posted: "게시",
 };
 
 const POLL_MS = 2500;  // 상세 페이지 실시간 폴링 주기
@@ -566,7 +574,15 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
     return (
       <div>
         <BackButton onClick={onBack} />
-        <DetailHead pr={pr} sub={`${pr.repo} #${pr.number} · ${prCreatedLine(pr)}`}>
+        <DetailHead
+          pr={pr}
+          sub={
+            <>
+              <div>{pr.repo} #{pr.number} · {prCreatedLine(pr)}</div>
+              <PrLinks pr={pr} />
+            </>
+          }
+        >
           <NeedBadge value={pr.prescreen} />
         </DetailHead>
         <Empty>아직 리뷰 실행 이력이 없습니다. 수동 리뷰 트리거로 큐에 넣을 수 있습니다.</Empty>
@@ -587,6 +603,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
           <>
             <div>{pr.repo} #{pr.number} · run {runId}{runDuration ? ` · ${runDuration}` : ""}</div>
             <div>{prCreatedLine(pr)}</div>
+            <PrLinks pr={pr} />
           </>
         }
       >
@@ -736,6 +753,29 @@ function BackButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+function PrLinks({ pr }: { pr: Pr }) {
+  const jira = pr.jira_links ?? [];
+  if (!pr.url && jira.length === 0) return null;
+  const cls = cn(
+    "inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[12px] font-semibold text-foreground transition-colors hover:bg-secondary hover:text-primary",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+  );
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+      {pr.url && (
+        <a href={pr.url} target="_blank" rel="noreferrer" className={cls}>
+          <ExternalLink className="size-3.5" /> GitHub PR
+        </a>
+      )}
+      {jira.map((j) => (
+        <a key={j.key} href={j.url} target="_blank" rel="noreferrer" className={cls}>
+          <ExternalLink className="size-3.5" /> {j.key}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function DetailHead({ pr, sub, children }: {
   pr: Pr; sub: ReactNode; children?: ReactNode;
 }) {
@@ -796,7 +836,7 @@ function FindingCard({ finding, onSet }: {
         <code className="font-mono text-[12px] font-semibold">{finding.file}:{finding.line}</code>
         <Badge variant={vendorVariant(finding.vendor)}>{finding.vendor}</Badge>
         {finding.category && <Badge variant="neutral">{finding.category}</Badge>}
-        <span className="text-[12px] text-muted-foreground">상태: {state}</span>
+        <span className="text-[12px] text-muted-foreground">상태: {FINDING_STATUS_LABEL[state] ?? state}</span>
       </div>
       <div className="my-1.5 font-semibold leading-relaxed">{finding.edited_text || finding.claim}</div>
       {finding.rationale && <p className="text-[12.5px] leading-relaxed text-muted-foreground">{finding.rationale}</p>}

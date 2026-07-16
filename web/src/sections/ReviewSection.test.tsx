@@ -77,6 +77,20 @@ test("overview lists PRs and drills into detail", async () => {
   expect(await screen.findByText("fix null")).toBeInTheDocument();
 });
 
+test("detail links to the GitHub PR and Jira issue", async () => {
+  const pr = {
+    ...PRS[0],
+    url: "https://github.com/acme/api/pull/7",
+    jira_links: [{ key: "PROJ-42", url: "https://jira.example.com/browse/PROJ-42" }],
+  };
+  renderReview({ loadPrs: async () => [pr], loadFindings: async () => [], loadVendors: async () => [] });
+  fireEvent.click(await screen.findByText("fix null"));
+  const ghLink = await screen.findByRole("link", { name: /GitHub PR/ });
+  expect(ghLink).toHaveAttribute("href", "https://github.com/acme/api/pull/7");
+  const jiraLink = screen.getByRole("link", { name: /PROJ-42/ });
+  expect(jiraLink).toHaveAttribute("href", "https://jira.example.com/browse/PROJ-42");
+});
+
 test("all vendors failed shows full-failure label", async () => {
   renderReview({ loadPrs: async () => PRS,
                  loadFindings: async () => [],
@@ -100,9 +114,9 @@ test("approving a finding optimistically updates its status", async () => {
                      claim: "널 역참조", status: "pending", vendor: "claude" },
                  ] });
   fireEvent.click(await screen.findByText("fix null"));
-  expect(await screen.findByText("상태: pending")).toBeInTheDocument();
+  expect(await screen.findByText("상태: 대기")).toBeInTheDocument();
   fireEvent.click(screen.getByText("승인"));
-  expect(await screen.findByText(/상태: approved/)).toBeInTheDocument();
+  expect(await screen.findByText(/상태: 승인/)).toBeInTheDocument();
 });
 
 test("shows server formatted post preview for approved findings", async () => {
@@ -208,11 +222,11 @@ test("rolls back optimistic status when patch fails", async () => {
                      claim: "널 역참조", status: "pending", vendor: "claude" },
                  ] });
   fireEvent.click(await screen.findByText("fix null"));
-  expect(await screen.findByText("상태: pending")).toBeInTheDocument();
+  expect(await screen.findByText("상태: 대기")).toBeInTheDocument();
   fireEvent.click(screen.getByText("승인"));
   await waitFor(() =>
-    expect(screen.getByText("상태: pending")).toBeInTheDocument());
-  expect(screen.queryByText(/상태: approved/)).toBeNull();
+    expect(screen.getByText("상태: 대기")).toBeInTheDocument());
+  expect(screen.queryByText(/상태: 승인/)).toBeNull();
 });
 
 test("repo tab filters the PR list", async () => {

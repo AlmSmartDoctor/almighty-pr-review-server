@@ -41,10 +41,3 @@ def find_reusable(conn, pr_id, diff_hash, model):
         "AND complexity IS NOT NULL ORDER BY id DESC LIMIT 1",
         (pr_id, diff_hash, model),
     ).fetchone()
-
-
-def latest_for_pr(conn, pr_id):
-    return conn.execute(
-        "SELECT * FROM pre_screen WHERE pr_id=? ORDER BY id DESC LIMIT 1",
-        (pr_id,),
-    ).fetchone()

@@ -28,6 +28,7 @@ export const api = {
   settings: () => fetch("/api/settings").then(json),
   patchSettings: (body: object) =>
     fetch("/api/settings", writeJson("PATCH", body)).then(json),
+  models: () => fetch("/api/models").then(json),
   harnesses: () => fetch("/api/harness").then(json).then((r) => r.harnesses as string[]),
   harness: (name: string) => fetch(`/api/harness/${name}`).then(json),
   putHarness: (name: string, body: object) =>

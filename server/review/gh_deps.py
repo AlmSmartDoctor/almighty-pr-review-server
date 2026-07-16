@@ -11,7 +11,7 @@ from server.review.worktree import prepared_worktree
 
 
 def build_deps(repo, settings) -> PipelineDeps:
-    # local_path는 선택값 — 없으면 파이프라인이 gh.clone으로 PR 브랜치를 온디맨드 clone.
+    # local_path는 선택값 — 없으면 파이프라인이 gh.clone으로 서비스 전용 영구 clone을 사용.
     gh = GhClient()
     hp = HarnessProfile.load(repo["harness_name"])
 

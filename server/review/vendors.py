@@ -10,7 +10,7 @@ VENDOR_TIMEOUT_SEC = 600  # 벤더별 상한(rate-limit/hang 방어)
 # codex reasoning effort 유효값(codex-cli 0.144.1 API가 실증한 enum; docs/vendor-cli-contract.md).
 # 이 집합 밖 값이면 codex가 400으로 리뷰 전체를 깨므로, 모르는 값은 플래그 생략(codex 기본).
 _CODEX_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
-# claude --effort 유효값(claude CLI가 경고 후 무시하지만, 명시적으로 유효값만 전달).
+# claude --effort 유효값(명시적으로 유효값만 전달; 그 밖의 값은 플래그 생략).
 _CLAUDE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 

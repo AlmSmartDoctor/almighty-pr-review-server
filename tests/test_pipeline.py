@@ -1014,7 +1014,7 @@ def test_incremental_on_by_default_uses_delta(db):
 
 
 def test_pipeline_injects_repo_vendor_model_effort_into_harness(db):
-    """레포별·벤더별 모델/effort가 각 벤더 어댑터가 보는 하네스에 반영된다(전역 미사용)."""
+    """레포별 모델/effort를 지정하면 전역 기본값을 덮어써 각 벤더 하네스에 반영된다."""
     rid, pid = _seed_pr(db, number=70, head_sha="s70")
     repo_repo.update(
         db,
@@ -1071,6 +1071,95 @@ def test_pipeline_falls_back_to_default_model_effort_when_repo_unset(db):
     )
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     assert cap.hp.model == "sonnet" and cap.hp.effort == "medium"
+
+
+def test_repo_inherits_global_model_effort_when_unset(db):
+    """레포 모델/effort 미설정(NULL)이면 전역 기본값(app_settings)을 상속한다."""
+    from server.repos import settings_repo
+
+    settings_repo.update(
+        db, review_model="opus", default_effort="high", codex_model="gpt-5.6"
+    )
+    _, pid = _seed_pr(db, number=88, head_sha="s88")  # 레포 모델/effort 미설정=상속
+
+    class Cap:
+        def __init__(self, vendor):
+            self.vendor, self.hp = vendor, None
+
+        async def review(self, *, harness, **kw):
+            self.hp = harness
+            return []
+
+    claude, codex = Cap("claude"), Cap("codex")
+    deps = PipelineDeps(
+        gh_diff=lambda r, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[claude, codex],
+        prescreen=lambda d, m: ("complex", 0.9, "x"),
+        repo_local_path="/tmp/x",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert (claude.hp.model, claude.hp.effort) == ("opus", "high")
+    assert (codex.hp.codex_model, codex.hp.codex_effort) == ("gpt-5.6", "high")
+
+
+def test_global_effort_splits_per_vendor(db):
+    """전역 effort를 벤더별로 분리하면(app_settings.claude_effort/codex_effort) 각 벤더에
+    독립 적용된다. 한쪽만 설정하면 다른 벤더는 공용 default_effort로 폴백한다."""
+    from server.repos import settings_repo
+
+    settings_repo.update(db, default_effort="low", claude_effort="max")
+    _, pid = _seed_pr(db, number=90, head_sha="s90")  # 레포 effort 미설정=전역 상속
+
+    class Cap:
+        def __init__(self, vendor):
+            self.vendor, self.hp = vendor, None
+
+        async def review(self, *, harness, **kw):
+            self.hp = harness
+            return []
+
+    claude, codex = Cap("claude"), Cap("codex")
+    deps = PipelineDeps(
+        gh_diff=lambda r, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[claude, codex],
+        prescreen=lambda d, m: ("complex", 0.9, "x"),
+        repo_local_path="/tmp/x",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert claude.hp.effort == "max"  # 전역 claude_effort
+    assert codex.hp.codex_effort == "low"  # codex_effort 미설정 → default_effort 폴백
+
+
+def test_empty_prescreen_model_falls_back_to_default(db):
+    """전역 prescreen_model이 ''(자유입력 콤보박스로 비워짐)이면 코드 기본값으로 폴백해
+    빈 --model로 prescreen CLI를 400으로 깨뜨리지 않는다."""
+    from server.repos import settings_repo
+
+    settings_repo.update(db, prescreen_model="")
+    _, pid = _seed_pr(db, number=91, head_sha="s91")
+    seen = {}
+
+    class Cap:
+        vendor = "claude"
+
+        async def review(self, **kw):
+            return []
+
+    def prescreen(diff, model):
+        seen["model"] = model
+        return ("complex", 0.9, "x")
+
+    deps = PipelineDeps(
+        gh_diff=lambda r, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[Cap()],
+        prescreen=prescreen,
+        repo_local_path="/tmp/x",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert seen["model"] == "haiku"  # config.DEFAULT_PRESCREEN_MODEL
 
 
 def test_prescreen_reused_across_reviews_of_identical_diff(db):
