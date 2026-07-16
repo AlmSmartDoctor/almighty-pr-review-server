@@ -185,6 +185,36 @@ def test_pipeline_skips_on_trivial_prescreen(db):
     assert finding_repo.list_for_run(db, run_id) == []
 
 
+def test_manual_trigger_reviews_even_below_prescreen_threshold(db):
+    """사람이 '리뷰' 버튼으로 트리거하면(trigger='manual') prescreen이 skip으로 판정해도
+    취소하지 않고 항상 리뷰한다. 게이트는 자동 리뷰(trigger='auto')에만 적용된다."""
+    rid = repo_repo.add(db, full_name="acme/api")  # trigger_mode 기본값 'auto'
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=9,
+        title="t",
+        author="a",
+        head_sha="s9",
+        base_ref="main",
+        url="u",
+    )
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("trivial", 0.1, "오타"),  # skip 판정
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert review_repo.get_run(db, run_id)["status"] == "done"
+    assert {f["vendor"] for f in finding_repo.list_for_run(db, run_id)} == {"claude"}
+
+
 def _diff_block(path: str) -> str:
     return f"diff --git a/{path} b/{path}\n@@ -1 +1 @@\n-a\n+b\n"
 

@@ -261,7 +261,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
                 </NativeSelect>
               </div>
             </Field>
-            <Field title="풀리뷰 게이트 임계" help="이 복잡도 이상만 2벤더 풀리뷰 실행">
+            <Field title="풀리뷰 게이트 임계" help="자동 리뷰에만 적용 · 이 복잡도 이상만 2벤더 풀리뷰 실행(수동 리뷰는 항상 실행)">
               <div className="w-40">
                 <NativeSelect value={draft.prescreen_gate_threshold}
                         onChange={(e) => setDraft({ ...draft, prescreen_gate_threshold: e.target.value })}>

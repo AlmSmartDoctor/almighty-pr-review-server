@@ -107,7 +107,13 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
     )
     try:
         await _execute_run(
-            conn, run_id=run_id, pr=pr, repo=repo, settings=settings, deps=deps
+            conn,
+            run_id=run_id,
+            pr=pr,
+            repo=repo,
+            settings=settings,
+            deps=deps,
+            trigger=trigger,
         )
     except Exception as e:
         review_repo.finish_run(conn, run_id, "failed", error=str(e))
@@ -115,7 +121,7 @@ async def review_pr(conn, *, pr_id: int, trigger: str, deps: PipelineDeps) -> in
     return run_id
 
 
-async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
+async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> None:
     hp = HarnessProfile.load(repo["harness_name"])
     _apply_models(hp, repo, settings)  # 레포별 모델/effort(미설정 시 전역 기본 상속)
     # 빈 문자열('')이면 코드 기본값으로 폴백 — 설정 UI가 자유입력 콤보박스라 비워질 수
@@ -172,7 +178,9 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps) -> None:
         # 파싱 실패 fallback은 비결정적 → 캐시 미등록(다음 런이 CLI 재시도해 self-heal).
         diff_hash=None if reason == PRESCREEN_FALLBACK_REASON else diff_hash,
     )
-    if decided == "skip" and repo["trigger_mode"] == "auto":
+    # skip은 자동 리뷰(폴러/웹훅 enqueue = trigger 'auto')에서만 취소로 이어진다.
+    # 사람이 '리뷰' 버튼으로 명시 트리거(trigger 'manual')하면 임계 미만이라도 항상 리뷰한다.
+    if decided == "skip" and trigger == "auto":
         review_repo.finish_run(conn, run_id, "canceled")
         pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
         return
