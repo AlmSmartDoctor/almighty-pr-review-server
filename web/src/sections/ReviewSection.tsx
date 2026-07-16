@@ -34,6 +34,9 @@ type Pr = {
   run_finished_at?: string | null;
   run_duration_ms?: number | null;
   run_error: string | null;
+  job_status?: string | null;
+  job_error?: string | null;
+  job_next_run_at?: string | null;
 };
 
 type Finding = {
@@ -78,6 +81,7 @@ const FINDING_STATUS_LABEL: Record<string, string> = {
 };
 
 const POLL_MS = 2500;  // 상세 페이지 실시간 폴링 주기
+const LIST_POLL_MS = 10_000;  // 리스트 화면 자동 갱신 주기(리뷰 완료를 놓치지 않게)
 
 const sevVariant = (s: string): BadgeVariant =>
   (["critical", "high", "medium", "low"].includes(s) ? (s as BadgeVariant) : "neutral");
@@ -117,7 +121,11 @@ export function ReviewSection(props: {
   const refresh = () =>
     loadPrs().then((rows) => { setPrs(rows); setError(""); }).catch(() => setError("오버뷰를 불러오지 못했습니다."));
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(refresh, LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   const repos = ["전체", ...Array.from(new Set(prs.map((p) => p.repo)))];
   const repoScoped = tab === "전체" ? prs : prs.filter((p) => p.repo === tab);
@@ -293,7 +301,10 @@ export function ReviewSection(props: {
                 </div>
               </div>
               <div className="flex items-center justify-between gap-2 sm:flex-col sm:items-end sm:justify-between">
-                <RunBadge pr={p} />
+                <span className="flex items-center gap-1.5">
+                  <JobBadge pr={p} />
+                  <RunBadge pr={p} />
+                </span>
                 <Button
                   variant="outline"
                   size="sm"
@@ -367,6 +378,22 @@ function RunBadge({ pr }: { pr: Pr }) {
   if (!pr.run_id) return <Badge variant="neutral">감지됨</Badge>;
   const status = pr.run_status ?? "queued";
   return <Badge variant={RUN_VARIANT[status] ?? "neutral"}>{RUN_LABEL[status] ?? status}</Badge>;
+}
+
+function JobBadge({ pr }: { pr: Pr }) {
+  // run이 생기기 전 실패(clone/deps 등)와 backoff 대기는 review_run에 안 남는다 —
+  // 최신 job 상태로 노출해 "큐에 넣었습니다" 후 무소식 블랙박스를 없앤다.
+  if (pr.job_status === "failed") {
+    return (
+      <Badge variant="danger" title={pr.job_error ?? undefined}>잡 실패</Badge>
+    );
+  }
+  if (pr.job_status === "queued" && pr.job_next_run_at) {
+    return (
+      <Badge variant="warn" title={`재시도 예정: ${pr.job_next_run_at}`}>재시도 대기</Badge>
+    );
+  }
+  return null;
 }
 
 function reviewStatus(pr: Pr): ReviewStatusFilter | null {

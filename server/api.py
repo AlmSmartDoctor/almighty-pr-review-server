@@ -180,7 +180,13 @@ def overview(conn=Depends(get_conn)):
                 FROM review_run rr WHERE rr.pr_id=p.id
                 ORDER BY id DESC LIMIT 1) AS run_duration_ms,
              (SELECT error FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_error
+                ORDER BY id DESC LIMIT 1) AS run_error,
+             (SELECT status FROM review_job j WHERE j.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS job_status,
+             (SELECT error FROM review_job j WHERE j.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS job_error,
+             (SELECT next_run_at FROM review_job j WHERE j.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS job_next_run_at
       FROM pull_request p JOIN repo r ON r.id=p.repo_id
       WHERE p.state='open'
       ORDER BY

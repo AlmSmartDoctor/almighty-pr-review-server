@@ -175,6 +175,40 @@ def test_overview_exposes_latest_run_status_and_error(tmp_path):
     assert rows[0]["run_error"] == "diff too large"
 
 
+def test_overview_exposes_latest_job_status_for_prerun_failures(tmp_path):
+    # run 생성 전 실패(build_deps 등)와 backoff 대기는 review_run에 안 남는다 —
+    # 최신 job 상태를 노출해야 "잡을 큐에 넣었습니다" 후 무소식 블랙박스가 사라진다.
+    conn = connect(tmp_path / "api.db")
+    init_schema(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    client = TestClient(app)
+
+    from server.repos import job_repo, pr_repo, repo_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="Add feature",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    job_id = job_repo.enqueue(conn, pr_id=pid, head_sha="s", trigger="auto")
+    conn.execute(
+        "UPDATE review_job SET status='failed', error='clone 실패' WHERE id=?",
+        (job_id,),
+    )
+    conn.commit()
+
+    rows = client.get("/api/overview").json()
+    assert rows[0]["job_status"] == "failed"
+    assert rows[0]["job_error"] == "clone 실패"
+    assert rows[0]["run_id"] is None  # run은 없음 — job만이 실패를 안다
+
+
 def test_overview_orders_by_created_at_desc_and_exposes_draft(tmp_path):
     conn = connect(tmp_path / "api.db")
     init_schema(conn)

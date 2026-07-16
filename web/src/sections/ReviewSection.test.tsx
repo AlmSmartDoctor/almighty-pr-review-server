@@ -387,6 +387,30 @@ test("marks draft PRs with a Draft badge and omits it otherwise", async () => {
   expect(screen.getByText("Draft")).toBeInTheDocument();
 });
 
+test("shows job failure badge when job failed before any run", async () => {
+  renderReview({
+    loadPrs: async () => [
+      { ...PRS[0], id: 3, number: 9, title: "pre-run fail", run_id: null,
+        run_status: null, job_status: "failed", job_error: "clone 실패" },
+    ],
+  });
+  expect(await screen.findByText("pre-run fail")).toBeInTheDocument();
+  expect(screen.getByText("잡 실패")).toBeInTheDocument();
+  expect(screen.getByText("잡 실패")).toHaveAttribute("title", "clone 실패");
+});
+
+test("shows retry-wait badge when job is queued with backoff", async () => {
+  renderReview({
+    loadPrs: async () => [
+      { ...PRS[0], id: 4, number: 10, title: "backoff", run_id: null,
+        run_status: null, job_status: "queued",
+        job_next_run_at: "2026-07-16 12:00:00" },
+    ],
+  });
+  expect(await screen.findByText("backoff")).toBeInTheDocument();
+  expect(screen.getByText("재시도 대기")).toBeInTheDocument();
+});
+
 test("non-draft PRs have no Draft badge", async () => {
   renderReview({ loadPrs: async () => PRS });
   expect(await screen.findByText("fix null")).toBeInTheDocument();
