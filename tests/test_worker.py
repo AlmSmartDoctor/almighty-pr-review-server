@@ -273,3 +273,94 @@ def test_worker_loop_survives_tick_error(tmp_path, monkeypatch):
     monkeypatch.setattr("server.worker.run_one_job", fake_run_one_job)
     asyncio.run(worker_loop(tmp_path / "w.db", stop_event=stop, idle_sleep=0.01))
     assert len(calls) >= 2  # 첫 에러 후에도 루프 생존
+
+
+def _seed_pr_job(db, *, number=9, sha="s9"):
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=number,
+        title="t",
+        author="a",
+        head_sha=sha,
+        base_ref="main",
+        url="u",
+    )
+    job_repo.enqueue(db, pr_id=pid, head_sha=sha, trigger="auto")
+    return pid
+
+
+def test_worker_notifies_on_done_with_finding_count(db, monkeypatch):
+    _seed_pr_job(db)
+    calls = []
+
+    async def fake_review_pr(conn, *, pr_id, trigger, deps):
+        run_id = review_repo.create_run(
+            conn, pr_id=pr_id, head_sha="s9", trigger=trigger, effort="medium"
+        )
+        conn.execute(
+            "INSERT INTO finding (run_id, vendor, claim) VALUES (?, 'claude', 'c1')",
+            (run_id,),
+        )
+        conn.execute(
+            "INSERT INTO finding (run_id, vendor, claim) VALUES (?, 'codex', 'c2')",
+            (run_id,),
+        )
+        conn.commit()
+        return run_id
+
+    monkeypatch.setattr("server.worker.review_pr", fake_review_pr)
+    monkeypatch.setattr(
+        "server.worker.notify_review_done", lambda **kw: calls.append(kw)
+    )
+    asyncio.run(run_one_job(db, worker_id="w1"))
+    assert calls == [
+        {"repo_full": "acme/api", "pr_number": 9, "status": "done", "findings": 2}
+    ]
+
+
+def test_worker_notifies_on_terminal_failure_only(db, monkeypatch):
+    _seed_pr_job(db)
+    calls = []
+
+    async def boom(conn, *, pr_id, trigger, deps):
+        raise RuntimeError("permission denied")  # 비재시도 → 즉시 failed
+
+    monkeypatch.setattr("server.worker.review_pr", boom)
+    monkeypatch.setattr(
+        "server.worker.notify_review_done", lambda **kw: calls.append(kw)
+    )
+    asyncio.run(run_one_job(db, worker_id="w1"))
+    assert [c["status"] for c in calls] == ["failed"]
+    assert calls[0]["repo_full"] == "acme/api" and calls[0]["pr_number"] == 9
+
+
+def test_worker_no_notify_when_failure_will_retry(db, monkeypatch):
+    pid = _seed_pr_job(db)
+    calls = []
+
+    async def boom(conn, *, pr_id, trigger, deps):
+        raise RuntimeError("rate limit exceeded")  # 재시도 → queued 복귀
+
+    monkeypatch.setattr("server.worker.review_pr", boom)
+    monkeypatch.setattr(
+        "server.worker.notify_review_done", lambda **kw: calls.append(kw)
+    )
+    asyncio.run(run_one_job(db, worker_id="w1"))
+    j = db.execute("SELECT status FROM review_job WHERE pr_id=?", (pid,)).fetchone()
+    assert j["status"] == "queued" and calls == []
+
+
+def test_worker_no_notify_on_canceled_closed_pr(db, monkeypatch):
+    pid = _seed_pr_job(db)
+    rid = db.execute("SELECT repo_id FROM pull_request WHERE id=?", (pid,)).fetchone()[
+        "repo_id"
+    ]
+    pr_repo.mark_closed(db, rid, {9})
+    calls = []
+    monkeypatch.setattr(
+        "server.worker.notify_review_done", lambda **kw: calls.append(kw)
+    )
+    asyncio.run(run_one_job(db, worker_id="w1"))
+    assert calls == []

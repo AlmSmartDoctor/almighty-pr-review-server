@@ -1,5 +1,6 @@
 import asyncio
 
+from server.notify import notify_review_done
 from server.pipeline import PipelineError, retry_pr, review_pr
 from server.repos import job_repo, pr_repo, repo_repo, review_repo, settings_repo
 from server.review.gh_deps import build_deps  # Task 7.2에서 정의
@@ -37,18 +38,47 @@ async def run_one_job(conn, *, worker_id: str) -> bool:
                 conn, pr_id=job["pr_id"], trigger=job["trigger"], deps=deps
             )
         job_repo.mark_done(conn, job["id"], run_id)
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM finding WHERE run_id=?", (run_id,)
+        ).fetchone()["n"]
+        notify_review_done(
+            repo_full=repo["full_name"],
+            pr_number=pr["number"],
+            status="done",
+            findings=n,
+        )
     except PipelineError as e:
         # ★개정 (codex v3 [HIGH]): 실패한 attempt의 run_id를 job에 기록해
         # failed run과 retry job이 갈라지지 않게 한다.
         job_repo.mark_failed(
             conn, job["id"], error=str(e), retry=_is_retryable(str(e)), run_id=e.run_id
         )
+        _notify_if_failed(conn, job)
     except Exception as e:
         # run 생성 이전(build_deps/claim 직후) 실패 → 연결된 run 없음.
         job_repo.mark_failed(
             conn, job["id"], error=str(e), retry=_is_retryable(str(e)), run_id=None
         )
+        _notify_if_failed(conn, job)
     return True
+
+
+def _notify_if_failed(conn, job):
+    """터미널 failed일 때만 알림(재시도 대기 queued는 조용히). mark_failed가
+    attempts/max_attempts로 최종 판정하므로 여기선 결과 상태를 다시 읽는다."""
+    row = conn.execute(
+        """SELECT j.status, pr.number, r.full_name FROM review_job j
+           JOIN pull_request pr ON pr.id = j.pr_id
+           JOIN repo r ON r.id = pr.repo_id WHERE j.id=?""",
+        (job["id"],),
+    ).fetchone()
+    if row and row["status"] == "failed":
+        notify_review_done(
+            repo_full=row["full_name"],
+            pr_number=row["number"],
+            status="failed",
+            findings=0,
+        )
 
 
 async def worker_loop(db_path, *, worker_id="w1", idle_sleep=2.0, stop_event=None):

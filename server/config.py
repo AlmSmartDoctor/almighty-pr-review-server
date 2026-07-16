@@ -42,6 +42,9 @@ CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 # 표식용). 미설정("")이면 배너 없음(기본 동작 불변).
 POST_BANNER = os.environ.get("ALMIGHTY_POST_BANNER", "")
 
+# 리뷰 종료 macOS 알림(osascript). 로컬 단일 사용자 도구라 기본 켜짐 — "0"으로 끔.
+NOTIFY_ON_DONE = os.environ.get("ALMIGHTY_NOTIFY", "1") != "0"
+
 # gh subprocess 상한 — 무한 대기 시 폴러/워커가 조용히 영구 정지하므로 필수.
 # clone(depth=1)·대형 diff도 감당할 만큼 여유 있게 잡는다.
 GH_TIMEOUT_SEC = 300
