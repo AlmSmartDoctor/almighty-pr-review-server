@@ -50,7 +50,7 @@ test("toggles high-severity single verification and saves it", async () => {
     .mockResolvedValue({ ...settings, verify_singles_on: 1 });
   render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
 
-  const toggle = await screen.findByRole("switch", { name: "고위험 단독 지적 검증" });
+  const toggle = await screen.findByRole("switch", { name: "교차확인" });
   fireEvent.click(toggle);
   fireEvent.click(screen.getByRole("button", { name: "저장" }));
 
@@ -67,7 +67,7 @@ test("toggles incremental review and saves it", async () => {
     .mockResolvedValue({ ...settings, incremental_review_on: 1 });
   render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
 
-  const toggle = await screen.findByRole("switch", { name: "증분 리뷰" });
+  const toggle = await screen.findByRole("switch", { name: "변경만 재리뷰" });
   fireEvent.click(toggle);
   fireEvent.click(screen.getByRole("button", { name: "저장" }));
 
@@ -176,11 +176,11 @@ test("adds a repository and refreshes the repository list", async () => {
 
 test("renders external context toggles", async () => {
   render(<SettingsSection load={async () => contextSettings} loadRepos={async () => []} />);
-  expect(await screen.findByRole("switch", { name: "Static 컨텍스트" })).toBeInTheDocument();
+  expect(await screen.findByRole("switch", { name: "참조 문서" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Jira 연동" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "사내 DB 스키마" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "프로젝트 컨텍스트" })).toBeInTheDocument();
-  expect(screen.getByRole("switch", { name: "자가 학습(팀 피드백)" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "과거 판정 반영" })).toBeInTheDocument();
   expect(screen.queryByPlaceholderText(/토큰|token|url/i)).toBeNull();
 });
 
@@ -190,7 +190,7 @@ test("context save patches only the context fields", async () => {
     .mockResolvedValue({ ...contextSettings, context_static_on: 1 });
   render(<SettingsSection load={async () => contextSettings} loadRepos={async () => []} />);
 
-  const toggle = await screen.findByRole("switch", { name: "Static 컨텍스트" });
+  const toggle = await screen.findByRole("switch", { name: "참조 문서" });
   fireEvent.click(toggle);
   fireEvent.click(screen.getByRole("button", { name: "컨텍스트 저장" }));
 
@@ -213,7 +213,7 @@ test("sets per-repo provider overrides independently", async () => {
     repo,
   ]} />);
 
-  const staticOverride = await screen.findByRole("combobox", { name: "acme/api Static 컨텍스트" });
+  const staticOverride = await screen.findByRole("combobox", { name: "acme/api 참조 문서 컨텍스트" });
   fireEvent.change(staticOverride, { target: { value: "1" } });
 
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_static_on: 1 }));
@@ -230,11 +230,11 @@ test("sets per-repo verify and incremental overrides", async () => {
   );
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
 
-  const verify = await screen.findByRole("combobox", { name: "acme/api 고위험 단독 검증" });
+  const verify = await screen.findByRole("combobox", { name: "acme/api 교차확인" });
   fireEvent.change(verify, { target: { value: "1" } });
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { verify_singles_on: 1 }));
 
-  const incr = screen.getByRole("combobox", { name: "acme/api 증분 리뷰" });
+  const incr = screen.getByRole("combobox", { name: "acme/api 변경만 재리뷰" });
   fireEvent.change(incr, { target: { value: "0" } });
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { incremental_review_on: 0 }));
 });
@@ -255,17 +255,17 @@ test("per-repo provider override shows and restores inheritance", async () => {
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_jira_on: null }));
 });
 
-test("edits per-repo static_context_path and jira_project_keys", async () => {
+test("edits per-repo static_context_path and db_schema_path", async () => {
   const repo = {
     id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1,
-    static_context_path: "docs/old.md", jira_project_keys: null,
+    static_context_path: "docs/old.md",
   };
   const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
     async (_id, patch) => ({ ...repo, ...patch }),
   );
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
 
-  const pathInput = await screen.findByRole("textbox", { name: "acme/api Static 경로" });
+  const pathInput = await screen.findByRole("textbox", { name: "acme/api 참조 문서 경로" });
   expect(pathInput).toHaveDisplayValue("docs/old.md");
   fireEvent.change(pathInput, { target: { value: "docs/context.md" } });
   fireEvent.blur(pathInput);
@@ -273,25 +273,11 @@ test("edits per-repo static_context_path and jira_project_keys", async () => {
     expect(patchRepo).toHaveBeenCalledWith(7, { static_context_path: "docs/context.md" }),
   );
 
-  const keysInput = screen.getByRole("textbox", { name: "acme/api Jira 프로젝트 키" });
-  fireEvent.change(keysInput, { target: { value: "PROJ,ABC" } });
-  fireEvent.blur(keysInput);
-  await waitFor(() =>
-    expect(patchRepo).toHaveBeenCalledWith(7, { jira_project_keys: "PROJ,ABC" }),
-  );
-
   const dbInput = screen.getByRole("textbox", { name: "acme/api DB 스키마 경로" });
   fireEvent.change(dbInput, { target: { value: "db/structure.sql" } });
   fireEvent.blur(dbInput);
   await waitFor(() =>
     expect(patchRepo).toHaveBeenCalledWith(7, { db_schema_path: "db/structure.sql" }),
-  );
-
-  const projInput = screen.getByRole("textbox", { name: "acme/api 프로젝트 문서 경로" });
-  fireEvent.change(projInput, { target: { value: "docs/PROJECT.md" } });
-  fireEvent.blur(projInput);
-  await waitFor(() =>
-    expect(patchRepo).toHaveBeenCalledWith(7, { graphify_path: "docs/PROJECT.md" }),
   );
 });
 

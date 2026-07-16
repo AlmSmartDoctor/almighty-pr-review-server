@@ -13,24 +13,15 @@ _TOTAL_BUDGET_SEC = 8
 
 class JiraContextProvider:
     """추출된 Jira 키 → JiraClient.get_issue → 마크다운 블록. best-effort degrade.
-    project_keys(레포 allowlist)가 있으면 해당 프로젝트 접두어만 조회한다."""
+    존재하지 않는 키는 조회 실패로 조용히 버려지므로 별도 프로젝트 필터를 두지 않는다."""
 
     name = "jira"
 
-    def __init__(self, *, client, project_keys=()):
+    def __init__(self, *, client):
         self._client = client
-        self._project_keys = tuple(project_keys)
 
     def fetch(self, req: ContextRequest) -> ContextResult:
-        if not self._project_keys:
-            return ContextResult(
-                provider=self.name,
-                status="skipped",
-                text="",
-                error="jira project allowlist required",
-            )
         keys = extract_keys(req)
-        keys = [k for k in keys if k.split("-")[0] in self._project_keys]
         if not keys:
             return ContextResult(provider=self.name, status="empty", text="")
         blocks = []

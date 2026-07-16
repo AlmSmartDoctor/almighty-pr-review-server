@@ -63,6 +63,8 @@ test("overview lists PRs and drills into detail", async () => {
   expect(await screen.findByText("fix null")).toBeInTheDocument();
   expect(screen.getAllByText("complex").length).toBeGreaterThan(0);
   expect(screen.getAllByText("리뷰 완료").length).toBeGreaterThan(0);
+  // 리스트 카드에 PR 생성 시각 노출
+  expect(screen.getByText(/생성 2026-07-07 11:22/)).toBeInTheDocument();
   // 드릴다운
   fireEvent.click(screen.getByText("fix null"));
   expect(await screen.findByText(/널 역참조/)).toBeInTheDocument();

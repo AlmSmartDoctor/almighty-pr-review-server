@@ -287,6 +287,7 @@ export function ReviewSection(props: {
                 <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12.5px] text-muted-foreground">
                   <span>{p.repo}</span>
                   {p.author && <span>@{p.author}</span>}
+                  {prCreatedShort(p) && <span>{prCreatedShort(p)}</span>}
                   <span>{p.run_id ? `run ${p.run_id}${p.run_status ? ` · ${p.run_status}` : ""}` : "아직 리뷰 없음"}</span>
                   {p.run_duration_ms != null && <span>{formatDuration(p.run_duration_ms)}</span>}
                 </div>
@@ -389,6 +390,12 @@ function formatDateTime(value: string) {
   if (Number.isNaN(date.getTime())) return value;
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function prCreatedShort(pr: Pr) {
+  if (pr.created_at) return `생성 ${formatDateTime(pr.created_at)}`;
+  if (pr.first_seen_at) return `감지 ${formatDateTime(pr.first_seen_at)}`;
+  return null;
 }
 
 function prCreatedLine(pr: Pr) {

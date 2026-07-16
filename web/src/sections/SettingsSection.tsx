@@ -59,17 +59,15 @@ type Repo = {
   context_graphify_on?: number | null;
   context_feedback_on?: number | null;
   static_context_path?: string | null;
-  jira_project_keys?: string | null;
   db_schema_path?: string | null;
-  graphify_path?: string | null;
 };
 
 const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
-  { key: "context_static_on", label: "Static" },
+  { key: "context_static_on", label: "참조 문서" },
   { key: "context_jira_on", label: "Jira" },
   { key: "context_db_schema_on", label: "DB" },
   { key: "context_graphify_on", label: "Graphify" },
-  { key: "context_feedback_on", label: "피드백" },
+  { key: "context_feedback_on", label: "과거 판정 반영" },
 ];
 
 type Models = {
@@ -221,12 +219,12 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
               <Input type="number" min={15} step={5} className="w-24 text-right" value={draft.default_poll_interval}
                      onChange={(e) => setDraft({ ...draft, default_poll_interval: Number(e.target.value) })} />
             </Field>
-            <Field title="고위험 단독 지적 검증" help="한 벤더만 낸 critical/high 지적을 다른 벤더로 반박 검증하고, 반박되면 신뢰도를 낮춤">
-              <Switch aria-label="고위험 단독 지적 검증" checked={!!draft.verify_singles_on}
+            <Field title="교차확인" help="한 벤더만 낸 critical/high 지적을 다른 벤더로 반박 검증하고, 반박되면 신뢰도를 낮춤">
+              <Switch aria-label="교차확인" checked={!!draft.verify_singles_on}
                       onCheckedChange={(v) => setDraft({ ...draft, verify_singles_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="증분 리뷰" help="재리뷰 시 직전 완료된 리뷰 이후의 변경분만 리뷰(전체 재리뷰 대신). 큰 PR의 후속 커밋에서 시간·비용 절감">
-              <Switch aria-label="증분 리뷰" checked={!!draft.incremental_review_on}
+            <Field title="변경만 재리뷰" help="재리뷰 시 직전 완료된 리뷰 이후의 변경분만 리뷰(전체 재리뷰 대신). 큰 PR의 후속 커밋에서 시간·비용 절감">
+              <Switch aria-label="변경만 재리뷰" checked={!!draft.incremental_review_on}
                       onCheckedChange={(v) => setDraft({ ...draft, incremental_review_on: v ? 1 : 0 })} />
             </Field>
             <Field title="사전 스크리닝 모델" help="diff만 보고 변경 복잡도를 평가">
@@ -292,11 +290,11 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
             URL·토큰 등 자격 증명은 서버 환경 변수로만 설정됩니다. 이 화면에서는 소스 사용 여부만 켜고 끕니다.
           </StatusLine>
           <div className="divide-y divide-border">
-            <Field title="Static 컨텍스트" help="레포 내 지정 파일을 리뷰 프롬프트에 주입">
-              <Switch aria-label="Static 컨텍스트" checked={!!draft.context_static_on}
+            <Field title="참조 문서" help="레포 내 지정 파일을 리뷰 프롬프트에 주입">
+              <Switch aria-label="참조 문서" checked={!!draft.context_static_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_static_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="Jira 연동" help="PR이 참조하는 Jira 이슈(summary·수용기준)를 리뷰에 주입 · 서버 env에 전용 API 토큰 + 레포별 프로젝트키 필요">
+            <Field title="Jira 연동" help="PR이 참조하는 Jira 이슈(summary·수용기준)를 리뷰에 주입 · 서버 env에 전용 API 토큰 필요">
               <Switch aria-label="Jira 연동" checked={!!draft.context_jira_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_jira_on: v ? 1 : 0 })} />
             </Field>
@@ -304,12 +302,12 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
               <Switch aria-label="사내 DB 스키마" checked={!!draft.context_db_schema_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_db_schema_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="프로젝트 컨텍스트" help="레포의 프로젝트 문서(레포별 경로) + 다른 열린 PR의 미결 지적을 리뷰에 주입">
+            <Field title="프로젝트 컨텍스트" help="다른 열린 PR의 미결 지적을 리뷰에 주입">
               <Switch aria-label="프로젝트 컨텍스트" checked={!!draft.context_graphify_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_graphify_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="자가 학습(팀 피드백)" help="이 레포의 과거 finding 승인/기각/수정 이력을 요약해 리뷰에 보정 신호로 주입">
-              <Switch aria-label="자가 학습(팀 피드백)" checked={!!draft.context_feedback_on}
+            <Field title="과거 판정 반영" help="이 레포의 과거 finding 승인/기각/수정 이력을 요약해 리뷰에 보정 신호로 주입">
+              <Switch aria-label="과거 판정 반영" checked={!!draft.context_feedback_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_feedback_on: v ? 1 : 0 })} />
             </Field>
           </div>
@@ -472,14 +470,14 @@ function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-        <RepoField label="고위험 단독 검증">
-          <RepoInheritToggle ariaLabel={`${repo.full_name} 고위험 단독 검증`}
+        <RepoField label="교차확인">
+          <RepoInheritToggle ariaLabel={`${repo.full_name} 교차확인`}
                              value={repo.verify_singles_on}
                              inheritedOn={!!settings.verify_singles_on}
                              onChange={(v) => onPatch({ verify_singles_on: v })} />
         </RepoField>
-        <RepoField label="증분 리뷰">
-          <RepoInheritToggle ariaLabel={`${repo.full_name} 증분 리뷰`}
+        <RepoField label="변경만 재리뷰">
+          <RepoInheritToggle ariaLabel={`${repo.full_name} 변경만 재리뷰`}
                              value={repo.incremental_review_on}
                              inheritedOn={!!settings.incremental_review_on}
                              onChange={(v) => onPatch({ incremental_review_on: v })} />
@@ -560,25 +558,14 @@ function ContextOverride({ repo, settings, onPatch, onLocalChange }: {
       </div>
       <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-14 shrink-0">Static 경로</span>
+          <span className="w-14 shrink-0">참조문서</span>
           <Input
-            aria-label={`${repo.full_name} Static 경로`}
+            aria-label={`${repo.full_name} 참조 문서 경로`}
             className="h-7 min-w-0 text-[11px]"
             placeholder="레포 내 .md 경로"
             value={repo.static_context_path ?? ""}
             onChange={(e) => onLocalChange({ static_context_path: e.target.value })}
             onBlur={(e) => onPatch({ static_context_path: e.target.value })}
-          />
-        </label>
-        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-14 shrink-0">Jira키</span>
-          <Input
-            aria-label={`${repo.full_name} Jira 프로젝트 키`}
-            className="h-7 min-w-0 text-[11px]"
-            placeholder="PROJ,ABC"
-            value={repo.jira_project_keys ?? ""}
-            onChange={(e) => onLocalChange({ jira_project_keys: e.target.value })}
-            onBlur={(e) => onPatch({ jira_project_keys: e.target.value })}
           />
         </label>
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -590,17 +577,6 @@ function ContextOverride({ repo, settings, onPatch, onLocalChange }: {
             value={repo.db_schema_path ?? ""}
             onChange={(e) => onLocalChange({ db_schema_path: e.target.value })}
             onBlur={(e) => onPatch({ db_schema_path: e.target.value })}
-          />
-        </label>
-        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-14 shrink-0">프로젝트</span>
-          <Input
-            aria-label={`${repo.full_name} 프로젝트 문서 경로`}
-            className="h-7 min-w-0 text-[11px]"
-            placeholder="레포 내 PROJECT.md 경로"
-            value={repo.graphify_path ?? ""}
-            onChange={(e) => onLocalChange({ graphify_path: e.target.value })}
-            onBlur={(e) => onPatch({ graphify_path: e.target.value })}
           />
         </label>
       </div>

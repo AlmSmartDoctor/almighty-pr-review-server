@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 DB_PATH = BASE_DIR / "almighty.db"
 HARNESS_DIR = BASE_DIR / "harness"
 # 서비스 전용 영구 clone 루트. 리뷰는 사용자의 라이브 체크아웃이 아니라 여기 clone에서

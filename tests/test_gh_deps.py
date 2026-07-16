@@ -54,7 +54,6 @@ def test_build_deps_includes_jira_provider_when_configured(monkeypatch):
             "local_path": "/tmp/acme",
             "harness_name": "default",
             "context_jira_on": 1,
-            "jira_project_keys": "PROJ",
         },
         {"context_jira_on": 0},
     )
@@ -74,29 +73,7 @@ def test_build_deps_skips_jira_when_token_unset(monkeypatch):
             "local_path": "/tmp/acme",
             "harness_name": "default",
             "context_jira_on": 1,
-            "jira_project_keys": "PROJ",
         },
         {"context_jira_on": 0},
     )
-    assert not any(isinstance(p, JiraContextProvider) for p in deps.context.providers)
-
-
-def test_build_deps_skips_jira_without_project_allowlist(monkeypatch):
-    from server import config
-    from server.context.jira_provider import JiraContextProvider
-
-    monkeypatch.setattr(config, "JIRA_BASE_URL", "https://acme.atlassian.net")
-    monkeypatch.setattr(config, "JIRA_EMAIL", "me@acme.com")
-    monkeypatch.setattr(config, "JIRA_API_TOKEN", "tok")
-    deps = build_deps(
-        {
-            "full_name": "acme/api",
-            "local_path": "/tmp/acme",
-            "harness_name": "default",
-            "context_jira_on": 1,
-            "jira_project_keys": "",
-        },
-        {"context_jira_on": 0},
-    )
-
     assert not any(isinstance(p, JiraContextProvider) for p in deps.context.providers)

@@ -146,6 +146,40 @@ def test_static_degrades_when_missing(tmp_path):
     assert r.text == ""
 
 
+def test_static_reads_from_req_workdir_overriding_ctor_root(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "ctx.md").write_text("PR-head 노트")
+    # 생성자 root가 엉뚱해도 req.workdir이 우선하고, 상대경로는 workdir 기준으로 해석된다.
+    r = StaticContextProvider(path="ctx.md", root="/nonexistent").fetch(
+        _req(workdir=str(wt))
+    )
+    assert r.status == "ok" and "PR-head 노트" in r.text
+
+
+def test_file_project_source_reads_from_req_workdir(tmp_path):
+    from server.context.graphify_source import file_project_source
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "PROJECT.md").write_text("도메인 개요 Z")
+    src = file_project_source(path="PROJECT.md", root="/nonexistent")
+    assert "도메인 개요 Z" in src(_req(workdir=str(wt)))
+
+
+def test_file_schema_source_reads_from_req_workdir(tmp_path):
+    from server.context.db_schema_source import file_schema_source
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "schema.sql").write_text("CREATE TABLE users (\n  id INT\n);\n")
+    src = file_schema_source(path="schema.sql", root="/nonexistent")
+    out = src(_req(workdir=str(wt), changed_files=("src/user.py",)))
+    assert "CREATE TABLE users" in out
+
+
 def test_static_limits_file_read_to_source_cap(tmp_path, monkeypatch):
     from server import config
     from server.context.static_provider import StaticContextProvider
@@ -328,17 +362,6 @@ class _FakeJira:
         return self._issues[key]
 
 
-def test_parse_keys_normalizes_case_and_drops_invalid():
-    from server.context.registry import _parse_keys
-
-    # 소문자로 입력해도 대문자 PR 키와 매칭되도록 정규화된다.
-    assert _parse_keys("proj, abc") == ("PROJ", "ABC")
-    assert _parse_keys("PROJ ABC") == ("PROJ", "ABC")
-    # 한 글자·빈 값은 유효 키가 아니므로 드롭.
-    assert _parse_keys("a") == ()
-    assert _parse_keys("") == () and _parse_keys(None) == ()
-
-
 def test_jira_provider_renders_markdown():
     from server.context.jira_provider import JiraContextProvider
 
@@ -351,9 +374,7 @@ def test_jira_provider_renders_markdown():
             }
         }
     )
-    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
-        _req(head_ref="feature/PROJ-1")
-    )
+    r = JiraContextProvider(client=fake).fetch(_req(head_ref="feature/PROJ-1"))
     assert r.status == "ok"
     assert "PROJ-1" in r.text and "로그인 버그" in r.text
 
@@ -362,20 +383,8 @@ def test_jira_provider_empty_when_no_keys():
     from server.context.jira_provider import JiraContextProvider
 
     fake = _FakeJira()
-    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(_req())
+    r = JiraContextProvider(client=fake).fetch(_req())
     assert r.status == "empty" and r.text == ""
-    assert fake.calls == []
-
-
-def test_jira_provider_requires_project_allowlist():
-    from server.context.jira_provider import JiraContextProvider
-
-    fake = _FakeJira(
-        issues={"HR-1": {"key": "HR-1", "summary": "secret", "description": "x"}}
-    )
-    r = JiraContextProvider(client=fake).fetch(_req(title="HR-1"))
-
-    assert r.status == "skipped" and r.text == ""
     assert fake.calls == []
 
 
@@ -383,27 +392,9 @@ def test_jira_provider_error_when_all_keys_fail():
     from server.context.jira_provider import JiraContextProvider
 
     fake = _FakeJira(exc=RuntimeError("boom"))
-    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
-        _req(head_ref="feature/PROJ-1")
-    )
+    r = JiraContextProvider(client=fake).fetch(_req(head_ref="feature/PROJ-1"))
     assert r.status == "error" and r.text == ""
     assert "boom" not in (r.error or "")
-
-
-def test_jira_provider_filters_by_project_keys():
-    from server.context.jira_provider import JiraContextProvider
-
-    fake = _FakeJira(
-        issues={
-            "PROJ-1": {"key": "PROJ-1", "summary": "s", "description": ""},
-            "ABC-2": {"key": "ABC-2", "summary": "s", "description": ""},
-        }
-    )
-    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
-        _req(title="PROJ-1 and ABC-2", body="")
-    )
-    assert r.status == "ok"
-    assert fake.calls == ["PROJ-1"]
 
 
 def test_jira_provider_caps_outbound_calls():
@@ -412,9 +403,7 @@ def test_jira_provider_caps_outbound_calls():
     keys = [f"PROJ-{i}" for i in range(1, 7)]  # 6 distinct keys
     issues = {k: {"key": k, "summary": "s", "description": ""} for k in keys}
     fake = _FakeJira(issues=issues)
-    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
-        _req(body=" ".join(keys))
-    )
+    r = JiraContextProvider(client=fake).fetch(_req(body=" ".join(keys)))
     assert r.status == "ok"
     assert len(fake.calls) <= 5
 
@@ -432,9 +421,7 @@ def test_jira_provider_renders_acceptance_criteria():
             }
         }
     )
-    r = JiraContextProvider(client=fake, project_keys=("PROJ",)).fetch(
-        _req(title="PROJ-1")
-    )
+    r = JiraContextProvider(client=fake).fetch(_req(title="PROJ-1"))
 
     assert "Acceptance criteria" in r.text
     assert "로그인 성공" in r.text
