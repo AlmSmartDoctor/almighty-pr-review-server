@@ -66,7 +66,10 @@ def file_schema_source(*, path: str, root: str):
     schema_source(req)->str 콜백을 만든다. 실패/무매칭/무신호는 ""로 degrade."""
 
     def source(req) -> str:
-        ddl = read_confined(path, root, _MAX_SCHEMA_BYTES)
+        root_eff = (
+            getattr(req, "workdir", "") or root
+        )  # PR-head worktree 우선, local_path 폴백
+        ddl = read_confined(path, root_eff, _MAX_SCHEMA_BYTES)
         if not ddl:
             return ""
         file_tokens = [_tokens(str(f)) for f in getattr(req, "changed_files", ()) or ()]

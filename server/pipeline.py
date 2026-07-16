@@ -193,71 +193,12 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
         review_repo.finish_run(conn, run_id, "canceled", error="no vendor enabled")
         return
 
-    # 컨텍스트 수집(B-INV-1: 부모 프로세스·게이트 통과 후·worktree 이전).
+    # worktree(PR-head 체크아웃)를 먼저 열고 그 안에서 컨텍스트를 수집한다 → 파일 컨텍스트
+    # (Static/DBSchema/Graphify-문서)가 PR-head 버전을 본다(local_path 불필요·PR 기준).
+    # B-INV-1(격리): 수집은 여전히 부모 프로세스에서·자식 벤더 exec 이전. 외부 데이터는
+    # render_context의 nonce fence로 "지시 아닌 데이터"로 감싸 신뢰 경계를 유지한다.
     # B-INV-8: to_thread+총 타임아웃, 실패/초과는 ''로 degrade → 리뷰 절대 차단 안 함.
     changed_files = parse_changed_files(diff)
-    req = ContextRequest(
-        repo=repo["full_name"],
-        pr_number=pr["number"],
-        title=pr["title"] or "",
-        author=pr["author"] or "",
-        head_ref=(pr["head_ref"] if "head_ref" in pr.keys() else "") or "",
-        base_ref=pr["base_ref"] or "",
-        body=(pr["body"] if "body" in pr.keys() else "") or "",
-        changed_files=changed_files,
-    )
-    degraded = False
-    context_results = []
-    t_ctx = time.monotonic()
-    try:
-        context_text = await asyncio.wait_for(
-            asyncio.to_thread(deps.context.gather, req=req),
-            timeout=CONTEXT_GATHER_TIMEOUT_SEC,
-        )
-        context_results = getattr(deps.context, "results", [])
-    except Exception as e:  # B-INV-4/8: degrade — .results는 백그라운드 스레드가 변형 중일 수 있어 신뢰 안 함
-        context_text = ""
-        degraded = True
-        print(
-            f"[pipeline] context gather degraded: "
-            f"{redact_secrets(f'{type(e).__name__}: {e}')}"
-        )
-    context_ms = int((time.monotonic() - t_ctx) * 1000)
-
-    # 런당 외부 컨텍스트 감사 저장. error는 meta 조립에서도 redact(defense-in-depth, B-INV-4).
-    context_meta = {
-        "duration_ms": context_ms,
-        "sources": [
-            {
-                "provider": r.provider,
-                "status": r.status,
-                "chars": len(r.text or ""),
-                "error": redact_secrets(r.error) if r.error else None,
-            }
-            for r in context_results
-        ],
-    }
-    if degraded:
-        context_meta["degraded"] = True
-    review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
-
-    # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리.
-    # 예산 초과 diff는 파일 경계 청크로 나눠 벤더당 순차 리뷰 후 finding 합침(통째 취소 대신 스케일).
-    chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
-    if len(chunks) > 1:
-        print(f"[pipeline] diff chunked into {len(chunks)} parts ({len(diff)} chars)")
-    multi = len(chunks) > 1
-    prompts = [
-        _build_prompt(
-            pr,
-            c,
-            context_text,
-            chunk_note=(f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if multi else ""),
-            # 청크로 나뉜 경우에만 PR 전체 변경 파일을 알려 교차파일 결함 탐지를 돕는다.
-            changed_files=(changed_files if multi else ()),
-        )
-        for i, c in enumerate(chunks)
-    ]
     with checkout(
         deps.worktree,
         deps.clone,
@@ -266,6 +207,74 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
         sha=pr["head_sha"],
         pr_number=pr["number"],
     ) as wt:
+        req = ContextRequest(
+            repo=repo["full_name"],
+            pr_number=pr["number"],
+            title=pr["title"] or "",
+            author=pr["author"] or "",
+            head_ref=(pr["head_ref"] if "head_ref" in pr.keys() else "") or "",
+            base_ref=pr["base_ref"] or "",
+            body=(pr["body"] if "body" in pr.keys() else "") or "",
+            changed_files=changed_files,
+            workdir=str(wt),  # 파일 컨텍스트 봉쇄 root = PR-head worktree
+        )
+        degraded = False
+        context_results = []
+        t_ctx = time.monotonic()
+        try:
+            context_text = await asyncio.wait_for(
+                asyncio.to_thread(deps.context.gather, req=req),
+                timeout=CONTEXT_GATHER_TIMEOUT_SEC,
+            )
+            context_results = getattr(deps.context, "results", [])
+        except Exception as e:  # B-INV-4/8: degrade — .results는 백그라운드 스레드가 변형 중일 수 있어 신뢰 안 함
+            context_text = ""
+            degraded = True
+            print(
+                f"[pipeline] context gather degraded: "
+                f"{redact_secrets(f'{type(e).__name__}: {e}')}"
+            )
+        context_ms = int((time.monotonic() - t_ctx) * 1000)
+
+        # 런당 외부 컨텍스트 감사 저장. error는 meta 조립에서도 redact(defense-in-depth, B-INV-4).
+        context_meta = {
+            "duration_ms": context_ms,
+            "sources": [
+                {
+                    "provider": r.provider,
+                    "status": r.status,
+                    "chars": len(r.text or ""),
+                    "error": redact_secrets(r.error) if r.error else None,
+                }
+                for r in context_results
+            ],
+        }
+        if degraded:
+            context_meta["degraded"] = True
+        review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
+
+        # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리.
+        # 예산 초과 diff는 파일 경계 청크로 나눠 벤더당 순차 리뷰 후 finding 합침(통째 취소 대신 스케일).
+        chunks = chunk_by_budget(diff, MAX_INLINE_DIFF_CHARS)
+        if len(chunks) > 1:
+            print(
+                f"[pipeline] diff chunked into {len(chunks)} parts ({len(diff)} chars)"
+            )
+        multi = len(chunks) > 1
+        prompts = [
+            _build_prompt(
+                pr,
+                c,
+                context_text,
+                chunk_note=(
+                    f"(대용량 PR의 {i + 1}/{len(chunks)} 조각)" if multi else ""
+                ),
+                # 청크로 나뉜 경우에만 PR 전체 변경 파일을 알려 교차파일 결함 탐지를 돕는다.
+                changed_files=(changed_files if multi else ()),
+            )
+            for i, c in enumerate(chunks)
+        ]
+
         with tempfile.TemporaryDirectory(prefix="almighty-rt-") as rt:
             hp.prepare_runtime(runtime_dir=rt)  # ★개정: 인증 주입(전역 미상속 유지)
             vr_ids = {

@@ -695,16 +695,25 @@ def test_pipeline_normalizes_null_head_ref_and_body(db):
     assert spy.captured_req.body == ""
 
 
-def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
+def test_pipeline_injects_static_context_from_pr_head_worktree(db, tmp_path):
+    """파일 컨텍스트는 local_path가 아니라 PR-head worktree에서 읽힌다: ctx.md는 worktree에만
+    있고 local_path 디렉터리엔 없는데도 상대경로 static_context_path로 주입된다(PR 기준)."""
     import json
     from server.repos import settings_repo
     from server.context.registry import build_context_provider
 
-    (tmp_path / "ctx.md").write_text("아키텍처 결정: 큐 기반")
+    clone_dir = tmp_path / "clone"  # local_path(=구 컨텍스트 root) — ctx.md 없음
+    clone_dir.mkdir()
+    wt_dir = tmp_path / "wt"  # PR-head worktree — ctx.md는 여기에만
+    wt_dir.mkdir()
+    (wt_dir / "ctx.md").write_text("아키텍처 결정: 큐 기반")
 
-    rid = repo_repo.add(db, full_name="acme/api", local_path=str(tmp_path))
+    rid = repo_repo.add(db, full_name="acme/api", local_path=str(clone_dir))
     repo_repo.update(
-        db, rid, context_static_on=1, static_context_path=str(tmp_path / "ctx.md")
+        db,
+        rid,
+        context_static_on=1,
+        static_context_path="ctx.md",  # 상대경로(UI 저장형)
     )
     pid = pr_repo.upsert(
         db,
@@ -719,6 +728,10 @@ def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
     repo = repo_repo.get(db, rid)
     settings = settings_repo.get(db)
 
+    @contextmanager
+    def wt_worktree(repo, sha, pr_number=None):
+        yield str(wt_dir)
+
     class CapturingAdapter:
         vendor = "claude"
 
@@ -732,10 +745,10 @@ def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
     cap = CapturingAdapter()
     deps = PipelineDeps(
         gh_diff=lambda repo, n: "diff...",
-        worktree=fake_worktree,
+        worktree=wt_worktree,
         adapters=[cap],
         prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
-        repo_local_path=str(tmp_path),
+        repo_local_path=str(clone_dir),
         context=build_context_provider(repo, settings),
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
@@ -748,6 +761,42 @@ def test_pipeline_injects_static_context_end_to_end(db, tmp_path):
         meta["sources"][0]["provider"] == "static"
         and meta["sources"][0]["status"] == "ok"
     )
+
+
+def test_pipeline_sets_context_request_workdir_to_worktree(db):
+    """ContextRequest.workdir가 열린 worktree 경로로 채워진다(파일 provider 봉쇄 root)."""
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=41,
+        title="t",
+        author="a",
+        head_sha="s41",
+        base_ref="main",
+        url="u",
+    )
+
+    class SpyCtx:
+        def __init__(self):
+            self.results = []
+            self.captured_req = None
+
+        def gather(self, *, req):
+            self.captured_req = req
+            return ""
+
+    spy = SpyCtx()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/x",
+        context=spy,
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert spy.captured_req.workdir == "/tmp/fake-wt"
 
 
 class FakeVerify:

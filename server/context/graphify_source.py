@@ -10,6 +10,11 @@ def file_project_source(*, path: str, root: str):
     향후 증분(DB 특징·서버 데이터)은 같은 graph_source seam에 스택된다."""
 
     def source(req) -> str:
-        return read_confined(path, root, config.MAX_CONTEXT_CHARS_PER_SOURCE + 1) or ""
+        root_eff = (
+            getattr(req, "workdir", "") or root
+        )  # PR-head worktree 우선, local_path 폴백
+        return (
+            read_confined(path, root_eff, config.MAX_CONTEXT_CHARS_PER_SOURCE + 1) or ""
+        )
 
     return source

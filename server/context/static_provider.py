@@ -15,9 +15,12 @@ class StaticContextProvider:
         self._root = root
 
     def fetch(self, req: ContextRequest) -> ContextResult:
+        # 봉쇄 root: 요청의 PR-head worktree 우선, 없으면 생성자 root(local_path) 폴백.
+        # 상대경로 path도 root 기준으로 해석(UI가 상대경로를 저장; read_confined와 동일 계약).
+        root_src = req.workdir or self._root
         try:
-            real = os.path.realpath(self._path)
-            root = os.path.realpath(self._root)
+            root = os.path.realpath(root_src)
+            real = os.path.realpath(os.path.join(root_src, self._path))
             if real != root and not real.startswith(root + os.sep):
                 return ContextResult(
                     provider=self.name,
