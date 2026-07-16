@@ -29,11 +29,13 @@ def _ref(repo, key):
 
 
 def _parse_keys(s):
-    return tuple(
-        t
-        for t in (s or "").replace(",", " ").split()
-        if re.fullmatch(r"[A-Z][A-Z0-9]+", t)
-    )
+    # 소문자로 입력해도 대문자 PR 키(jira_keys._KEY_RE)와 매칭되도록 대문자 정규화한다.
+    keys = []
+    for t in (s or "").replace(",", " ").split():
+        u = t.upper()
+        if re.fullmatch(r"[A-Z][A-Z0-9]+", u):
+            keys.append(u)
+    return tuple(keys)
 
 
 def _compose_sources(*sources):

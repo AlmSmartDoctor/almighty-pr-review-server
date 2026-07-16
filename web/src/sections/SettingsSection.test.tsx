@@ -179,7 +179,7 @@ test("renders external context toggles", async () => {
   expect(await screen.findByRole("switch", { name: "Static 컨텍스트" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Jira 연동" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "사내 DB 스키마" })).toBeInTheDocument();
-  expect(screen.getByRole("switch", { name: "코드 그래프" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "프로젝트 컨텍스트" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "자가 학습(팀 피드백)" })).toBeInTheDocument();
   expect(screen.queryByPlaceholderText(/토큰|token|url/i)).toBeNull();
 });

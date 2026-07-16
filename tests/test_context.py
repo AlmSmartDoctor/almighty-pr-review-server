@@ -328,6 +328,17 @@ class _FakeJira:
         return self._issues[key]
 
 
+def test_parse_keys_normalizes_case_and_drops_invalid():
+    from server.context.registry import _parse_keys
+
+    # 소문자로 입력해도 대문자 PR 키와 매칭되도록 정규화된다.
+    assert _parse_keys("proj, abc") == ("PROJ", "ABC")
+    assert _parse_keys("PROJ ABC") == ("PROJ", "ABC")
+    # 한 글자·빈 값은 유효 키가 아니므로 드롭.
+    assert _parse_keys("a") == ()
+    assert _parse_keys("") == () and _parse_keys(None) == ()
+
+
 def test_jira_provider_renders_markdown():
     from server.context.jira_provider import JiraContextProvider
 

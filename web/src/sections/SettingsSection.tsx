@@ -300,12 +300,12 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
               <Switch aria-label="Jira 연동" checked={!!draft.context_jira_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_jira_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="사내 DB 스키마" help="연동 예정 · 서버에 DB 터널/자격 증명 설정 필요">
+            <Field title="사내 DB 스키마" help="레포에 체크인된 스키마 덤프(.sql) 파일을 변경 관련 테이블만 골라 주입 · 레포별 경로 지정 · 라이브 DB 연동은 예정">
               <Switch aria-label="사내 DB 스키마" checked={!!draft.context_db_schema_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_db_schema_on: v ? 1 : 0 })} />
             </Field>
-            <Field title="코드 그래프" help="연동 예정 · 코드 그래프 인덱싱 파이프라인 필요">
-              <Switch aria-label="코드 그래프" checked={!!draft.context_graphify_on}
+            <Field title="프로젝트 컨텍스트" help="레포의 프로젝트 문서(레포별 경로) + 다른 열린 PR의 미결 지적을 리뷰에 주입">
+              <Switch aria-label="프로젝트 컨텍스트" checked={!!draft.context_graphify_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_graphify_on: v ? 1 : 0 })} />
             </Field>
             <Field title="자가 학습(팀 피드백)" help="이 레포의 과거 finding 승인/기각/수정 이력을 요약해 리뷰에 보정 신호로 주입">
