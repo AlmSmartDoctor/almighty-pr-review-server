@@ -624,7 +624,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
         pr={pr}
         sub={
           <>
-            <div>{pr.repo} #{pr.number} · run {runId}{runDuration ? ` · ${runDuration}` : ""}</div>
+            <div>{pr.repo} #{pr.number} · run {runId}{!viewingPast && runDuration ? ` · ${runDuration}` : ""}</div>
             <div>{prCreatedLine(pr)}</div>
             <PrLinks pr={pr} />
           </>
@@ -713,7 +713,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
                 {vendors.length === 0 ? (
                   <Trace
                     title="벤더 리뷰"
-                    desc={["queued", "running"].includes(pr.run_status ?? "") ? "벤더 결과를 기다리는 중" : "벤더 결과 없음"}
+                    desc={!viewingPast && ["queued", "running"].includes(pr.run_status ?? "") ? "벤더 결과를 기다리는 중" : "벤더 결과 없음"}
                   />
                 ) : vendors.map((v) => (
                   <Trace key={v.vendor} title={`${v.vendor} 리뷰`}
@@ -755,7 +755,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
               ) : (
                 <div className="flex flex-col gap-3">
                   {findings.map((f) => (
-                    <FindingCard key={f.id} finding={f} onSet={setStatus} />
+                    <FindingCard key={f.id} finding={f} onSet={setStatus} readOnly={viewingPast} />
                   ))}
                 </div>
               )}
@@ -777,9 +777,10 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
                 <StatusLine tone="error" className="mt-2">{postHealth.message}</StatusLine>
               )}
               <div className="mt-3 flex items-center gap-3">
-                <Button onClick={post} disabled={posting || approved.length === 0 || !postHealth?.ok}>
+                <Button onClick={post} disabled={posting || approved.length === 0 || !postHealth?.ok || viewingPast}>
                   <Send /> 승인분 포스팅
                 </Button>
+                {viewingPast && <StatusLine inline>과거 run은 게시할 수 없습니다.</StatusLine>}
                 {message && <StatusLine tone={message.includes("실패") ? "error" : "ok"} inline>{message}</StatusLine>}
               </div>
             </CardContent>
@@ -865,9 +866,10 @@ function Trace({ title, desc, done = false, failed = false, last = false, action
   );
 }
 
-function FindingCard({ finding, onSet }: {
+function FindingCard({ finding, onSet, readOnly = false }: {
   finding: Finding;
   onSet: (id: number, status: string, edited_text?: string) => void;
+  readOnly?: boolean;
 }) {
   const [draft, setDraft] = useState(finding.edited_text ?? finding.claim);
   const state = finding.status;
@@ -889,17 +891,19 @@ function FindingCard({ finding, onSet }: {
       </div>
       <div className="my-1.5 font-semibold leading-relaxed">{finding.edited_text || finding.claim}</div>
       {finding.rationale && <p className="text-[12.5px] leading-relaxed text-muted-foreground">{finding.rationale}</p>}
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" onClick={() => onSet(finding.id, "approved")}><Check /> 승인</Button>
-        <Button variant="outline" size="sm" onClick={() => onSet(finding.id, "dismissed")}><X /> 기각</Button>
-        <Input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          aria-label={`finding ${finding.id} 수정`}
-          className="h-8 min-w-0 flex-1"
-        />
-        <Button variant="secondary" size="sm" onClick={() => onSet(finding.id, "edited", draft)}><Pencil /> 수정 저장</Button>
-      </div>
+      {!readOnly && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => onSet(finding.id, "approved")}><Check /> 승인</Button>
+          <Button variant="outline" size="sm" onClick={() => onSet(finding.id, "dismissed")}><X /> 기각</Button>
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            aria-label={`finding ${finding.id} 수정`}
+            className="h-8 min-w-0 flex-1"
+          />
+          <Button variant="secondary" size="sm" onClick={() => onSet(finding.id, "edited", draft)}><Pencil /> 수정 저장</Button>
+        </div>
+      )}
     </div>
   );
 }

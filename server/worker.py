@@ -23,7 +23,9 @@ async def run_one_job(conn, *, worker_id: str) -> bool:
         # enqueue 후 PR가 닫히거나 병합됐을 수 있다(poller 재조정) — 벤더를 돌리기
         # 전에 걸러 토큰 낭비를 막는다. 큐 자체는 취소하지 않으므로 여기가 최종 게이트.
         if pr["state"] != "open":
-            job_repo.mark_canceled(conn, job["id"], error="PR가 닫혀 리뷰 취소")
+            job_repo.mark_canceled(
+                conn, job["id"], error=job_repo.CLOSED_PR_CANCEL_ERROR
+            )
             return True
         repo = repo_repo.get(conn, pr["repo_id"])
         settings = settings_repo.get(conn)

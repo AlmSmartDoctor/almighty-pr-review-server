@@ -1,5 +1,9 @@
 import sqlite3
 
+# 시스템 취소(닫힌 PR) 식별자 — 사용자 취소와 달리 PR reopen 시 auto enqueue가
+# 되살려야 한다(아니면 같은 sha의 재오픈 PR이 영원히 리뷰되지 않는 교착).
+CLOSED_PR_CANCEL_ERROR = "PR가 닫혀 리뷰 취소"
+
 
 def enqueue(conn, *, pr_id, head_sha, trigger, priority=0) -> int:
     conn.execute(
@@ -9,10 +13,18 @@ def enqueue(conn, *, pr_id, head_sha, trigger, priority=0) -> int:
         (pr_id, head_sha, trigger, priority),
     )
     conn.commit()
-    return conn.execute(
-        "SELECT id FROM review_job WHERE pr_id=? AND head_sha=?",
+    row = conn.execute(
+        "SELECT id, status, error FROM review_job WHERE pr_id=? AND head_sha=?",
         (pr_id, head_sha),
-    ).fetchone()["id"]
+    ).fetchone()
+    if row["status"] == "canceled" and row["error"] == CLOSED_PR_CANCEL_ERROR:
+        conn.execute(
+            """UPDATE review_job SET status='queued', trigger=?, locked_by=NULL,
+               locked_at=NULL, next_run_at=NULL, attempts=0, error=NULL WHERE id=?""",
+            (trigger, row["id"]),
+        )
+        conn.commit()
+    return row["id"]
 
 
 def _enqueue_or_revive(
@@ -139,6 +151,22 @@ def mark_canceled(conn, job_id, *, error):
             (error, job_id),
         )
         conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+        raise
+
+
+def cancel_queued(conn, pr_id, *, error) -> int:
+    """PR의 queued 잡 전부를 원자적으로 취소. status 가드가 있어 worker가 claim한
+    (running) 잡은 건드리지 않는다 — 취소 API↔claim 레이스에서 안전. 반환=취소 건수."""
+    try:
+        cur = conn.execute(
+            "UPDATE review_job SET status='canceled', error=?, locked_by=NULL "
+            "WHERE pr_id=? AND status='queued'",
+            (error, pr_id),
+        )
+        conn.commit()
+        return cur.rowcount
     except sqlite3.OperationalError:
         conn.rollback()
         raise

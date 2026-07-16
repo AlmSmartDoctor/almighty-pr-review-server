@@ -509,3 +509,28 @@ test("run history dropdown switches to a past run", async () => {
   expect(await screen.findByText(/최신 지적/)).toBeInTheDocument();
   expect(screen.queryByText("과거 run 조회 중")).toBeNull();
 });
+
+test("past run view is read-only: no triage buttons, posting disabled", async () => {
+  renderReview({
+    loadPrs: async () => PRS,
+    loadFindings: async () => [
+      { id: 5, file: "a.py", line: 3, severity: "high",
+        claim: "지적", status: "pending", vendor: "claude" },
+    ],
+    loadVendors: async () => [],
+    loadRuns: async () => [
+      { id: 11, head_sha: "s2", trigger: "manual", status: "done", error: null,
+        started_at: null, finished_at: null, finding_count: 1 },
+      { id: 10, head_sha: "s1", trigger: "auto", status: "done", error: null,
+        started_at: null, finished_at: null, finding_count: 1 },
+    ],
+  });
+  fireEvent.click(await screen.findByText("fix null"));
+  expect(await screen.findByRole("button", { name: /승인/ })).toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole("combobox", { name: "run 이력" }), { target: { value: "10" } });
+  await screen.findByText("과거 run 조회 중");
+  await waitFor(() => expect(screen.queryByRole("button", { name: /승인$/ })).toBeNull());
+  expect(screen.getByRole("button", { name: /승인분 포스팅/ })).toBeDisabled();
+  expect(screen.getByText("과거 run은 게시할 수 없습니다.")).toBeInTheDocument();
+});

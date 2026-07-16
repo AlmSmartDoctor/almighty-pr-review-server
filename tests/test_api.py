@@ -774,3 +774,66 @@ def test_pr_run_history(tmp_path):
     assert by_id[r1]["finding_count"] == 1 and by_id[r1]["status"] == "done"
     assert by_id[r2]["finding_count"] == 0 and by_id[r2]["head_sha"] == "s2"
     assert client.get("/api/prs/999/runs").json() == []
+
+
+def test_cancel_review_cancels_all_queued_jobs(tmp_path):
+    from server.repos import job_repo, pr_repo, repo_repo
+
+    client, conn = _client(tmp_path)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="s2",
+        base_ref="main",
+        url="u",
+    )
+    # 구 sha 잡(재시도 대기)과 새 sha 잡이 공존 — 취소는 둘 다 잡아야 한다
+    job_repo.enqueue(conn, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.enqueue(conn, pr_id=pid, head_sha="s2", trigger="auto")
+    r = client.post(f"/api/prs/{pid}/cancel-review")
+    assert r.status_code == 200 and r.json()["canceled"] == 2
+    left = conn.execute(
+        "SELECT COUNT(*) c FROM review_job WHERE status='queued'"
+    ).fetchone()["c"]
+    assert left == 0
+
+
+def test_post_run_rejects_stale_head(tmp_path):
+    from server.repos import finding_repo, pr_repo, repo_repo, review_repo
+
+    client, conn = _client(tmp_path)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="s2",
+        base_ref="main",
+        url="u",
+    )
+    run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    fid = finding_repo.add(
+        conn,
+        run_id=run,
+        vendor="claude",
+        file="a.py",
+        line=1,
+        severity="high",
+        category="bug",
+        claim="c",
+        rationale="r",
+        confidence=0.9,
+    )
+    finding_repo.set_status(conn, fid, "approved")
+    r = client.post(f"/api/runs/{run}/post")
+    assert (
+        r.status_code == 409
+    )  # head가 전진한 구 run은 게시 금지(잘못된 앵커·덮어쓰기 방지)

@@ -664,6 +664,13 @@ def post_run(
     if run is None:
         raise HTTPException(404, "run not found")
     pr = pr_repo.get(conn, run["pr_id"])
+    # 구 head의 run을 게시하면 라인 앵커가 어긋나고, PR 단위 update-or-create가
+    # 최신 게시 리뷰 본문을 구 내용으로 덮는다 — retry_vendors와 동일한 신선도 가드.
+    if pr["head_sha"] != run["head_sha"]:
+        raise HTTPException(
+            409,
+            "PR head가 갱신되어 이 run은 게시할 수 없습니다. 최신 리뷰를 실행하세요.",
+        )
     repo = repo_repo.get(conn, pr["repo_id"])
     health = _post_health(conn, pr["id"], gh)
     if not health["ok"]:
@@ -750,17 +757,18 @@ def trigger_review(pid: int, conn=Depends(get_conn)):
 
 @app.post("/api/prs/{pid}/cancel-review")
 def cancel_review(pid: int, conn=Depends(get_conn)):
-    """대기 중(재시도 backoff 포함) 리뷰 잡 취소. running은 벤더 subprocess를
-    중단할 수 없어 409 — 완주 후 결과를 버리는 쪽이 아니라 시작 자체를 막는 게 목적."""
-    job = conn.execute(
-        "SELECT * FROM review_job WHERE pr_id=? ORDER BY id DESC LIMIT 1", (pid,)
-    ).fetchone()
-    if job is None or job["status"] not in ("queued", "running"):
+    """대기 중(재시도 backoff 포함) 리뷰 잡을 **전부** 취소 — 한 PR에 (pr, sha)별
+    잡이 여럿 공존할 수 있다. 원자 UPDATE(status='queued' 가드)라 worker가 이미
+    claim한(running) 잡은 덮지 않는다. running만 있으면 409(벤더 중단 불가)."""
+    n = job_repo.cancel_queued(conn, pid, error="사용자가 취소")
+    if n == 0:
+        running = conn.execute(
+            "SELECT 1 FROM review_job WHERE pr_id=? AND status='running'", (pid,)
+        ).fetchone()
+        if running:
+            raise HTTPException(409, "이미 실행 중인 리뷰는 취소할 수 없습니다")
         raise HTTPException(404, "대기 중인 리뷰 잡이 없습니다")
-    if job["status"] == "running":
-        raise HTTPException(409, "이미 실행 중인 리뷰는 취소할 수 없습니다")
-    job_repo.mark_canceled(conn, job["id"], error="사용자가 취소")
-    return {"job_id": job["id"], "status": "canceled"}
+    return {"canceled": n, "status": "canceled"}
 
 
 @app.post("/api/webhooks/github")

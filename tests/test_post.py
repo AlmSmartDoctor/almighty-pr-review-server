@@ -306,6 +306,17 @@ def test_post_updates_existing_review_in_place(tmp_path):
     client.post(f"/api/runs/{run1}/post")
     assert len(created) == 1 and updated == []  # 첫 리뷰 → create_review
 
+    # 실제 흐름대로 PR head도 s2로 전진(head 신선도 가드 통과 — poller upsert에 해당)
+    pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=6,
+        title="t",
+        author="a",
+        head_sha="s2",
+        base_ref="main",
+        url="u",
+    )
     run2 = review_repo.create_run(
         conn, pr_id=pid, head_sha="s2", trigger="manual", effort="medium"
     )

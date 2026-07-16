@@ -237,3 +237,71 @@ def test_mark_failed_no_dangling_txn_on_lock_contention(tmp_path):
     assert job_repo.claim_next(worker, worker_id="w1") is not None
     for c in (c0, worker, blocker):
         c.close()
+
+
+def test_enqueue_revives_closed_pr_cancel_on_reopen(db):
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=9,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    jid = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.mark_canceled(db, jid, error=job_repo.CLOSED_PR_CANCEL_ERROR)
+
+    # PR reopen(같은 sha) → poller의 auto enqueue가 시스템 취소를 되살려야 한다
+    assert job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto") == jid
+    j = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert j["status"] == "queued" and j["error"] is None and j["attempts"] == 0
+
+
+def test_enqueue_does_not_revive_user_cancel(db):
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=9,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    jid = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.mark_canceled(db, jid, error="사용자가 취소")
+
+    job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")  # 폴러 재시도
+    j = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert j["status"] == "canceled"  # 사용자 취소는 auto가 무력화하지 못한다
+
+
+def test_cancel_queued_cancels_all_queued_but_not_running(db):
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=9,
+        title="t",
+        author="a",
+        head_sha="s2",
+        base_ref="main",
+        url="u",
+    )
+    j1 = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    j2 = job_repo.enqueue(db, pr_id=pid, head_sha="s2", trigger="auto")
+    j3 = job_repo.enqueue(db, pr_id=pid, head_sha="s3", trigger="auto")
+    db.execute("UPDATE review_job SET status='running' WHERE id=?", (j3,))
+    db.commit()
+
+    assert job_repo.cancel_queued(db, pid, error="사용자가 취소") == 2
+    statuses = {
+        r["id"]: r["status"]
+        for r in db.execute("SELECT id, status FROM review_job").fetchall()
+    }
+    assert statuses[j1] == "canceled" and statuses[j2] == "canceled"
+    assert statuses[j3] == "running"  # 원자 status 가드 — running은 못 건드림
