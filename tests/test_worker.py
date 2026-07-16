@@ -184,6 +184,75 @@ def test_run_one_job_marks_failed_when_pr_missing(db, monkeypatch):
     assert j["status"] == "failed"  # stranded running 방지
 
 
+def test_worker_cancels_job_for_closed_pr(db, monkeypatch):
+    # enqueue 후 PR가 닫히면(poller 재조정) 벤더를 돌리지 않고 잡을 canceled로 마감.
+    rid = repo_repo.add(db, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=1,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    pr_repo.mark_closed(db, rid, {1})
+
+    async def must_not_run(conn, **kw):
+        raise AssertionError("closed PR must not be reviewed")
+
+    monkeypatch.setattr("server.worker.review_pr", must_not_run)
+    assert asyncio.run(run_one_job(db, worker_id="w1")) is True
+    j = db.execute(
+        "SELECT status, error FROM review_job WHERE pr_id=?", (pid,)
+    ).fetchone()
+    assert j["status"] == "canceled" and "닫혀" in j["error"]
+
+
+def test_worker_boot_closes_stale_running_runs(tmp_path, monkeypatch):
+    # 크래시로 'running'에 고착된 run/vendor_result는 부팅 시 failed로 마감된다
+    # (잡만 복구하면 유령 running 행이 영원히 duration 틱업하며 남는다).
+    from server.db import connect, init_schema
+
+    c = connect(tmp_path / "w.db")
+    init_schema(c)
+    rid = repo_repo.add(c, full_name="acme/api", local_path="/tmp/acme")
+    pid = pr_repo.upsert(
+        c,
+        repo_id=rid,
+        number=1,
+        title="t",
+        author="a",
+        head_sha="s1",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        c, pr_id=pid, head_sha="s1", trigger="auto", effort="medium"
+    )  # status='running'
+    review_repo.add_vendor_result(c, run_id=run_id, vendor="claude", status="running")
+    c.close()
+
+    stop = asyncio.Event()
+
+    async def fake_run_one_job(conn, *, worker_id):
+        stop.set()
+        return False
+
+    monkeypatch.setattr("server.worker.run_one_job", fake_run_one_job)
+    asyncio.run(worker_loop(tmp_path / "w.db", stop_event=stop, idle_sleep=0.01))
+
+    c = connect(tmp_path / "w.db")
+    run = review_repo.get_run(c, run_id)
+    assert run["status"] == "failed" and "재시작" in run["error"]
+    assert run["finished_at"] is not None
+    vr = c.execute("SELECT status, error FROM vendor_result").fetchone()
+    assert vr["status"] == "failed" and "재시작" in vr["error"]
+    c.close()
+
+
 def test_worker_loop_survives_tick_error(tmp_path, monkeypatch):
     from server.db import connect, init_schema
 

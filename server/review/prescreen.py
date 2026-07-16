@@ -4,11 +4,22 @@ import subprocess
 from dataclasses import dataclass
 
 _ORDER = {"trivial": 0, "moderate": 1, "complex": 2}
+THRESHOLDS = tuple(_ORDER)  # 설정 API 검증용 — 밖의 값은 decide()에서 KeyError
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 # CLI 출력이 파싱 불가일 때의 보수적 기본값. 비결정적 실패라 캐시 재사용 금지
 # (다음 런이 CLI를 재시도해 self-heal 하도록) — pipeline이 이 사유로 식별.
 PRESCREEN_FALLBACK_REASON = "사전평가 파싱 실패→기본 리뷰"
+# CLI 실행 자체가 실패(subprocess 에러·timeout)했을 때 — 사전평가는 최적화 게이트라
+# 인프라 실패가 리뷰를 막으면 안 된다. 마찬가지로 캐시 재사용 금지.
+PRESCREEN_CLI_FAILURE_REASON = "사전평가 CLI 실패→기본 리뷰"
+
+
+def is_nondeterministic_reason(reason: str) -> bool:
+    """캐시에 등록하면 안 되는 실패 사유(다음 런이 CLI를 재시도해 self-heal)."""
+    return reason == PRESCREEN_FALLBACK_REASON or reason.startswith(
+        PRESCREEN_CLI_FAILURE_REASON
+    )
 
 
 @dataclass

@@ -129,16 +129,19 @@ def test_debate_keeps_refute_when_no_distinct_author():
     assert v.refuted is True and v.contested is False
 
 
-def test_debate_confirms_when_no_refuter():
+def test_debate_marks_degraded_when_no_refuter():
+    # 검증이 실행되지 않았는데 confirmed로 라벨되면 사람이 '확인됨'으로 오신뢰한다.
     v = _run_debate(None, None)
     assert v.refuted is False and v.contested is False
+    assert v.degraded is True
 
 
-def test_debate_degrades_to_confirmed_when_round1_raises():
+def test_debate_marks_degraded_when_round1_raises():
     refuter = _FakeVerifier("codex", [RuntimeError("boom")])
     author = _FakeVerifier("claude", [])
     v = _run_debate(refuter, author)
     assert v.refuted is False and v.contested is False
+    assert v.degraded is True
     assert author.calls == []
 
 

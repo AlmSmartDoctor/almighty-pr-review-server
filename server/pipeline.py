@@ -22,8 +22,9 @@ from server.review.harness import HarnessProfile
 from server.review.merge import deterministic_merge
 from server.review.prescreen import (
     MAX_INLINE_DIFF_CHARS,
-    PRESCREEN_FALLBACK_REASON,
+    PRESCREEN_CLI_FAILURE_REASON,
     PreScreenResult,
+    is_nondeterministic_reason,
 )
 from server.review.diff_filter import chunk_by_budget, filter_reviewable
 from server.context.base import ContextRequest, parse_changed_files, redact_secrets
@@ -159,9 +160,22 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
             reused["reason"],
         )
     else:
-        complexity, score, reason = await asyncio.to_thread(
-            deps.prescreen, diff, prescreen_model
-        )
+        try:
+            complexity, score, reason = await asyncio.to_thread(
+                deps.prescreen, diff, prescreen_model
+            )
+        except Exception as e:
+            # 사전평가는 최적화 게이트 — CLI 인프라 실패가 리뷰 전체를 막으면 안 된다
+            # (B-INV-8). 보수적 기본값으로 degrade하고 캐시엔 등록하지 않는다.
+            complexity, score, reason = (
+                "moderate",
+                0.5,
+                f"{PRESCREEN_CLI_FAILURE_REASON}: {type(e).__name__}",
+            )
+            print(
+                f"[pipeline] prescreen degraded: "
+                f"{redact_secrets(f'{type(e).__name__}: {e}')}"
+            )
     prescreen_ms = int((time.monotonic() - t0) * 1000)
     ps = PreScreenResult(complexity, score, reason)
     decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
@@ -175,8 +189,8 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
         reason=reason,
         duration_ms=prescreen_ms,
         decided=decided,
-        # 파싱 실패 fallback은 비결정적 → 캐시 미등록(다음 런이 CLI 재시도해 self-heal).
-        diff_hash=None if reason == PRESCREEN_FALLBACK_REASON else diff_hash,
+        # 파싱/CLI 실패 fallback은 비결정적 → 캐시 미등록(다음 런이 CLI 재시도해 self-heal).
+        diff_hash=None if is_nondeterministic_reason(reason) else diff_hash,
     )
     # skip은 자동 리뷰(폴러/웹훅 enqueue = trigger 'auto')에서만 취소로 이어진다.
     # 사람이 '리뷰' 버튼으로 명시 트리거(trigger 'manual')하면 임계 미만이라도 항상 리뷰한다.
@@ -609,6 +623,8 @@ async def _verify_singles(deps, merged, *, repo, pr, diff, harness) -> None:
         )
         return
     for m, v in zip(targets, verdicts):
+        if getattr(v, "degraded", False):
+            continue  # 검증 미실행 — confirmed로 오노출하지 않고 라벨 없이 둔다
         if v.refuted:  # 저자도 수긍한 오탐 → 신뢰도 반감
             m.finding.verify_status = "refuted"
             m.finding.confidence = round(m.finding.confidence * 0.5, 3)

@@ -6,49 +6,57 @@ from server.repos import pr_repo, repo_repo
 
 
 def poll_once(conn, *, list_prs, enqueue) -> None:
-    """enabled 레포별로 open PR을 upsert하고 새 head sha면 enqueue."""
+    """enabled 레포별로 open PR을 upsert하고 새 head sha면 enqueue.
+    레포 하나의 실패(gh 에러 등)가 뒤 레포 폴링을 막지 않게 per-repo 격리한다."""
     for repo in repo_repo.list_enabled(conn):
-        # ★개정: PR 발견·upsert·오버뷰·재조정·last_polled_at은 모든 enabled 레포에서
-        # 항상 수행하고, **enqueue(자동 리뷰)만** trigger_mode/벤더로 가드한다. manual
-        # 레포도 오픈 PR이 대시보드에 발견돼 사람이 리뷰 버튼으로 트리거할 수 있고(수동
-        # 트리거는 upsert된 pr_id가 필요), 벤더 0개면 job만 안 쌓인다(재감지 루프 차단).
-        auto = repo["trigger_mode"] == "auto"
-        has_vendor = repo["vendor_claude_on"] or repo["vendor_codex_on"]
-        # 이 폴 이전에 DB가 열림으로 알던 PR 집합(list_prs 호출 전에 캡처) — 폴 도중
-        # 웹훅 등으로 삽입된 PR은 여기에 없어 재조정 대상에서 자연히 제외된다.
-        prev_open = {
-            r["number"]
-            for r in conn.execute(
-                "SELECT number FROM pull_request WHERE repo_id=? AND state='open'",
-                (repo["id"],),
-            ).fetchall()
-        }
-        open_prs = list_prs(repo["full_name"])
-        open_numbers = []
-        for pr in open_prs:
-            pid = pr_repo.upsert(
-                conn,
-                repo_id=repo["id"],
-                number=pr.number,
-                title=pr.title,
-                author=pr.author,
-                head_sha=pr.head_sha,
-                base_ref=pr.base_ref,
-                url=pr.url,
-                state=pr.state,
-                created_at=pr.created_at,
-                head_ref=pr.head_ref,
-                body=pr.body,
-                is_draft=pr.is_draft,
-            )
-            open_numbers.append(pr.number)
-            if auto and has_vendor and pr_repo.needs_review(conn, pid):
-                enqueue(pid)
-        # 병합/닫힌 PR 재조정: 이 폴 이전에 열려 있었으나 gh 오픈 목록에서 사라진 것만
-        # closed로. 목록이 상한에 걸려 잘렸으면(len==limit) 불완전한 셋이라 skip.
-        if len(open_prs) < config.POLL_OPEN_PR_LIMIT:
-            pr_repo.mark_closed(conn, repo["id"], prev_open - set(open_numbers))
-        repo_repo.update(conn, repo["id"], last_polled_at=_now(conn))
+        try:
+            _poll_repo(conn, repo, list_prs=list_prs, enqueue=enqueue)
+        except Exception as e:
+            print(f"[poller] {repo['full_name']} poll failed: {e!r}")
+
+
+def _poll_repo(conn, repo, *, list_prs, enqueue) -> None:
+    # ★개정: PR 발견·upsert·오버뷰·재조정·last_polled_at은 모든 enabled 레포에서
+    # 항상 수행하고, **enqueue(자동 리뷰)만** trigger_mode/벤더로 가드한다. manual
+    # 레포도 오픈 PR이 대시보드에 발견돼 사람이 리뷰 버튼으로 트리거할 수 있고(수동
+    # 트리거는 upsert된 pr_id가 필요), 벤더 0개면 job만 안 쌓인다(재감지 루프 차단).
+    auto = repo["trigger_mode"] == "auto"
+    has_vendor = repo["vendor_claude_on"] or repo["vendor_codex_on"]
+    # 이 폴 이전에 DB가 열림으로 알던 PR 집합(list_prs 호출 전에 캡처) — 폴 도중
+    # 웹훅 등으로 삽입된 PR은 여기에 없어 재조정 대상에서 자연히 제외된다.
+    prev_open = {
+        r["number"]
+        for r in conn.execute(
+            "SELECT number FROM pull_request WHERE repo_id=? AND state='open'",
+            (repo["id"],),
+        ).fetchall()
+    }
+    open_prs = list_prs(repo["full_name"])
+    open_numbers = []
+    for pr in open_prs:
+        pid = pr_repo.upsert(
+            conn,
+            repo_id=repo["id"],
+            number=pr.number,
+            title=pr.title,
+            author=pr.author,
+            head_sha=pr.head_sha,
+            base_ref=pr.base_ref,
+            url=pr.url,
+            state=pr.state,
+            created_at=pr.created_at,
+            head_ref=pr.head_ref,
+            body=pr.body,
+            is_draft=pr.is_draft,
+        )
+        open_numbers.append(pr.number)
+        if auto and has_vendor and pr_repo.needs_review(conn, pid):
+            enqueue(pid)
+    # 병합/닫힌 PR 재조정: 이 폴 이전에 열려 있었으나 gh 오픈 목록에서 사라진 것만
+    # closed로. 목록이 상한에 걸려 잘렸으면(len==limit) 불완전한 셋이라 skip.
+    if len(open_prs) < config.POLL_OPEN_PR_LIMIT:
+        pr_repo.mark_closed(conn, repo["id"], prev_open - set(open_numbers))
+    repo_repo.update(conn, repo["id"], last_polled_at=_now(conn))
 
 
 def _now(conn):

@@ -21,6 +21,7 @@ class Verdict:
     refuted: bool
     rationale: str = ""
     contested: bool = False  # 반박당했으나 저자가 방어 → 견해 대립(반감하지 않음)
+    degraded: bool = False  # 검증이 실제로 실행되지 못함 → 라벨 부착 금지(오노출 방지)
 
 
 @dataclass
@@ -91,11 +92,13 @@ async def _debate(finding, *, refuter, author, diff, harness, workdir, runtime_d
         )
 
     if refuter is None:
-        return Verdict(refuted=False)
+        return Verdict(
+            refuted=False, degraded=True
+        )  # 검증 미실행 — confirmed 오라벨 방지
     try:
         r1 = await ask(refuter, build_verify_prompt(finding, diff))
     except Exception:
-        return Verdict(refuted=False)  # degrade: 확정 취급(삭제 아님)
+        return Verdict(refuted=False, degraded=True)  # degrade: 라벨 없이 원본 유지
     if not r1.refuted:
         return Verdict(refuted=False, rationale=r1.rationale)  # 반대 의견 없음
     if author is None or author is refuter:
@@ -123,8 +126,9 @@ def _pick_verifier(by_vendor: dict, author_vendor: str):
 
 def make_verifier(adapters, worktree, clone=None):
     """gh_deps 배선용 실 검증기. 리뷰 블록과 독립된 자체 worktree/runtime을 열어
-    고위험 SINGLE finding을 다른 벤더로 반박 검증한다. 실패는 confirmed로 degrade
-    (검증이 리뷰 결과를 절대 삭제하지 않는다). local_path 없으면 clone으로 온디맨드."""
+    고위험 SINGLE finding을 다른 벤더로 반박 검증한다. 실패는 degraded verdict로
+    (검증이 리뷰 결과를 삭제하지도, confirmed로 오라벨하지도 않는다).
+    local_path 없으면 clone으로 온디맨드."""
     from server.review.worktree import checkout
 
     async def verify(targets, ctx: VerifyContext):

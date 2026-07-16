@@ -2,7 +2,7 @@ import tempfile
 
 from server.context.registry import build_context_provider
 from server.github.gh import GhClient
-from server.pipeline import PipelineDeps
+from server.pipeline import PipelineDeps, _col
 from server.review.harness import HarnessProfile
 from server.review.prescreen import prescreen
 from server.review.vendors import ClaudeAdapter, CodexAdapter
@@ -25,6 +25,9 @@ def build_deps(repo, settings) -> PipelineDeps:
         return (r.complexity, r.score, r.reason)
 
     adapters = [ClaudeAdapter(), CodexAdapter()]
+    # verify도 리뷰와 동일하게 레포 벤더 토글을 따른다 — OFF 벤더(미설치·미인증일 수
+    # 있음)를 refuter로 exec하면 매번 실패해 검증이 조용히 무력화된다.
+    verify_adapters = [ad for ad in adapters if _col(repo, f"vendor_{ad.vendor}_on", 1)]
     return PipelineDeps(
         gh_diff=gh.diff,
         gh_compare_diff=gh.compare_diff,
@@ -34,5 +37,5 @@ def build_deps(repo, settings) -> PipelineDeps:
         repo_local_path=repo["local_path"],
         clone=gh.clone,
         context=build_context_provider(repo, settings),
-        verify=make_verifier(adapters, prepared_worktree, gh.clone),
+        verify=make_verifier(verify_adapters, prepared_worktree, gh.clone),
     )

@@ -109,6 +109,37 @@ def test_patch_settings_context_toggles(tmp_path):
     assert body["context_static_on"] == 1 and body["context_jira_on"] == 1
 
 
+def test_patch_settings_rejects_invalid_threshold(tmp_path):
+    # 임의 문자열이 저장되면 decide()가 KeyError로 죽어 이후 모든 리뷰가 실패한다.
+    client, _ = _client(tmp_path)
+    r = client.patch("/api/settings", json={"prescreen_gate_threshold": "extreme"})
+    assert r.status_code == 400
+    assert client.get("/api/settings").json()["prescreen_gate_threshold"] != "extreme"
+    ok = client.patch("/api/settings", json={"prescreen_gate_threshold": "complex"})
+    assert ok.status_code == 200
+    assert ok.json()["prescreen_gate_threshold"] == "complex"
+
+
+def test_add_repo_duplicate_returns_409(tmp_path):
+    client, _ = _client(tmp_path)
+    assert client.post("/api/repos", json={"full_name": "acme/api"}).status_code == 201
+    assert client.post("/api/repos", json={"full_name": "acme/api"}).status_code == 409
+
+
+def test_post_endpoints_missing_ids_return_404(tmp_path):
+    client, _ = _client(tmp_path)
+
+    class NeverGh:
+        def __getattr__(self, name):
+            raise AssertionError("gh must not be called for missing ids")
+
+    from server.api import get_gh
+
+    app.dependency_overrides[get_gh] = lambda: NeverGh()
+    assert client.post("/api/runs/999/post").status_code == 404
+    assert client.get("/api/prs/999/post-health").status_code == 404
+
+
 def test_patch_repo_context_settings(tmp_path):
     client, _ = _client(tmp_path)
     created = client.post("/api/repos", json={"full_name": "acme/api"}).json()

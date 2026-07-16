@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -23,6 +24,7 @@ from server.repos import (
     settings_repo,
 )
 from server.review.diff_filter import commentable_lines
+from server.review.prescreen import THRESHOLDS
 from server.review.harness import (
     HarnessProfile,
     create_harness,
@@ -131,7 +133,12 @@ def add_repo(body: RepoIn, conn=Depends(get_conn)):
         full_name = _normalize_full_name(body.full_name)
     except ValueError:
         raise HTTPException(400, "owner/repo 형식으로 입력하세요.")
-    rid = repo_repo.add(conn, full_name=full_name, local_path=body.local_path or None)
+    try:
+        rid = repo_repo.add(
+            conn, full_name=full_name, local_path=body.local_path or None
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "이미 등록된 레포입니다.")
     return dict(repo_repo.get(conn, rid))
 
 
@@ -299,6 +306,15 @@ class SettingsPatch(BaseModel):
 
 @app.patch("/api/settings")
 def patch_settings(body: SettingsPatch, conn=Depends(get_conn)):
+    # threshold는 decide()가 KeyError로 죽는 유일한 자유입력 — 경계에서 거른다
+    # (수락하면 이후 모든 리뷰가 prescreen 직후 실패하는 브릭 상태가 된다).
+    if (
+        body.prescreen_gate_threshold is not None
+        and body.prescreen_gate_threshold not in THRESHOLDS
+    ):
+        raise HTTPException(
+            400, f"prescreen_gate_threshold는 {'/'.join(THRESHOLDS)} 중 하나여야 합니다"
+        )
     settings_repo.update(conn, **body.model_dump(exclude_none=True))
     return dict(settings_repo.get(conn))
 
@@ -436,6 +452,8 @@ def _health_status_code(health: dict) -> int:
 
 def _post_health(conn, pid: int, gh) -> dict:
     pr = pr_repo.get(conn, pid)
+    if pr is None:
+        raise HTTPException(404, "pr not found")
     repo = repo_repo.get(conn, pr["repo_id"])
     health = {
         "ok": False,
@@ -610,6 +628,8 @@ def post_run(
     run_id: int, conn=Depends(get_conn), gh=Depends(get_gh), slack=Depends(get_slack)
 ):
     run = review_repo.get_run(conn, run_id)
+    if run is None:
+        raise HTTPException(404, "run not found")
     pr = pr_repo.get(conn, run["pr_id"])
     repo = repo_repo.get(conn, pr["repo_id"])
     health = _post_health(conn, pr["id"], gh)

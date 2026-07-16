@@ -184,6 +184,27 @@ def test_poll_once_manual_discovers_pr_but_skips_enqueue(db):
     assert pr_repo.get(db, 1)["head_sha"] == "sha1"  # 그러나 PR은 발견·upsert됨
 
 
+def test_poll_once_isolates_repo_failure(db):
+    # 한 레포의 gh 실패가 뒤 레포 폴링을 막지 않는다(per-repo 격리).
+    repo_repo.add(db, full_name="acme/bad")
+    repo_repo.add(db, full_name="acme/good")
+    enqueued = []
+
+    def list_prs(full_name):
+        if full_name == "acme/bad":
+            raise RuntimeError("gh boom")
+        return [PrInfo(7, "t", "a", "sha1", "main", "u", "open")]
+
+    poll_once(db, list_prs=list_prs, enqueue=lambda pid: enqueued.append(pid))
+    assert enqueued == [1]  # good 레포 PR은 정상 발견·enqueue
+    polled = {
+        r["full_name"]: r["last_polled_at"]
+        for r in db.execute("SELECT full_name, last_polled_at FROM repo").fetchall()
+    }
+    assert polled["acme/good"] is not None  # good은 폴링 완료 기록
+    assert polled["acme/bad"] is None  # bad는 실패로 미기록(다음 틱 재시도)
+
+
 def test_poll_loop_survives_tick_error(tmp_path, monkeypatch):
     stop = asyncio.Event()
     calls = []

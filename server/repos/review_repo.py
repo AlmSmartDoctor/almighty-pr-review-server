@@ -38,6 +38,25 @@ def finish_run(conn, run_id, status, error=None):
     conn.commit()
 
 
+def recover_stale_running(conn) -> int:
+    """부팅 시 이전 크래시/강제종료로 'running'에 고착된 run·vendor_result를 failed로
+    마감한다(부팅 시점엔 실행 중인 리뷰가 있을 수 없다). 잡 복구(recover_stale)는
+    review_job만 되살리므로, 짝이 되는 run을 정리하지 않으면 유령 'running' 행이
+    영원히 duration 틱업하며 남는다."""
+    error = "서버 재시작으로 중단됨"
+    conn.execute(
+        "UPDATE vendor_result SET status='failed', error=? WHERE status='running'",
+        (error,),
+    )
+    cur = conn.execute(
+        "UPDATE review_run SET status='failed', error=?, "
+        "finished_at=datetime('now') WHERE status='running'",
+        (error,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def set_context(conn, run_id, *, text, meta):
     conn.execute(
         "UPDATE review_run SET context_text=?, context_meta=? WHERE id=?",

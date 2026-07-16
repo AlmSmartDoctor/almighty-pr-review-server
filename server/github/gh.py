@@ -25,8 +25,15 @@ class PrInfo:
 def _default_runner(args: list[str], *, env=None, input=None) -> str:
     # env·input을 실제로 전달한다(정규화된 env 토큰 주입 + create_review의 stdin JSON
     # 페이로드 --input -). 이전엔 **kw를 받기만 하고 흘려버려 stdin이 유실됐다.
+    # timeout 없으면 네트워크 행 한 번에 폴러/워커가 조용히 영구 정지한다.
     return subprocess.run(
-        args, check=True, capture_output=True, text=True, env=env, input=input
+        args,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        input=input,
+        timeout=config.GH_TIMEOUT_SEC,
     ).stdout
 
 
@@ -63,9 +70,15 @@ def _gh_has_native_auth() -> bool:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
             _native_auth = True
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+            OSError,
+        ):
             _native_auth = False
     return _native_auth
 
@@ -141,6 +154,15 @@ class GhClient:
                 stderr=stderr,
                 command_kind=kind,
                 http_status=status,
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            # "timed out"은 worker._RETRYABLE과 매칭 → 일시 장애로 재시도된다.
+            raise GitHubCliError(
+                exit_code=-1,
+                message=f"gh {kind} timed out after {e.timeout}s",
+                stderr="",
+                command_kind=kind,
+                http_status=None,
             ) from e
 
     def list_open_prs(self, repo: str) -> list[PrInfo]:

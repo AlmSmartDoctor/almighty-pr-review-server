@@ -25,6 +25,30 @@ def test_build_deps_assembles_pipeline_deps():
     assert isinstance(deps.context, CompositeContextProvider)
 
 
+def test_build_deps_filters_verify_adapters_by_vendor_toggle(monkeypatch):
+    # OFF 벤더를 refuter로 exec하면 매번 실패해 검증이 조용히 무력화된다.
+    captured = {}
+
+    def fake_make_verifier(adapters, worktree, clone=None):
+        captured["vendors"] = [a.vendor for a in adapters]
+        return "verifier"
+
+    monkeypatch.setattr("server.review.gh_deps.make_verifier", fake_make_verifier)
+    deps = build_deps(
+        {
+            "full_name": "acme/api",
+            "local_path": None,
+            "harness_name": "default",
+            "vendor_claude_on": 1,
+            "vendor_codex_on": 0,
+        },
+        {},
+    )
+    assert captured["vendors"] == ["claude"]
+    assert deps.verify == "verifier"
+    assert [a.vendor for a in deps.adapters] == ["claude", "codex"]  # 리뷰 목록 불변
+
+
 def test_build_deps_includes_static_provider_when_enabled():
     from server.context.static_provider import StaticContextProvider
 

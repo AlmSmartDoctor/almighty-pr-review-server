@@ -202,6 +202,37 @@ def test_pat_promoted_only_without_native_gh_auth(monkeypatch):
         assert (env.get("GH_TOKEN") == "pat") is promoted
 
 
+def test_timeout_becomes_retryable_gh_error():
+    # gh 행이 폴러/워커를 영구 정지시키지 않게 timeout → GitHubCliError 변환.
+    # 메시지의 "timed out"은 worker._RETRYABLE과 매칭돼 일시 장애로 재시도된다.
+    def runner(args, **kw):
+        raise subprocess.TimeoutExpired(args, 300)
+
+    client = gh.GhClient(runner=runner, env={})
+    try:
+        client.diff("acme/api", 7)
+        raise AssertionError("expected GitHubCliError")
+    except gh.GitHubCliError as e:
+        assert "timed out" in e.message
+        assert e.command_kind == "diff"
+        assert e.http_status is None
+
+
+def test_default_runner_passes_timeout(monkeypatch):
+    captured = {}
+
+    class _Res:
+        stdout = "ok"
+
+    def fake_run(args, **kw):
+        captured.update(kw)
+        return _Res()
+
+    monkeypatch.setattr(gh.subprocess, "run", fake_run)
+    gh._default_runner(["gh", "api"], env=None)
+    assert captured["timeout"] > 0
+
+
 def test_default_runner_forwards_env_and_input(monkeypatch):
     # create_review의 stdin(--input -) 페이로드와 정규화 env가 실제로 subprocess.run에
     # 전달되는지 고정(이전엔 **kw를 흘려버려 유실됐음).

@@ -965,6 +965,33 @@ def test_pipeline_verify_disabled_by_default_not_called(db):
     assert f["verify_status"] is None and f["confidence"] == 0.8
 
 
+def test_pipeline_verify_degraded_verdict_leaves_finding_unlabeled(db):
+    # 검증이 실행되지 못한 finding(벤더 1개뿐·refuter 실패)은 confirmed로
+    # 오라벨하지 않고 미검증 상태 그대로 둔다.
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=56, head_sha="s56", verify_singles_on=1)
+    verify = FakeVerify([Verdict(refuted=False, degraded=True)])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude",
+                [Finding("claude", "a.py", 1, "critical", "bug", "c", "r", 0.9)],
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    f = finding_repo.list_for_run(db, run_id)[0]
+    assert f["verify_status"] is None
+    assert f["verify_rationale"] is None
+    assert f["confidence"] == 0.9
+
+
 def test_pipeline_verify_degrades_when_verifier_raises(db):
     _, pid = _seed_pr(db, number=54, head_sha="s54", verify_singles_on=1)
 
@@ -1341,6 +1368,44 @@ def test_prescreen_fallback_not_cached_so_next_run_retries(db):
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     assert counter.calls == 2  # 파싱 실패는 캐시 안 됨 → 재시도(self-heal)
+
+
+def test_prescreen_subprocess_failure_degrades_to_review(db):
+    # 사전평가 CLI 실패(subprocess 에러)는 최적화 게이트 실패일 뿐 — 리뷰는 진행된다.
+    _, pid = _seed_pr(db, number=74, head_sha="s74")
+
+    class BoomOncePrescreen:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, diff, model):
+            self.calls += 1
+            raise RuntimeError("claude CLI unavailable")
+
+    boom = BoomOncePrescreen()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "SAME-DIFF",
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=boom,
+        repo_local_path="/tmp/acme-api",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    run = review_repo.get_run(db, run_id)
+    assert run["status"] == "done"  # CLI 실패가 run을 죽이지 않음
+    assert len(finding_repo.list_for_run(db, run_id)) == 1
+    ps = db.execute(
+        "SELECT reason, diff_hash FROM pre_screen ORDER BY id DESC"
+    ).fetchone()
+    assert "사전평가 CLI 실패" in ps["reason"]
+    assert ps["diff_hash"] is None  # 비결정적 실패 → 캐시 미등록
+    # 같은 diff 재실행 → 캐시 재사용 없이 CLI 재시도(self-heal)
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert boom.calls == 2
 
 
 class _CodexFail:

@@ -142,6 +142,20 @@ def mark_done(conn, job_id, run_id):
         raise
 
 
+def mark_canceled(conn, job_id, *, error):
+    """실행 전 무의미해진 잡(닫힌 PR 등)을 canceled로 마감 — 벤더 비용을 쓰지 않는다."""
+    try:
+        conn.execute(
+            "UPDATE review_job SET status='canceled', error=?, locked_by=NULL "
+            "WHERE id=?",
+            (error, job_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+        raise
+
+
 def mark_failed(conn, job_id, *, error, retry: bool, run_id=None):
     # ★개정 (codex v3 [HIGH]): run_id는 이번 attempt의 (failed) review_run.
     # retry로 queued 되돌릴 때도 job.run_id에 최신 attempt run을 남겨,

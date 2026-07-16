@@ -1,7 +1,7 @@
 import asyncio
 
 from server.pipeline import PipelineError, retry_pr, review_pr
-from server.repos import job_repo, pr_repo, repo_repo, settings_repo
+from server.repos import job_repo, pr_repo, repo_repo, review_repo, settings_repo
 from server.review.gh_deps import build_deps  # Task 7.2에서 정의
 
 _RETRYABLE = ("rate limit", "rate_limit", "429", "overloaded", "timeout", "timed out")
@@ -19,6 +19,11 @@ async def run_one_job(conn, *, worker_id: str) -> bool:
         return False
     try:
         pr = pr_repo.get(conn, job["pr_id"])
+        # enqueue 후 PR가 닫히거나 병합됐을 수 있다(poller 재조정) — 벤더를 돌리기
+        # 전에 걸러 토큰 낭비를 막는다. 큐 자체는 취소하지 않으므로 여기가 최종 게이트.
+        if pr["state"] != "open":
+            job_repo.mark_canceled(conn, job["id"], error="PR가 닫혀 리뷰 취소")
+            return True
         repo = repo_repo.get(conn, pr["repo_id"])
         settings = settings_repo.get(conn)
         deps = build_deps(repo, settings)
@@ -50,11 +55,15 @@ async def worker_loop(db_path, *, worker_id="w1", idle_sleep=2.0, stop_event=Non
     from server.db import connect
 
     # ★개정: 시작 시 이전 크래시로 고착된 running 잡을 queued로 복구.
+    # 짝이 되는 run/vendor_result 'running' 유령 행도 failed로 마감(self-heal).
     boot = connect(db_path)
     try:
         n = job_repo.recover_stale(boot, older_than_minutes=0)
         if n:
             print(f"[worker] recovered {n} stale jobs")
+        r = review_repo.recover_stale_running(boot)
+        if r:
+            print(f"[worker] closed {r} stale running runs")
     finally:
         boot.close()
 
