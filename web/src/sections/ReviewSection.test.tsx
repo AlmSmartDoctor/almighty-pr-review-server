@@ -21,6 +21,7 @@ vi.mock("../api", () => ({
     }),
     patchFinding: async () => ({}),
     postRun: async () => ({}),
+    prRuns: async () => [],
     triggerReview: async () => ({ job_id: 42 }),
     cancelReview: async () => ({ job_id: 42, status: "canceled" }),
     retryVendors: async () => ({ job_id: 43 }),
@@ -474,4 +475,37 @@ test("no cancel button without queued job", async () => {
   fireEvent.click(await screen.findByText("fix null"));
   await screen.findByText("전체 실행");
   expect(screen.queryByRole("button", { name: "대기 중 리뷰 취소" })).toBeNull();
+});
+
+test("run history dropdown switches to a past run", async () => {
+  const loadFindings = vi.fn(async (runId: number) =>
+    runId === 11
+      ? [{ id: 5, file: "a.py", line: 3, severity: "high",
+           claim: "최신 지적", status: "pending", vendor: "claude" }]
+      : [{ id: 4, file: "b.py", line: 1, severity: "low",
+           claim: "과거 지적", status: "dismissed", vendor: "codex" }]);
+  renderReview({
+    loadPrs: async () => PRS,
+    loadFindings,
+    loadVendors: async () => [],
+    loadRuns: async () => [
+      { id: 11, head_sha: "s2", trigger: "manual", status: "done", error: null,
+        started_at: null, finished_at: null, finding_count: 1 },
+      { id: 10, head_sha: "s1", trigger: "auto", status: "done", error: null,
+        started_at: null, finished_at: null, finding_count: 1 },
+    ],
+  });
+  fireEvent.click(await screen.findByText("fix null"));
+  expect(await screen.findByText(/최신 지적/)).toBeInTheDocument();
+
+  const select = screen.getByRole("combobox", { name: "run 이력" });
+  fireEvent.change(select, { target: { value: "10" } });
+  expect(await screen.findByText(/과거 지적/)).toBeInTheDocument();
+  expect(screen.getByText("과거 run 조회 중")).toBeInTheDocument();
+  await waitFor(() => expect(loadFindings).toHaveBeenCalledWith(10));
+
+  // 최신 run으로 복귀하면 배지가 사라진다
+  fireEvent.change(select, { target: { value: "11" } });
+  expect(await screen.findByText(/최신 지적/)).toBeInTheDocument();
+  expect(screen.queryByText("과거 run 조회 중")).toBeNull();
 });

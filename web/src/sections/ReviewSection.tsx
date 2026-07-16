@@ -8,6 +8,7 @@ import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { StatusLine } from "@/components/status-line";
 import { Empty } from "@/components/empty";
 import { RepoTabs } from "@/components/repo-tabs";
@@ -58,6 +59,7 @@ type Finding = {
 };
 
 type VendorResult = { id: number; vendor: string; status: string; error: string | null; duration_ms?: number | null; raw_path?: string | null };
+type RunSummary = { id: number; head_sha: string; trigger: string | null; status: string; error: string | null; started_at: string | null; finished_at: string | null; finding_count: number };
 type RunContext = {
   text: string;
   meta: {
@@ -106,6 +108,7 @@ export function ReviewSection(props: {
   loadContext?: (runId: number) => Promise<RunContext>;
   loadPreview?: (runId: number) => Promise<PostPreview>;
   loadPostHealth?: (prId: number) => Promise<PostHealth>;
+  loadRuns?: (prId: number) => Promise<RunSummary[]>;
 }) {
   const navigate = useNavigate();
   const { prId } = useParams();
@@ -164,6 +167,7 @@ export function ReviewSection(props: {
         loadContext={loadContext}
         loadPreview={loadPreview}
         loadPostHealth={props.loadPostHealth}
+        loadRuns={props.loadRuns}
         onRefresh={refresh}
         onBack={() => navigate("/reviews")}
       />
@@ -391,13 +395,14 @@ function prCreatedLine(pr: Pr) {
   return author;
 }
 
-function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealth, onRefresh, onBack }: {
+function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealth, loadRuns, onRefresh, onBack }: {
   pr: Pr;
   load: (id: number) => Promise<Finding[]>;
   loadVendors?: (id: number) => Promise<VendorResult[]>;
   loadContext?: (id: number) => Promise<RunContext>;
   loadPreview?: (id: number) => Promise<PostPreview>;
   loadPostHealth?: (id: number) => Promise<PostHealth>;
+  loadRuns?: (prId: number) => Promise<RunSummary[]>;
   onRefresh: () => Promise<void>;
   onBack: () => void;
 }) {
@@ -416,7 +421,12 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   // 트리거 직후 새 run이 아직 안 생긴 구간을 폴링으로 메우기 위해, 트리거 시점의 run_id를 기억.
   // undefined = 대기 안 함(sentinel). null도 유효값(리뷰 이력 없던 PR).
   const [awaitingBase, setAwaitingBase] = useState<number | null | undefined>(undefined);
-  const runId = pr.run_id;
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  // null = 최신 run 따라감(새 run이 생기면 자동 전환). 숫자 = 과거 run 고정 조회.
+  const [selectedRun, setSelectedRun] = useState<number | null>(null);
+  const runId = selectedRun ?? pr.run_id;
+  const viewingPast = selectedRun !== null && selectedRun !== pr.run_id;
+  const selInfo = runs.find((r) => r.id === runId);
   const runDuration = formatDuration(pr.run_duration_ms);
   const prescreenDuration = formatDuration(pr.prescreen_duration_ms);
 
@@ -448,6 +458,12 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
         issue: { ok: false },
       }));
   }, [runId]);
+
+  useEffect(() => {
+    // run 이력: 최신 run이 바뀌면(재리뷰 완료 등) 목록을 갱신하고 최신 따라가기로 복귀.
+    setSelectedRun(null);
+    (loadRuns ?? api.prRuns)(pr.id).then(setRuns).catch(() => setRuns([]));
+  }, [pr.id, pr.run_id]);
 
   // 리뷰 진행 중(큐 대기/실행 중)이거나 트리거 직후 새 run을 기다리는 동안 폴링해
   // run 상태·단계별 소요시간·finding·벤더 결과를 새로고침 없이 실시간 갱신한다.
@@ -615,6 +631,25 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
         }
       >
         <NeedBadge value={pr.prescreen} />
+        {runs.length > 1 && (
+          <NativeSelect
+            aria-label="run 이력"
+            className="h-8 w-auto"
+            value={String(runId)}
+            onChange={(e) => {
+              const id = Number(e.target.value);
+              setSelectedRun(id === pr.run_id ? null : id);
+            }}
+          >
+            {runs.map((r) => (
+              <option key={r.id} value={r.id}>
+                run {r.id} · {r.status} · {r.finding_count}건
+                {r.id === pr.run_id ? " (최신)" : ""}
+              </option>
+            ))}
+          </NativeSelect>
+        )}
+        {viewingPast && <Badge variant="warn">과거 run 조회 중</Badge>}
         <Button variant="outline" size="sm" onClick={triggerReview} disabled={triggering}>수동 리뷰</Button>
         {cancelable && (
           <Button variant="outline" size="sm" onClick={cancelReview} disabled={triggering}>
@@ -656,9 +691,13 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
               <ol className="relative">
                 <Trace
                   title="전체 실행"
-                  desc={[pr.run_status ?? "상태 없음", runDuration].filter(Boolean).join(" · ")}
-                  done={pr.run_status === "done"}
-                  failed={pr.run_status === "failed"}
+                  desc={
+                    viewingPast
+                      ? [selInfo?.status ?? "상태 없음", selInfo?.error].filter(Boolean).join(" · ")
+                      : [pr.run_status ?? "상태 없음", runDuration].filter(Boolean).join(" · ")
+                  }
+                  done={(viewingPast ? selInfo?.status : pr.run_status) === "done"}
+                  failed={(viewingPast ? selInfo?.status : pr.run_status) === "failed"}
                 />
                 <Trace
                   title="사전 스크리닝"

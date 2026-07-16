@@ -738,3 +738,39 @@ def test_cancel_queued_review(tmp_path):
     conn.execute("UPDATE review_job SET status='running' WHERE id=?", (job_id,))
     conn.commit()
     assert client.post(f"/api/prs/{pid}/cancel-review").status_code == 409
+
+
+def test_pr_run_history(tmp_path):
+    from server.repos import pr_repo, repo_repo, review_repo
+
+    client, conn = _client(tmp_path)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=7,
+        title="t",
+        author="a",
+        head_sha="s2",
+        base_ref="main",
+        url="u",
+    )
+    r1 = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s1", trigger="auto", effort="medium"
+    )
+    review_repo.finish_run(conn, r1, "done")
+    conn.execute(
+        "INSERT INTO finding (run_id, vendor, claim) VALUES (?, 'claude', 'c')", (r1,)
+    )
+    r2 = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s2", trigger="manual", effort="medium"
+    )
+    review_repo.finish_run(conn, r2, "failed", error="boom")
+    conn.commit()
+
+    rows = client.get(f"/api/prs/{pid}/runs").json()
+    assert [r["id"] for r in rows] == [r2, r1]  # 최신 먼저
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[r1]["finding_count"] == 1 and by_id[r1]["status"] == "done"
+    assert by_id[r2]["finding_count"] == 0 and by_id[r2]["head_sha"] == "s2"
+    assert client.get("/api/prs/999/runs").json() == []

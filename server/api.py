@@ -330,6 +330,20 @@ def patch_settings(body: SettingsPatch, conn=Depends(get_conn)):
     return dict(settings_repo.get(conn))
 
 
+@app.get("/api/prs/{pid}/runs")
+def pr_runs(pid: int, conn=Depends(get_conn)):
+    """PR의 리뷰 run 이력(최신 먼저) — 재리뷰 후에도 과거 run의 결과를 찾아볼 수 있게."""
+    rows = conn.execute(
+        """SELECT r.id, r.head_sha, r.trigger, r.status, r.error,
+                  r.started_at, r.finished_at,
+                  (SELECT COUNT(*) FROM finding f WHERE f.run_id = r.id)
+                    AS finding_count
+           FROM review_run r WHERE r.pr_id=? ORDER BY r.id DESC""",
+        (pid,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.get("/api/runs/{run_id}/findings")
 def run_findings(run_id: int, conn=Depends(get_conn)):
     return [dict(f) for f in finding_repo.list_for_run(conn, run_id)]

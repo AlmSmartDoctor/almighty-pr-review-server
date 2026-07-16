@@ -41,6 +41,7 @@ export const api = {
     fetch(`/api/harness/${name}`, writeJson("PUT", body)).then(json),
   runFindings: (id: number) => fetch(`/api/runs/${id}/findings`).then(json),
   runVendorResults: (id: number) => fetch(`/api/runs/${id}/vendor-results`).then(json),
+  prRuns: (prId: number) => fetch(`/api/prs/${prId}/runs`).then(json),
   runContext: (id: number) => fetch(`/api/runs/${id}/context`).then(json),
   runPostPreview: (id: number) => fetch(`/api/runs/${id}/post-preview`).then(json),
   prPostHealth: (id: number) => fetch(`/api/prs/${id}/post-health`).then(json),
