@@ -56,8 +56,8 @@ test("overview lists PRs and drills into detail", async () => {
                      claim: "널 역참조", status: "pending", vendor: "claude" },
                  ],
                  loadVendors: async () => [
-                   { vendor: "claude", status: "done", error: null, duration_ms: 2100 },
-                   { vendor: "codex", status: "failed", error: "rate limit", duration_ms: 900 },
+                   { id: 11, vendor: "claude", status: "done", error: null, duration_ms: 2100 },
+                   { id: 12, vendor: "codex", status: "failed", error: "rate limit", duration_ms: 900 },
                  ] });
   // 오버뷰: PR 카드 + 리뷰-필요성 배지
   expect(await screen.findByText("fix null")).toBeInTheDocument();
@@ -97,8 +97,8 @@ test("all vendors failed shows full-failure label", async () => {
   renderReview({ loadPrs: async () => PRS,
                  loadFindings: async () => [],
                  loadVendors: async () => [
-                   { vendor: "claude", status: "failed", error: "boom" },
-                   { vendor: "codex", status: "failed", error: "rate limit" },
+                   { id: 13, vendor: "claude", status: "failed", error: "boom" },
+                   { id: 14, vendor: "codex", status: "failed", error: "rate limit" },
                  ] });
   fireEvent.click(await screen.findByText("fix null"));
   // ★개정 branch: 전체 실패 → "벤더 리뷰 실패" (부분 실패 문구 아님)
@@ -422,8 +422,8 @@ test("retry-failed-vendors button enqueues retry for the run", async () => {
   renderReview({ loadPrs: async () => PRS,
                  loadFindings: async () => [],
                  loadVendors: async () => [
-                   { vendor: "claude", status: "done", error: null, duration_ms: 2100 },
-                   { vendor: "codex", status: "failed", error: "rate limit", duration_ms: 900 },
+                   { id: 11, vendor: "claude", status: "done", error: null, duration_ms: 2100 },
+                   { id: 12, vendor: "codex", status: "failed", error: "rate limit", duration_ms: 900 },
                  ] });
   fireEvent.click(await screen.findByText("fix null"));
   fireEvent.click(await screen.findByText("실패 벤더만 재시도"));
@@ -435,10 +435,25 @@ test("no retry button when every vendor succeeded", async () => {
   renderReview({ loadPrs: async () => PRS,
                  loadFindings: async () => [],
                  loadVendors: async () => [
-                   { vendor: "claude", status: "done", error: null, duration_ms: 2100 },
-                   { vendor: "codex", status: "done", error: null, duration_ms: 900 },
+                   { id: 11, vendor: "claude", status: "done", error: null, duration_ms: 2100 },
+                   { id: 16, vendor: "codex", status: "done", error: null, duration_ms: 900 },
                  ] });
   fireEvent.click(await screen.findByText("fix null"));
   await screen.findByText("전체 실행");  // detail 로드 완료 대기
   expect(screen.queryByText("실패 벤더만 재시도")).toBeNull();
+});
+
+test("vendor trace links to raw output when preserved", async () => {
+  renderReview({ loadPrs: async () => PRS,
+                 loadFindings: async () => [],
+                 loadVendors: async () => [
+                   { id: 31, vendor: "claude", status: "done", error: null,
+                     duration_ms: 2100, raw_path: "/x/.raw/vr31.txt" },
+                   { id: 32, vendor: "codex", status: "failed", error: "파싱 실패",
+                     duration_ms: 900, raw_path: null },
+                 ] });
+  fireEvent.click(await screen.findByText("fix null"));
+  const rawLink = await screen.findByRole("link", { name: "원문 보기" });
+  expect(rawLink).toHaveAttribute("href", "/api/vendor-results/31/raw");
+  expect(screen.getAllByRole("link", { name: "원문 보기" })).toHaveLength(1); // raw 없는 벤더는 링크 없음
 });

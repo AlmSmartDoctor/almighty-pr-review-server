@@ -9,5 +9,6 @@ web/node_modules/
 web/dist/
 harness/**/runtime/
 .clones/
+.raw/
 .env
 .env.*

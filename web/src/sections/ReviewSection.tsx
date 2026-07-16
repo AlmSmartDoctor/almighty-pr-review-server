@@ -57,7 +57,7 @@ type Finding = {
   edited_text?: string | null;
 };
 
-type VendorResult = { vendor: string; status: string; error: string | null; duration_ms?: number | null };
+type VendorResult = { id: number; vendor: string; status: string; error: string | null; duration_ms?: number | null; raw_path?: string | null };
 type RunContext = {
   text: string;
   meta: {
@@ -660,7 +660,13 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
                 ) : vendors.map((v) => (
                   <Trace key={v.vendor} title={`${v.vendor} 리뷰`}
                          desc={[v.status, formatDuration(v.duration_ms), v.error].filter(Boolean).join(" · ")}
-                         done={v.status === "done"} failed={v.status === "failed"} />
+                         done={v.status === "done"} failed={v.status === "failed"}
+                         action={v.raw_path ? (
+                           <a href={`/api/vendor-results/${v.id}/raw`} target="_blank" rel="noreferrer"
+                              className="text-[12px] font-semibold text-primary hover:underline">
+                             원문 보기
+                           </a>
+                         ) : undefined} />
                 ))}
                 <Trace
                   title="트리아지"
@@ -783,8 +789,8 @@ function DetailHead({ pr, sub, children }: {
   );
 }
 
-function Trace({ title, desc, done = false, failed = false, last = false }: {
-  title: string; desc: string; done?: boolean; failed?: boolean; last?: boolean;
+function Trace({ title, desc, done = false, failed = false, last = false, action }: {
+  title: string; desc: string; done?: boolean; failed?: boolean; last?: boolean; action?: ReactNode;
 }) {
   return (
     <li className={cn("relative pl-7", last ? "pb-0" : "pb-4")}>
@@ -795,7 +801,7 @@ function Trace({ title, desc, done = false, failed = false, last = false }: {
           done ? "border-ok bg-ok" : failed ? "border-danger bg-danger" : "border-input",
         )}
       />
-      <div className="text-[13px] font-bold">{title}</div>
+      <div className="flex items-baseline gap-2 text-[13px] font-bold">{title}{action}</div>
       <div className="mt-0.5 text-[12.5px] text-muted-foreground">{desc}</div>
     </li>
   );

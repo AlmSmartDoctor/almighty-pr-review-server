@@ -351,30 +351,54 @@ def _record_vendor_results(conn, results, vr_ids):
     """벤더 실행 결과를 vendor_result 행에 반영하고 (vr_id, finding) 쌍을 모은다.
     _execute_run(전원 실패 판정용 succeeded/errors 집계)과 retry가 공유."""
     findings, succeeded, errors = [], 0, []
-    for vendor, fs, err, dur in results:
+    for vendor, fs, err, dur, raw in results:
         vr_id = vr_ids[vendor]
+        raw_path = _save_raw(vr_id, raw)
         if err is not None:
             errors.append(f"{vendor}: {err}")
-            review_repo.finish_vendor_result(conn, vr_id, error=err, duration_ms=dur)
+            review_repo.finish_vendor_result(
+                conn, vr_id, error=err, duration_ms=dur, raw_path=raw_path
+            )
         else:
             succeeded += 1
-            review_repo.finish_vendor_result(conn, vr_id, duration_ms=dur)
+            review_repo.finish_vendor_result(
+                conn, vr_id, duration_ms=dur, raw_path=raw_path
+            )
             for f in fs:
                 f.vendor_result_id = vr_id  # ★개정: id() 매핑 제거, 명시 부착
                 findings.append((vr_id, f))
     return findings, succeeded, errors
 
 
+def _save_raw(vr_id, raw):
+    """벤더 원문 stdout을 파일로 보존하고 경로 반환. best-effort — 저장 실패가
+    리뷰 결과 기록을 깨지 않는다(None 반환 = raw_path 미기록)."""
+    if not raw:
+        return None
+    try:
+        config.RAW_DIR.mkdir(parents=True, exist_ok=True)
+        path = config.RAW_DIR / f"vr{vr_id}.txt"
+        path.write_text(raw, encoding="utf-8")
+        return str(path)
+    except OSError:
+        return None
+
+
 async def _run_vendor(ad, prompts, *, pool, wt, hp, rt):
     """한 벤더로 청크별 순차 리뷰 후 finding 집계. 전 청크 실패만 벤더 실패로 본다
-    (부분 성공 = 성공). _execute_run과 retry_pr이 공유."""
+    (부분 성공 = 성공). _execute_run과 retry_pr이 공유. raw는 파싱 여부와 무관하게
+    청크별 원문 stdout을 모은 것(파싱 실패 진단용)."""
     t0 = time.monotonic()
-    collected, errs = [], []
+    collected, errs, raws = [], [], []
     for p in prompts:
 
         async def job(p=p):
             return await ad.review(
-                prompt=p, workdir=Path(str(wt)), harness=hp, runtime_dir=rt
+                prompt=p,
+                workdir=Path(str(wt)),
+                harness=hp,
+                runtime_dir=rt,
+                raw_sink=raws.append,
             )
 
         try:
@@ -382,9 +406,10 @@ async def _run_vendor(ad, prompts, *, pool, wt, hp, rt):
         except Exception as e:  # 청크 하나 실패가 다른 청크를 막지 않음
             errs.append(str(e))
     dur = int((time.monotonic() - t0) * 1000)
+    raw = "\n\n===== chunk =====\n\n".join(raws) if raws else ""
     if errs and len(errs) == len(prompts):  # 전 청크 실패 → 벤더 실패
-        return ad.vendor, [], "; ".join(errs), dur
-    return ad.vendor, collected, None, dur
+        return ad.vendor, [], "; ".join(errs), dur, raw
+    return ad.vendor, collected, None, dur, raw
 
 
 def _enabled_adapters(adapters, repo):

@@ -10,6 +10,8 @@ HARNESS_DIR = BASE_DIR / "harness"
 # 서비스 전용 영구 clone 루트. 리뷰는 사용자의 라이브 체크아웃이 아니라 여기 clone에서
 # worktree를 뜬다(사용자 작업 경로가 실시간으로 바뀌어도 리뷰가 영향받지 않게).
 CLONE_DIR = BASE_DIR / ".clones"
+# 벤더 원문 stdout 보존 루트(vendor_result.raw_path). 파싱 실패 진단·감사용.
+RAW_DIR = BASE_DIR / ".raw"
 
 # §10 추천 기본값
 DEFAULT_EFFORT = "medium"

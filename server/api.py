@@ -2,9 +2,10 @@ import asyncio
 import json
 import sqlite3
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from server import config
@@ -339,6 +340,20 @@ def run_vendor_results(run_id: int, conn=Depends(get_conn)):
     # ★개정 (codex v6 [MEDIUM]): 실패 벤더 노출용. 프론트 ReviewSection이
     # status='failed' 벤더에 배지를 띄워 부분 실패를 사용자에게 알린다.
     return [dict(v) for v in review_repo.list_vendor_results(conn, run_id)]
+
+
+@app.get("/api/vendor-results/{vr_id}/raw", response_class=PlainTextResponse)
+def vendor_result_raw(vr_id: int, conn=Depends(get_conn)):
+    """벤더 원문 stdout(파싱 전) 조회 — 파싱 실패·finding 왜곡 진단용."""
+    row = conn.execute(
+        "SELECT raw_path FROM vendor_result WHERE id=?", (vr_id,)
+    ).fetchone()
+    if row is None or not row["raw_path"]:
+        raise HTTPException(404, "원문 없음")
+    try:
+        return Path(row["raw_path"]).read_text(encoding="utf-8")
+    except OSError:
+        raise HTTPException(404, "원문 파일이 삭제됨") from None
 
 
 @app.post("/api/runs/{run_id}/retry-vendors", status_code=202)

@@ -54,7 +54,13 @@ class _BaseAdapter:
         raise NotImplementedError
 
     async def review(
-        self, *, prompt: str, workdir: Path, harness: HarnessProfile, runtime_dir: str
+        self,
+        *,
+        prompt: str,
+        workdir: Path,
+        harness: HarnessProfile,
+        runtime_dir: str,
+        raw_sink=None,
     ) -> list[Finding]:
         full = f"{harness.system_prompt_for(self.vendor)}\n\n{prompt}\n\n{PROMPT_SCHEMA_HINT}"
         env = harness.isolated_env(runtime_dir=runtime_dir)  # ★개정: allowlist env
@@ -64,6 +70,8 @@ class _BaseAdapter:
             cwd=str(workdir),
             timeout=self._timeout,
         )
+        if raw_sink:  # 파싱 전에 원문 보존 — 파싱 실패 진단의 유일한 단서
+            raw_sink(out)
         return parse_findings(out, vendor=self.vendor)
 
     async def verify(

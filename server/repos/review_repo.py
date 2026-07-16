@@ -85,20 +85,21 @@ def add_vendor_result(
     return cur.lastrowid
 
 
-def finish_vendor_result(conn, vr_id, *, error=None, duration_ms=None):
+def finish_vendor_result(conn, vr_id, *, error=None, duration_ms=None, raw_path=None):
     """벤더 실행 종료 반영: error가 있으면 failed, 없으면 done(+error=NULL —
-    부분 재시도 성공 시 이전 실패 흔적을 지운다; 첫 실행에선 이미 NULL이라 no-op)."""
+    부분 재시도 성공 시 이전 실패 흔적을 지운다; 첫 실행에선 이미 NULL이라 no-op).
+    raw_path는 값이 있을 때만 갱신(COALESCE — 저장 실패로 이전 원문을 지우지 않음)."""
     if error is not None:
         conn.execute(
-            "UPDATE vendor_result SET status='failed', error=?, duration_ms=? "
-            "WHERE id=?",
-            (error, duration_ms, vr_id),
+            "UPDATE vendor_result SET status='failed', error=?, duration_ms=?, "
+            "raw_path=COALESCE(?, raw_path) WHERE id=?",
+            (error, duration_ms, raw_path, vr_id),
         )
     else:
         conn.execute(
-            "UPDATE vendor_result SET status='done', error=NULL, duration_ms=? "
-            "WHERE id=?",
-            (duration_ms, vr_id),
+            "UPDATE vendor_result SET status='done', error=NULL, duration_ms=?, "
+            "raw_path=COALESCE(?, raw_path) WHERE id=?",
+            (duration_ms, raw_path, vr_id),
         )
     conn.commit()
 
@@ -132,7 +133,7 @@ def list_vendor_results(conn, run_id):
     # running 벤더는 아직 duration_ms가 없으므로 서버가 경과시간을 실시간 계산해
     # 반환한다(run_duration_ms와 동일 공식) → 상세 트레이스가 폴링만으로 틱업.
     return conn.execute(
-        """SELECT vendor, status, error, started_at,
+        """SELECT id, vendor, status, error, started_at, raw_path,
                   CASE WHEN status='running' AND started_at IS NOT NULL
                        THEN (strftime('%s','now') - strftime('%s', started_at)) * 1000
                        ELSE duration_ms END AS duration_ms

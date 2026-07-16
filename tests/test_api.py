@@ -682,3 +682,30 @@ def test_patch_skip_draft_toggle(tmp_path):
         ]
         == 1
     )
+
+
+def test_vendor_result_raw_endpoint(tmp_path):
+    client, conn = _client(tmp_path)
+    raw_file = tmp_path / "vr7.txt"
+    raw_file.write_text("벤더 원문 출력입니다", encoding="utf-8")
+    rid = conn.execute("INSERT INTO repo (full_name) VALUES ('acme/api')").lastrowid
+    pid = conn.execute(
+        "INSERT INTO pull_request (repo_id, number, head_sha) VALUES (?, 7, 's1')",
+        (rid,),
+    ).lastrowid
+    run_id = conn.execute(
+        "INSERT INTO review_run (pr_id, head_sha) VALUES (?, 's1')", (pid,)
+    ).lastrowid
+    vr_with = conn.execute(
+        "INSERT INTO vendor_result (run_id, vendor, raw_path) VALUES (?, 'claude', ?)",
+        (run_id, str(raw_file)),
+    ).lastrowid
+    vr_without = conn.execute(
+        "INSERT INTO vendor_result (run_id, vendor) VALUES (?, 'codex')", (run_id,)
+    ).lastrowid
+    conn.commit()
+
+    ok = client.get(f"/api/vendor-results/{vr_with}/raw")
+    assert ok.status_code == 200 and "벤더 원문 출력입니다" in ok.text
+    assert client.get(f"/api/vendor-results/{vr_without}/raw").status_code == 404
+    assert client.get("/api/vendor-results/99999/raw").status_code == 404

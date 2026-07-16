@@ -1674,3 +1674,73 @@ def test_build_prompt_empty_no_block():
 def test_build_prompt_with_block():
     out = _build_prompt({"number": 3, "title": "T", "author": "u"}, "DIFF", "### s\nhi")
     assert "## 외부 컨텍스트" in out and "hi" in out
+
+
+def _seed_single_pr(db, number=7, sha="sha1"):
+    rid = repo_repo.add(db, full_name="acme/api")
+    return pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=number,
+        title="t",
+        author="a",
+        head_sha=sha,
+        base_ref="main",
+        url="u",
+    )
+
+
+def test_pipeline_saves_vendor_raw_output(db, tmp_path, monkeypatch):
+    monkeypatch.setattr("server.config.RAW_DIR", tmp_path / "raw")
+    pid = _seed_single_pr(db)
+
+    class RawAdapter:
+        vendor = "claude"
+
+        async def review(self, *, raw_sink=None, **kw):
+            if raw_sink:
+                raw_sink("RAW CLAUDE STDOUT")
+            return [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[RawAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    vr = db.execute("SELECT * FROM vendor_result WHERE run_id=?", (run_id,)).fetchone()
+    assert vr["raw_path"]
+    from pathlib import Path as _P
+
+    assert "RAW CLAUDE STDOUT" in _P(vr["raw_path"]).read_text(encoding="utf-8")
+
+
+def test_pipeline_saves_raw_even_when_vendor_parse_fails(db, tmp_path, monkeypatch):
+    # 파싱 실패(벤더 failed)일수록 원문이 진단에 필요 — 실패 경로에서도 raw 보존.
+    monkeypatch.setattr("server.config.RAW_DIR", tmp_path / "raw")
+    pid = _seed_single_pr(db)
+
+    class BrokenAdapter:
+        vendor = "claude"
+
+        async def review(self, *, raw_sink=None, **kw):
+            if raw_sink:
+                raw_sink("garbled non-json output")
+            raise ValueError("응답에 JSON 블록이 없음")
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[BrokenAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+    with pytest.raises(PipelineError):  # 전 벤더 실패 → run failed
+        asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    vr = db.execute("SELECT * FROM vendor_result").fetchone()
+    assert vr["status"] == "failed" and vr["raw_path"]
+    from pathlib import Path as _P
+
+    assert "garbled" in _P(vr["raw_path"]).read_text(encoding="utf-8")

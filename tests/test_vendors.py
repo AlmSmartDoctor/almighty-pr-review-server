@@ -194,3 +194,21 @@ def test_default_runner_timeout_raises_vendor_timeout():
 def test_default_runner_nonzero_rc_surfaces_stderr():
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(_default_runner(["sh", "-c", "echo boom >&2; exit 3"], timeout=5))
+
+
+def test_adapter_review_feeds_raw_sink_before_parse(tmp_path):
+    # raw_sink는 파싱 전에 원문 stdout을 받아야 한다(파싱 실패 시에도 원문 보존).
+    hp = HarnessProfile.load("default")
+    adapter = ClaudeAdapter(runner=fake_runner("no json here"))
+    captured = []
+    with pytest.raises(Exception):
+        asyncio.run(
+            adapter.review(
+                prompt="리뷰해",
+                workdir=tmp_path,
+                harness=hp,
+                runtime_dir=str(tmp_path / "rt"),
+                raw_sink=captured.append,
+            )
+        )
+    assert captured == ["no json here"]
