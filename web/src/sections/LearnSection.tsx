@@ -7,6 +7,8 @@ import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusLine } from "@/components/status-line";
+import { Empty } from "@/components/empty";
+import { RepoTabs } from "@/components/repo-tabs";
 import {
   Table,
   TableBody,
@@ -90,43 +92,11 @@ export function LearnSection({ load }: { load?: () => Promise<RepoFeedback[]> })
 
       {repos.length > 0 ? (
         <>
-          <div
-            className="mb-5 flex gap-1 overflow-x-auto border-b border-border"
-            role="tablist"
-            aria-label="레포지토리"
-          >
-            {repos.map((r) => {
-              const isActive = active?.repo === r.repo;
-              return (
-                <button
-                  key={r.repo}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  onClick={() => setTab(r.repo)}
-                  className={cn(
-                    "-mb-px flex items-center gap-2 whitespace-nowrap border-b-2 px-3 py-2.5 text-[13.5px] font-bold transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                    isActive
-                      ? "border-primary text-primary"
-                      : "border-transparent text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {r.repo}
-                  <span
-                    className={cn(
-                      "rounded-full px-1.5 py-px text-[11px] font-bold",
-                      isActive
-                        ? "bg-brand-soft text-brand"
-                        : "bg-secondary text-foreground",
-                    )}
-                  >
-                    {r.total}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <RepoTabs
+            items={repos.map((r) => ({ key: r.repo, count: r.total }))}
+            activeKey={active?.repo ?? null}
+            onSelect={setTab}
+          />
           {active && <RepoFeedbackView data={active} />}
         </>
       ) : (
@@ -318,10 +288,3 @@ function ExampleCard({
   );
 }
 
-function Empty({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed border-border bg-card px-7 py-8 text-[13.5px] text-muted-foreground">
-      {children}
-    </div>
-  );
-}

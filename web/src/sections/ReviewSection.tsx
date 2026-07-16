@@ -9,6 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { StatusLine } from "@/components/status-line";
+import { Empty } from "@/components/empty";
+import { RepoTabs } from "@/components/repo-tabs";
+import { formatDateTime, formatDuration } from "@/lib/format";
 
 type JiraLink = { key: string; url: string };
 
@@ -188,42 +191,14 @@ export function ReviewSection(props: {
         <Button variant="outline" onClick={refresh}><RotateCw /> 새로고침</Button>
       </header>
 
-      <div
-        className="mb-5 flex gap-1 overflow-x-auto border-b border-border"
-        role="tablist"
-        aria-label="레포지토리"
-      >
-        {repos.map((r) => {
-          const count = r === "전체" ? prs.length : prs.filter((p) => p.repo === r).length;
-          const isActive = tab === r;
-          return (
-            <button
-              key={r}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
-              onClick={() => setTab(r)}
-              className={cn(
-                "-mb-px flex items-center gap-2 whitespace-nowrap border-b-2 px-3 py-2.5 text-[13.5px] font-bold transition-colors",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                isActive
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {r}
-              <span
-                className={cn(
-                  "rounded-full px-1.5 py-px text-[11px] font-bold",
-                  isActive ? "bg-brand-soft text-brand" : "bg-secondary text-foreground",
-                )}
-              >
-                {count}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+      <RepoTabs
+        items={repos.map((r) => ({
+          key: r,
+          count: r === "전체" ? prs.length : prs.filter((p) => p.repo === r).length,
+        }))}
+        activeKey={tab}
+        onSelect={setTab}
+      />
 
       <div className="mb-5 flex flex-wrap gap-2" role="group" aria-label="리뷰 상태 필터">
         {STATUS_FILTERS.map((f) => {
@@ -401,22 +376,6 @@ function reviewStatus(pr: Pr): ReviewStatusFilter | null {
   if (["queued", "running"].includes(pr.run_status ?? "")) return "inProgress";
   if (pr.run_status === "done") return "completed";
   return null;
-}
-
-function formatDuration(ms?: number | null) {
-  if (ms == null) return null;
-  if (ms < 1000) return `${ms}ms`;
-  const sec = ms / 1000;
-  return sec < 10 ? `${sec.toFixed(1)}초` : `${Math.round(sec)}초`;
-}
-
-function formatDateTime(value: string) {
-  const matched = value.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
-  if (matched) return `${matched[1]} ${matched[2]}`;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function prCreatedShort(pr: Pr) {
@@ -821,14 +780,6 @@ function DetailHead({ pr, sub, children }: {
       </div>
       {children && <div className="flex flex-wrap items-center gap-2">{children}</div>}
     </header>
-  );
-}
-
-function Empty({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed border-border bg-card px-7 py-8 text-[13.5px] text-muted-foreground">
-      {children}
-    </div>
   );
 }
 
