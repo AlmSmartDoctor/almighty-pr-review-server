@@ -50,6 +50,8 @@ type Repo = {
   vendor_claude_on?: number;
   vendor_codex_on?: number;
   merge_enabled?: number;
+  verify_singles_on?: number | null;
+  incremental_review_on?: number | null;
   harness_name?: string;
   context_static_on?: number | null;
   context_jira_on?: number | null;
@@ -379,6 +381,28 @@ function InheritSelect({ ariaLabel, value, options, inheritLabel, onChange, clas
   );
 }
 
+// 레포별 동작 토글의 3상태(상속/켜짐/꺼짐) — 컨텍스트 오버라이드와 같은 관용구.
+// null=상속(전역 기본값 표시), 1=켜짐, 0=꺼짐. onPatch로 즉시 저장한다.
+function RepoInheritToggle({ ariaLabel, value, inheritedOn, onChange }: {
+  ariaLabel: string;
+  value: number | null | undefined;
+  inheritedOn: boolean;
+  onChange: (v: number | null) => void;
+}) {
+  return (
+    <NativeSelect
+      aria-label={ariaLabel}
+      className="h-8"
+      value={value == null ? "inherit" : String(value)}
+      onChange={(e) => onChange(e.target.value === "inherit" ? null : Number(e.target.value))}
+    >
+      <option value="inherit">상속 ({inheritedOn ? "켜짐" : "꺼짐"})</option>
+      <option value="1">켜짐</option>
+      <option value="0">꺼짐</option>
+    </NativeSelect>
+  );
+}
+
 function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange }: {
   repo: Repo;
   settings: Settings;
@@ -444,6 +468,21 @@ function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange
                          value={repo.codex_effort} options={models.codex_efforts}
                          inheritLabel={`상속 (${gCodexEffort})`}
                          onChange={(v) => onPatch({ codex_effort: v })} />
+        </RepoField>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+        <RepoField label="고위험 단독 검증">
+          <RepoInheritToggle ariaLabel={`${repo.full_name} 고위험 단독 검증`}
+                             value={repo.verify_singles_on}
+                             inheritedOn={!!settings.verify_singles_on}
+                             onChange={(v) => onPatch({ verify_singles_on: v })} />
+        </RepoField>
+        <RepoField label="증분 리뷰">
+          <RepoInheritToggle ariaLabel={`${repo.full_name} 증분 리뷰`}
+                             value={repo.incremental_review_on}
+                             inheritedOn={!!settings.incremental_review_on}
+                             onChange={(v) => onPatch({ incremental_review_on: v })} />
         </RepoField>
       </div>
 

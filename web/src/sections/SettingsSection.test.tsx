@@ -223,6 +223,22 @@ test("sets per-repo provider overrides independently", async () => {
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_jira_on: 0 }));
 });
 
+test("sets per-repo verify and incremental overrides", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 };
+  const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
+    async (_id, patch) => ({ ...repo, ...patch }),
+  );
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  const verify = await screen.findByRole("combobox", { name: "acme/api 고위험 단독 검증" });
+  fireEvent.change(verify, { target: { value: "1" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { verify_singles_on: 1 }));
+
+  const incr = screen.getByRole("combobox", { name: "acme/api 증분 리뷰" });
+  fireEvent.change(incr, { target: { value: "0" } });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { incremental_review_on: 0 }));
+});
+
 test("per-repo provider override shows and restores inheritance", async () => {
   const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, context_jira_on: 0 };
   const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
