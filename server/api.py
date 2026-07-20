@@ -258,6 +258,7 @@ def learn(conn=Depends(get_conn)):
 
 
 class RepoPatch(BaseModel):
+    full_name: str | None = None
     enabled: int | None = None
     trigger_mode: str | None = None
     claude_model: str | None = None
@@ -285,7 +286,52 @@ class RepoPatch(BaseModel):
 
 @app.patch("/api/repos/{rid}")
 def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
+    current = repo_repo.get(conn, rid)
+    if current is None:
+        raise HTTPException(404, "repo not found")
     fields = body.model_dump(exclude_none=True)
+    if body.full_name is not None:
+        try:
+            fields["full_name"] = _normalize_full_name(body.full_name)
+        except ValueError:
+            raise HTTPException(400, "owner/repo 형식으로 입력하세요.")
+        duplicate = repo_repo.get_by_full_name(conn, fields["full_name"])
+        if duplicate is not None and duplicate["id"] != rid:
+            raise HTTPException(409, "이미 등록된 레포입니다.")
+        if (
+            fields["full_name"].casefold() != current["full_name"].casefold()
+            and repo_repo.has_active_work(conn, rid)
+        ):
+            raise HTTPException(409, "진행 중인 작업을 완료하거나 취소한 뒤 이름을 변경하세요")
+    if body.local_path is not None:
+        fields["local_path"] = body.local_path.strip() or None
+    if body.trigger_mode is not None and body.trigger_mode not in ("auto", "manual"):
+        raise HTTPException(400, "trigger_mode는 auto 또는 manual이어야 합니다")
+    binary_fields = (
+        "enabled",
+        "vendor_claude_on",
+        "vendor_codex_on",
+        "merge_enabled",
+        "context_static_on",
+        "context_jira_on",
+        "context_db_schema_on",
+        "context_graphify_on",
+        "context_feedback_on",
+        "verify_singles_on",
+        "incremental_review_on",
+        "skip_draft_on",
+    )
+    for key in binary_fields:
+        value = getattr(body, key)
+        if value is not None and value not in (0, 1):
+            raise HTTPException(400, f"{key}는 0 또는 1이어야 합니다")
+    if body.harness_name is not None:
+        try:
+            validate_harness_name(body.harness_name)
+        except ValueError:
+            raise HTTPException(400, "유효하지 않은 하네스 이름입니다")
+        if body.harness_name not in list_harnesses():
+            raise HTTPException(400, "존재하지 않는 하네스입니다")
     # None이 '상속(전역 기본값)으로 되돌림'을 뜻하는 필드는 exclude_none에서 되살린다.
     for key in (
         "context_static_on",
@@ -303,8 +349,21 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
     ):
         if key in body.model_fields_set and getattr(body, key) is None:
             fields[key] = None
-    repo_repo.update(conn, rid, **fields)
+    try:
+        repo_repo.update(conn, rid, **fields)
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "이미 등록된 레포입니다.")
     return dict(repo_repo.get(conn, rid))
+
+
+@app.delete("/api/repos/{rid}")
+def delete_repo(rid: int, conn=Depends(get_conn)):
+    if repo_repo.get(conn, rid) is None:
+        raise HTTPException(404, "repo not found")
+    if repo_repo.has_active_work(conn, rid):
+        raise HTTPException(409, "진행 중인 리뷰 또는 Wiki 생성을 먼저 완료하거나 취소하세요")
+    repo_repo.remove(conn, rid)
+    return {"deleted": rid}
 
 
 @app.get("/api/settings")
@@ -472,6 +531,16 @@ def health_deep(conn=Depends(get_conn), gh=Depends(get_gh)) -> dict:
     from server.health import deep_health
 
     return deep_health(conn, gh)
+
+
+@app.get("/api/repos/{rid}/readiness")
+def repo_readiness(rid: int, conn=Depends(get_conn), gh=Depends(get_gh)) -> dict:
+    from server.repo_readiness import check_repo_readiness
+
+    repo = repo_repo.get(conn, rid)
+    if repo is None:
+        raise HTTPException(404, "repo not found")
+    return check_repo_readiness(repo, gh)
 
 
 def _github_error_message(error: GitHubCliError) -> str:

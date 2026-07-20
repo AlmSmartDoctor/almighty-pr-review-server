@@ -29,6 +29,10 @@ export const api = {
     fetch("/api/repos", writeJson("POST", body)).then(json),
   patchRepo: (id: number, body: object) =>
     fetch(`/api/repos/${id}`, writeJson("PATCH", body)).then(json),
+  deleteRepo: (id: number) =>
+    fetch(`/api/repos/${id}`, { method: "DELETE" }).then(json),
+  repoReadiness: (id: number) =>
+    fetch(`/api/repos/${id}/readiness`).then(json),
   overview: () => fetch("/api/overview").then(json),
   wiki: () => fetch("/api/wiki").then(json),
   refreshWiki: (repoId: number) =>

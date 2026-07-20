@@ -64,14 +64,21 @@ if command -v gh >/dev/null 2>&1; then
 else
   bad "gh 없음" "brew install gh"
 fi
+vendor_count=0
 for cli in claude codex; do
   if command -v "$cli" >/dev/null 2>&1; then
     ok "$cli ($(command -v "$cli"))"
+    vendor_count=$((vendor_count+1))
   else
-    bad "$cli 없음 (PATH)" "$cli CLI 설치 및 로그인"
+    note "$cli 없음 (해당 vendor를 쓸 때 필요)" "$cli CLI 설치 또는 설정에서 해당 vendor 끄기"
   fi
 done
-note "claude/codex 인증은 리뷰 시점에 격리 하네스가 키체인/auth.json에서 주입 — 여기선 존재만 점검"
+if [ "$vendor_count" -eq 0 ]; then
+  bad "Claude/Codex CLI가 모두 없음" "최소 하나의 vendor CLI 설치 및 로그인"
+else
+  ok "리뷰 vendor CLI 최소 1개 사용 가능"
+fi
+note "vendor 인증은 리뷰 시점에 격리 하네스가 키체인/auth.json에서 주입 — 여기선 존재만 점검"
 
 sec "하네스 프로파일 (harness/default)"
 for f in config.json tools-allowlist.json review-system-prompt.md; do

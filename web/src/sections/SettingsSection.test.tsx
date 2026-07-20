@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
 import { SettingsSection } from "./SettingsSection";
 
@@ -15,6 +15,20 @@ const contextSettings = {
   context_static_on: 0, context_jira_on: 0,
   context_db_schema_on: 0, context_graphify_on: 0,
 };
+
+beforeEach(() => {
+  vi.spyOn(api, "repoReadiness").mockImplementation(async (repoId) => ({
+    repo_id: repoId,
+    repo: "acme/api",
+    ready: true,
+    checks: {
+      github: { ok: true, message: "GitHub 접근 가능" },
+      source: { ok: true, message: "서비스 전용 clone 사용" },
+      harness: { ok: true, message: "하네스 확인됨" },
+      vendors: { ok: true, message: "활성 vendor CLI 확인됨" },
+    },
+  }));
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -138,7 +152,7 @@ test("renders repositories and toggles enabled state", async () => {
     { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1 },
   ]} />);
 
-  expect(await screen.findByText("acme/api")).toBeInTheDocument();
+  expect(await screen.findByRole("textbox", { name: "acme/api 레포 이름" })).toHaveValue("acme/api");
   expect(screen.getByDisplayValue("/work/acme-api")).toBeInTheDocument();
 
   const toggle = screen.getByRole("switch", { name: "활성" });
@@ -147,6 +161,65 @@ test("renders repositories and toggles enabled state", async () => {
   expect(toggle).not.toBeChecked();
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { enabled: 0 }));
 });
+
+test("shows repository readiness failures and can recheck", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: "/bad/path", enabled: 1 };
+  const check = vi.mocked(api.repoReadiness)
+    .mockResolvedValueOnce({
+      repo_id: 7,
+      repo: "acme/api",
+      ready: false,
+      checks: {
+        github: { ok: true, message: "GitHub 접근 가능" },
+        source: { ok: false, message: "로컬 경로가 Git 저장소가 아닙니다" },
+      },
+    })
+    .mockResolvedValueOnce({
+      repo_id: 7,
+      repo: "acme/api",
+      ready: true,
+      checks: { source: { ok: true, message: "로컬 Git 저장소 확인됨" } },
+    });
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  expect(await screen.findByText("로컬 경로가 Git 저장소가 아닙니다")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "준비 상태 다시 검사" }));
+
+  expect(await screen.findByText("리뷰 준비 완료")).toBeInTheDocument();
+  expect(check).toHaveBeenCalledTimes(2);
+});
+
+test("renames and deletes a registered repository", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: null, enabled: 1 };
+  vi.spyOn(api, "patchRepo").mockImplementation(
+    async (_id, patch) => ({ ...repo, ...patch }),
+  );
+  const remove = vi.spyOn(api, "deleteRepo").mockResolvedValue({ deleted: 7 });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  const name = await screen.findByRole("textbox", { name: "acme/api 레포 이름" });
+  fireEvent.change(name, { target: { value: "acme/backend" } });
+  fireEvent.blur(name);
+  await waitFor(() => expect(api.patchRepo).toHaveBeenCalledWith(7, { full_name: "acme/backend" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "레포 삭제" }));
+  await waitFor(() => expect(remove).toHaveBeenCalledWith(7));
+  expect(screen.queryByRole("textbox", { name: /레포 이름/ })).not.toBeInTheDocument();
+});
+
+test("shows actionable repository registration errors", async () => {
+  vi.spyOn(api, "addRepo").mockRejectedValue(new Error("이미 등록된 레포입니다."));
+  render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+
+  fireEvent.change(await screen.findByPlaceholderText("owner/repo"), {
+    target: { value: "acme/api" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "등록" }));
+
+  expect(await screen.findByText(/이미 등록된 레포입니다/)).toBeInTheDocument();
+});
+
 
 test("adds a repository and refreshes the repository list", async () => {
   vi.spyOn(api, "addRepo").mockResolvedValue({});
@@ -171,7 +244,7 @@ test("adds a repository and refreshes the repository list", async () => {
       local_path: "/work/acme-web",
     });
   });
-  expect(await screen.findByText("acme/web")).toBeInTheDocument();
+  expect(await screen.findByRole("textbox", { name: "acme/web 레포 이름" })).toHaveValue("acme/web");
 });
 
 test("renders external context toggles", async () => {

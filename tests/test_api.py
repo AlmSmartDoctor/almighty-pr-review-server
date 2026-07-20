@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from server.api import app, get_conn
+from server.api import app, get_conn, get_gh
 from server.db import connect, init_schema
 
 
@@ -24,6 +24,27 @@ def test_add_and_list_repos(tmp_path):
     assert r.status_code == 201
     lst = client.get("/api/repos").json()
     assert lst[0]["full_name"] == "acme/api"
+
+
+def test_repo_readiness_endpoint_checks_registered_repo(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path)
+    rid = client.post("/api/repos", json={"full_name": "acme/api"}).json()["id"]
+
+    class Gh:
+        def preflight_repo(self, full_name):
+            return {"full_name": full_name}
+
+    app.dependency_overrides[get_gh] = lambda: Gh()
+    monkeypatch.setattr("server.repo_readiness.list_harnesses", lambda: ["default"])
+    monkeypatch.setattr(
+        "server.repo_readiness.shutil.which", lambda command: f"/bin/{command}"
+    )
+
+    response = client.get(f"/api/repos/{rid}/readiness")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
+    assert client.get("/api/repos/999/readiness").status_code == 404
 
 
 def test_list_models_from_backend(tmp_path):
@@ -124,6 +145,105 @@ def test_add_repo_duplicate_returns_409(tmp_path):
     client, _ = _client(tmp_path)
     assert client.post("/api/repos", json={"full_name": "acme/api"}).status_code == 201
     assert client.post("/api/repos", json={"full_name": "acme/api"}).status_code == 409
+
+
+def test_patch_repo_renames_and_validates_repository(tmp_path):
+    client, _ = _client(tmp_path)
+    first = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    client.post("/api/repos", json={"full_name": "acme/web"}).raise_for_status()
+
+    renamed = client.patch(
+        f"/api/repos/{first['id']}",
+        json={"full_name": "https://github.com/acme/backend.git"},
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["full_name"] == "acme/backend"
+    assert client.patch(f"/api/repos/{first['id']}", json={"full_name": "bad"}).status_code == 400
+    assert client.patch(f"/api/repos/{first['id']}", json={"full_name": "ACME/WEB"}).status_code == 409
+    assert client.patch("/api/repos/999", json={"enabled": 0}).status_code == 404
+    assert client.patch(f"/api/repos/{first['id']}", json={"enabled": 2}).status_code == 400
+
+
+def test_delete_repo_removes_all_dependent_data(tmp_path):
+    client, conn = _client(tmp_path)
+    rid = client.post("/api/repos", json={"full_name": "acme/api"}).json()["id"]
+    pr_id = conn.execute(
+        "INSERT INTO pull_request (repo_id, number, head_sha) VALUES (?, 1, 'sha')",
+        (rid,),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO pre_screen (pr_id, head_sha, created_at) VALUES (?, 'sha', datetime('now'))",
+        (pr_id,),
+    )
+    run_id = conn.execute(
+        "INSERT INTO review_run (pr_id, head_sha, status) VALUES (?, 'sha', 'done')",
+        (pr_id,),
+    ).lastrowid
+    vendor_id = conn.execute(
+        "INSERT INTO vendor_result (run_id, vendor, status) VALUES (?, 'claude', 'done')",
+        (run_id,),
+    ).lastrowid
+    finding_id = conn.execute(
+        "INSERT INTO finding (run_id, vendor_result_id, vendor, status) VALUES (?, ?, 'claude', 'approved')",
+        (run_id, vendor_id),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO finding_decision (finding_id, to_status, decided_at) VALUES (?, 'approved', datetime('now'))",
+        (finding_id,),
+    )
+    conn.execute(
+        "INSERT INTO posted_comment (run_id, vendor) VALUES (?, 'claude')", (run_id,)
+    )
+    conn.execute(
+        "INSERT INTO slack_post (run_id, channel, ts, posted_at) VALUES (?, 'c', '1', datetime('now'))",
+        (run_id,),
+    )
+    conn.execute(
+        "INSERT INTO feedback_signal (run_id, source, slack_user, reaction, verdict, created_at) VALUES (?, 'slack', 'u', 'thumbsup', 'positive', datetime('now'))",
+        (run_id,),
+    )
+    conn.execute(
+        "INSERT INTO review_job (pr_id, head_sha, status) VALUES (?, 'sha', 'done')",
+        (pr_id,),
+    )
+    conn.execute(
+        "INSERT INTO wiki_page (repo_id, status, updated_at) VALUES (?, 'ready', datetime('now'))",
+        (rid,),
+    )
+    conn.commit()
+
+    response = client.delete(f"/api/repos/{rid}")
+
+    assert response.status_code == 200
+    assert client.get("/api/repos").json() == []
+    for table in (
+        "pull_request", "pre_screen", "review_run", "vendor_result", "finding",
+        "finding_decision", "posted_comment", "slack_post", "feedback_signal",
+        "review_job", "wiki_page",
+    ):
+        assert conn.execute(f"SELECT COUNT(*) n FROM {table}").fetchone()["n"] == 0
+
+
+def test_delete_repo_rejects_active_work_and_missing_repo(tmp_path):
+    client, conn = _client(tmp_path)
+    rid = client.post("/api/repos", json={"full_name": "acme/api"}).json()["id"]
+    pr_id = conn.execute(
+        "INSERT INTO pull_request (repo_id, number, head_sha) VALUES (?, 1, 'sha')",
+        (rid,),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO review_job (pr_id, head_sha, status) VALUES (?, 'sha', 'running')",
+        (pr_id,),
+    )
+    conn.commit()
+
+    assert client.delete(f"/api/repos/{rid}").status_code == 409
+    assert (
+        client.patch(f"/api/repos/{rid}", json={"full_name": "acme/backend"}).status_code
+        == 409
+    )
+    assert client.delete("/api/repos/999").status_code == 404
 
 
 def test_post_endpoints_missing_ids_return_404(tmp_path):

@@ -2,6 +2,8 @@ import sqlite3
 
 
 def add(conn: sqlite3.Connection, *, full_name: str, **overrides) -> int:
+    if get_by_full_name(conn, full_name) is not None:
+        raise sqlite3.IntegrityError("repo full_name already exists")
     cur = conn.execute("INSERT INTO repo (full_name) VALUES (?)", (full_name,))
     conn.commit()
     rid = cur.lastrowid
@@ -26,6 +28,7 @@ def list_enabled(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 ALLOWED = {
+    "full_name",
     "enabled",
     "trigger_mode",
     "claude_model",
@@ -51,6 +54,52 @@ ALLOWED = {
     "incremental_review_on",
     "skip_draft_on",
 }
+
+
+def has_active_work(conn: sqlite3.Connection, rid: int) -> bool:
+    row = conn.execute(
+        """SELECT EXISTS(
+             SELECT 1 FROM review_job j
+             JOIN pull_request p ON p.id=j.pr_id
+             WHERE p.repo_id=? AND j.status IN ('queued', 'running')
+           ) OR EXISTS(
+             SELECT 1 FROM wiki_page w
+             WHERE w.repo_id=? AND w.status='generating'
+           ) AS active""",
+        (rid, rid),
+    ).fetchone()
+    return bool(row["active"])
+
+
+def remove(conn: sqlite3.Connection, rid: int) -> bool:
+    """레포와 종속 리뷰 데이터를 FK 순서에 맞춰 한 transaction으로 제거한다."""
+    if get(conn, rid) is None:
+        return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        params = (rid,)
+        run_ids = "SELECT rr.id FROM review_run rr JOIN pull_request p ON p.id=rr.pr_id WHERE p.repo_id=?"
+        finding_ids = (
+            "SELECT f.id FROM finding f JOIN review_run rr ON rr.id=f.run_id "
+            "JOIN pull_request p ON p.id=rr.pr_id WHERE p.repo_id=?"
+        )
+        pr_ids = "SELECT id FROM pull_request WHERE repo_id=?"
+        conn.execute(
+            f"DELETE FROM finding_decision WHERE finding_id IN ({finding_ids})", params
+        )
+        for table in ("feedback_signal", "slack_post", "posted_comment", "finding", "vendor_result"):
+            conn.execute(f"DELETE FROM {table} WHERE run_id IN ({run_ids})", params)
+        conn.execute(f"DELETE FROM review_job WHERE pr_id IN ({pr_ids})", params)
+        conn.execute(f"DELETE FROM review_run WHERE id IN ({run_ids})", params)
+        conn.execute(f"DELETE FROM pre_screen WHERE pr_id IN ({pr_ids})", params)
+        conn.execute("DELETE FROM pull_request WHERE repo_id=?", params)
+        conn.execute("DELETE FROM wiki_page WHERE repo_id=?", params)
+        conn.execute("DELETE FROM repo WHERE id=?", params)
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def update(conn: sqlite3.Connection, rid: int, **fields) -> None:

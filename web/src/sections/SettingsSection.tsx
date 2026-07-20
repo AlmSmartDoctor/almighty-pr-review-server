@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
-import { Plus, RotateCcw, Save } from "lucide-react";
+import { Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { PageHead } from "@/components/page-head";
 import { StatusLine } from "@/components/status-line";
@@ -72,6 +72,13 @@ const CONTEXT_TOGGLES: { key: ContextToggleKey; label: string }[] = [
   { key: "context_feedback_on", label: "과거 판정 반영" },
 ];
 
+type RepoReadiness = {
+  repo_id: number;
+  repo: string;
+  ready: boolean;
+  checks: Record<string, { ok: boolean; message: string }>;
+};
+
 type Models = {
   claude: string[];
   codex: string[];
@@ -91,16 +98,30 @@ const FALLBACK_MODELS: Models = {
 const optionsWith = (known: string[], current: string) =>
   current && !known.includes(current) ? [current, ...known] : known;
 
-export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: {
+const errorMessage = (cause: unknown, fallback: string) =>
+  cause instanceof Error ? cause.message : fallback;
+
+export function SettingsSection({
+  load,
+  loadRepos,
+  loadHarnesses,
+  loadModels,
+  checkReadiness,
+  removeRepo,
+}: {
   load?: () => Promise<Settings>;
   loadRepos?: () => Promise<Repo[]>;
   loadHarnesses?: () => Promise<string[]>;
   loadModels?: () => Promise<Models>;
+  checkReadiness?: (repoId: number) => Promise<RepoReadiness>;
+  removeRepo?: (repoId: number) => Promise<unknown>;
 }) {
   const loader = load ?? api.settings;
   const repoLoader = loadRepos ?? api.repos;
   const harnessLoader = loadHarnesses ?? api.harnesses;
   const modelsLoader = loadModels ?? api.models;
+  const readinessLoader = checkReadiness ?? api.repoReadiness;
+  const repoRemover = removeRepo ?? api.deleteRepo;
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -108,9 +129,28 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
   const [models, setModels] = useState<Models>(FALLBACK_MODELS);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
+  const [readiness, setReadiness] = useState<Record<number, RepoReadiness>>({});
+  const [checking, setChecking] = useState<Record<number, boolean>>({});
 
   const refreshRepos = () =>
     Promise.resolve().then(repoLoader).then(setRepos).catch(() => setErr("레포 목록을 불러오지 못했습니다."));
+
+  const inspectRepo = (repoId: number) => {
+    setChecking((current) => ({ ...current, [repoId]: true }));
+    return Promise.resolve()
+      .then(() => readinessLoader(repoId))
+      .then((result) => setReadiness((current) => ({ ...current, [repoId]: result })))
+      .catch((cause) => setReadiness((current) => ({
+        ...current,
+        [repoId]: {
+          repo_id: repoId,
+          repo: "",
+          ready: false,
+          checks: { api: { ok: false, message: errorMessage(cause, "준비 상태 확인 실패") } },
+        },
+      })))
+      .finally(() => setChecking((current) => ({ ...current, [repoId]: false })));
+  };
 
   useEffect(() => {
     loader().then((s) => { setSettings(s); setDraft(s); }).catch(() => setErr("설정을 불러오지 못했습니다."));
@@ -123,6 +163,12 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
     // 서버에서 선택 가능한 모델 목록을 주입받는다. 실패하면 폴백 목록 유지.
     Promise.resolve().then(modelsLoader).then(setModels).catch(() => setModels(FALLBACK_MODELS));
   }, []);
+  const repoIds = repos.map((repo) => repo.id).join(",");
+  useEffect(() => {
+    for (const repo of repos) {
+      if (!readiness[repo.id] && !checking[repo.id]) void inspectRepo(repo.id);
+    }
+  }, [repoIds]);
 
   if (!draft || !settings) return <p className="text-sm text-muted-foreground">불러오는 중...</p>;
 
@@ -170,8 +216,30 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
       .then((updated) => {
         setRepos((rs) => rs.map((r) => (r.id === repo.id ? updated : r)));
         setStatus("레포 설정을 저장했습니다.");
+        void inspectRepo(repo.id);
       })
-      .catch(() => { setRepos(prev); setErr("레포 설정 저장에 실패했습니다."); });
+      .catch((cause) => {
+        setRepos(prev);
+        setErr(`레포 설정 저장 실패: ${errorMessage(cause, "알 수 없는 오류")}`);
+      });
+  };
+
+  const deleteRegisteredRepo = async (repo: Repo) => {
+    if (!window.confirm(`${repo.full_name} 레포와 저장된 리뷰 데이터를 삭제할까요?`)) return;
+    setErr("");
+    setStatus("");
+    try {
+      await repoRemover(repo.id);
+      setRepos((current) => current.filter((item) => item.id !== repo.id));
+      setReadiness((current) => {
+        const next = { ...current };
+        delete next[repo.id];
+        return next;
+      });
+      setStatus(`${repo.full_name} 레포를 삭제했습니다.`);
+    } catch (cause) {
+      setErr(`레포 삭제 실패: ${errorMessage(cause, "알 수 없는 오류")}`);
+    }
   };
 
   return (
@@ -198,6 +266,10 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
                   settings={settings}
                   models={models}
                   harnessNames={harnessNames}
+                  readiness={readiness[r.id]}
+                  checking={!!checking[r.id]}
+                  onCheck={() => { void inspectRepo(r.id); }}
+                  onDelete={() => { void deleteRegisteredRepo(r); }}
                   onPatch={(patch) => patchRepo(r, patch)}
                   onLocalChange={(patch) => setRepos((rs) => rs.map((x) => (x.id === r.id ? { ...x, ...patch } : x)))}
                 />
@@ -407,11 +479,49 @@ function RepoInheritToggle({ ariaLabel, value, inheritedOn, onChange }: {
   );
 }
 
-function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange }: {
+function CommitInput({ ariaLabel, value, onCommit }: {
+  ariaLabel: string;
+  value: string;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  return (
+    <Input
+      aria-label={ariaLabel}
+      className="h-8 min-w-40 max-w-80 font-mono text-[13px] font-semibold"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => {
+        const next = draft.trim();
+        if (next && next !== value) onCommit(next);
+        else setDraft(value);
+      }}
+    />
+  );
+}
+
+
+function RepoCard({
+  repo,
+  settings,
+  models,
+  harnessNames,
+  readiness,
+  checking,
+  onCheck,
+  onDelete,
+  onPatch,
+  onLocalChange,
+}: {
   repo: Repo;
   settings: Settings;
   models: Models;
   harnessNames: string[];
+  readiness?: RepoReadiness;
+  checking: boolean;
+  onCheck: () => void;
+  onDelete: () => void;
   onPatch: (patch: Partial<Repo>) => void;
   onLocalChange: (patch: Partial<Repo>) => void;
 }) {
@@ -424,8 +534,17 @@ function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange
   const gCodexEffort = settings.codex_effort || settings.default_effort || "medium";
   return (
     <div className="rounded-lg border border-border p-4">
-      <div className="flex items-center justify-between gap-3">
-        <span className="font-mono text-[13px] font-semibold">{repo.full_name}</span>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <CommitInput
+            ariaLabel={`${repo.full_name} 레포 이름`}
+            value={repo.full_name}
+            onCommit={(value) => onPatch({ full_name: value })}
+          />
+          <Badge variant={checking ? "neutral" : readiness?.ready ? "ok" : "warn"}>
+            {checking ? "확인 중" : readiness?.ready ? "리뷰 준비 완료" : "준비 확인 필요"}
+          </Badge>
+        </div>
         <div className="flex items-center gap-4">
           <RepoToggle
             label="자동 리뷰"
@@ -435,6 +554,22 @@ function RepoCard({ repo, settings, models, harnessNames, onPatch, onLocalChange
           <RepoToggle label="활성" checked={!!repo.enabled} onChange={(v) => onPatch({ enabled: v })} />
         </div>
       </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" onClick={onCheck} disabled={checking}>
+          <RefreshCw className={checking ? "animate-spin" : ""} /> 준비 상태 다시 검사
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onDelete}>
+          <Trash2 /> 레포 삭제
+        </Button>
+      </div>
+      {readiness && !readiness.ready && (
+        <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[11.5px] text-danger">
+          {Object.entries(readiness.checks)
+            .filter(([, check]) => !check.ok)
+            .map(([key, check]) => <li key={key}>{check.message}</li>)}
+        </ul>
+      )}
 
       <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2">
         <RepoToggle label="Claude" checked={repo.vendor_claude_on !== 0} onChange={(v) => onPatch({ vendor_claude_on: v })} />
@@ -606,7 +741,7 @@ function RepoForm({ onAdded }: { onAdded: () => void }) {
     setErr("");
     api.addRepo({ full_name, local_path: localPath.trim() || undefined })
       .then(() => { setFullName(""); setLocalPath(""); onAdded(); })
-      .catch(() => setErr("등록 실패"));
+      .catch((cause) => setErr(`등록 실패: ${errorMessage(cause, "알 수 없는 오류")}`));
   };
   return (
     <div className="flex flex-wrap items-center gap-2">
