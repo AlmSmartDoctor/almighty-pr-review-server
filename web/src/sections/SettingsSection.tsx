@@ -296,7 +296,7 @@ export function SettingsSection({ load, loadRepos, loadHarnesses, loadModels }: 
             URL·토큰 등 자격 증명은 서버 환경 변수로만 설정됩니다. 이 화면에서는 소스 사용 여부만 켜고 끕니다.
           </StatusLine>
           <div className="divide-y divide-border">
-            <Field title="참조 문서" help="레포 내 지정 파일을 리뷰 프롬프트에 주입">
+            <Field title="참조 문서" help="변경 경로의 AGENTS.md·CLAUDE.md를 자동 탐색하고 지정한 고정 문서도 리뷰에 주입">
               <Switch aria-label="참조 문서" checked={!!draft.context_static_on}
                       onCheckedChange={(v) => setDraft({ ...draft, context_static_on: v ? 1 : 0 })} />
             </Field>
@@ -570,11 +570,11 @@ function ContextOverride({ repo, settings, onPatch, onLocalChange }: {
       </div>
       <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="w-14 shrink-0">참조문서</span>
+          <span className="w-14 shrink-0">고정문서</span>
           <Input
             aria-label={`${repo.full_name} 참조 문서 경로`}
             className="h-7 min-w-0 text-[11px]"
-            placeholder="레포 내 .md 경로"
+            placeholder="항상 포함할 레포 내 .md 경로 (선택)"
             value={repo.static_context_path ?? ""}
             onChange={(e) => onLocalChange({ static_context_path: e.target.value })}
             onBlur={(e) => onPatch({ static_context_path: e.target.value })}

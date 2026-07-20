@@ -159,6 +159,73 @@ def test_static_reads_from_req_workdir_overriding_ctor_root(tmp_path):
     assert r.status == "ok" and "PR-head 노트" in r.text
 
 
+def test_static_discovers_reference_documents_for_changed_file_ancestors(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    (tmp_path / "AGENTS.md").write_text("root rules")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "CLAUDE.md").write_text("root claude rules")
+    (tmp_path / "packages" / "api" / "src").mkdir(parents=True)
+    (tmp_path / "packages" / "CLAUDE.md").write_text("packages rules")
+    (tmp_path / "packages" / "api" / "AGENTS.md").write_text("api rules")
+    (tmp_path / "unrelated").mkdir()
+    (tmp_path / "unrelated" / "AGENTS.md").write_text("unrelated rules")
+
+    r = StaticContextProvider(path=None, root=str(tmp_path)).fetch(
+        _req(changed_files=("packages/api/src/users.py",))
+    )
+
+    assert r.status == "ok"
+    assert "root rules" in r.text
+    assert "root claude rules" in r.text
+    assert "packages rules" in r.text
+    assert "api rules" in r.text
+    assert "unrelated rules" not in r.text
+    assert r.text.index("root claude rules") < r.text.index(
+        "packages rules"
+    ) < r.text.index("api rules")
+    assert "packages/api/src/users.py" in r.text
+
+
+def test_static_deduplicates_shared_ancestor_documents(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "AGENTS.md").write_text("shared src rules")
+    r = StaticContextProvider(path=None, root=str(tmp_path)).fetch(
+        _req(changed_files=("src/a.py", "src/b.py"))
+    )
+
+    assert r.text.count("### Reference: src/AGENTS.md") == 1
+    assert "- src/a.py" in r.text and "- src/b.py" in r.text
+
+
+def test_static_discovers_root_documents_without_changed_files(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    (tmp_path / "CLAUDE.md").write_text("repository rules")
+    r = StaticContextProvider(path=None, root=str(tmp_path)).fetch(_req())
+
+    assert r.status == "ok" and "repository rules" in r.text
+
+
+def test_static_combines_configured_document_with_discovered_documents(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "review.md").write_text("fixed review guide")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "AGENTS.md").write_text("scoped source guide")
+
+    r = StaticContextProvider(path="docs/review.md", root=str(tmp_path)).fetch(
+        _req(changed_files=("src/app.py",))
+    )
+
+    assert "fixed review guide" in r.text
+    assert "scoped source guide" in r.text
+    assert "repository-wide (configured document)" in r.text
+
+
 def test_file_project_source_reads_from_req_workdir(tmp_path):
     from server.context.graphify_source import file_project_source
 

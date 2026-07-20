@@ -51,13 +51,11 @@ def _compose_sources(*sources):
 def build_context_provider(repo, settings):
     """활성 프로바이더 조립. 생성은 절대 예외를 밖으로 던지지 않는다(B-INV-4/D6)."""
     providers = []
-    if _effective(repo, settings, "context_static_on") and _ref(
-        repo, "static_context_path"
-    ):
+    if _effective(repo, settings, "context_static_on"):
         try:
             providers.append(
                 StaticContextProvider(
-                    path=_ref(repo, "static_context_path"), root=repo["local_path"]
+                    path=_ref(repo, "static_context_path"), root=_ref(repo, "local_path")
                 )
             )
         except Exception as e:  # 생성 실패 = 드롭+로그, never raise

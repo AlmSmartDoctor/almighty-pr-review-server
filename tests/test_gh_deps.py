@@ -65,6 +65,21 @@ def test_build_deps_includes_static_provider_when_enabled():
     assert any(isinstance(p, StaticContextProvider) for p in deps.context.providers)
 
 
+def test_build_deps_includes_static_provider_without_configured_path():
+    from server.context.static_provider import StaticContextProvider
+
+    deps = build_deps(
+        {
+            "full_name": "acme/api",
+            "local_path": "/tmp/acme",
+            "harness_name": "default",
+            "context_static_on": 1,
+        },
+        {"context_static_on": 0},
+    )
+    assert any(isinstance(p, StaticContextProvider) for p in deps.context.providers)
+
+
 def test_build_deps_includes_jira_provider_when_configured(monkeypatch):
     from server import config
     from server.context.jira_provider import JiraContextProvider
