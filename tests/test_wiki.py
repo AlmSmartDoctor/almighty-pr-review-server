@@ -6,7 +6,13 @@ from fastapi.testclient import TestClient
 from server.api import app, get_conn
 from server.db import connect, init_schema
 from server.repos import repo_repo, wiki_repo
-from server.wiki import build_prompt, parse_ground_truth, validate_page_evidence
+from server.wiki import (
+    build_database_catalog,
+    build_prompt,
+    parse_ground_truth,
+    validate_page_evidence,
+    _configured_sources,
+)
 from server.worker import run_one_wiki_job
 
 
@@ -78,13 +84,88 @@ def test_ground_truth_parser_requires_evidence():
         pass
 
 
+def test_database_catalog_parses_tables_columns_and_quoted_identifiers():
+    ddl = """
+    CREATE TABLE public.orders (
+      id BIGINT PRIMARY KEY,
+      payment_id BIGINT,
+      amount DECIMAL(10, 2),
+      CONSTRAINT fk_payment FOREIGN KEY (payment_id) REFERENCES payments(id)
+    );
+    CREATE TABLE `line_items` (
+      `order_id` BIGINT,
+      [product_id] BIGINT,
+      -- comma inside a default must not split the column
+      note VARCHAR(255) DEFAULT 'a,b',
+      PRIMARY KEY (`order_id`, [product_id])
+    );
+    """
+
+    catalog = build_database_catalog(ddl)
+
+    assert catalog["orders"] == {"id", "payment_id", "amount"}
+    assert catalog["line_items"] == {"order_id", "product_id", "note"}
+
+
+def test_configured_schema_source_records_validated_catalog_stats(tmp_path):
+    (tmp_path / "schema.sql").write_text(
+        "CREATE TABLE orders (id BIGINT, payment_id BIGINT);"
+    )
+
+    external, sources, catalog = _configured_sources(
+        {"db_schema_path": "schema.sql"}, tmp_path, "abc123"
+    )
+
+    assert "CREATE TABLE orders" in external
+    assert catalog == {"orders": {"id", "payment_id"}}
+    assert "validated 1 tables / 2 columns" in sources[1]["detail"]
+
+
+def test_ground_truth_validates_database_evidence_against_catalog(tmp_path):
+    page = json.loads(json.dumps(PAGE))
+    page["sections"][0]["facts"][0]["evidence"] = [
+        {"kind": "database", "ref": "public.orders.payment_id", "detail": "valid"},
+        {"kind": "database", "ref": "orders.missing", "detail": "invalid"},
+        {
+            "kind": "database",
+            "ref": "`orders`.`payment_id`",
+            "detail": "quoted valid",
+        },
+    ]
+
+    out = validate_page_evidence(
+        page, tmp_path, {"orders": {"id", "payment_id"}}
+    )
+    refs = [
+        evidence["ref"]
+        for evidence in out["sections"][0]["facts"][0]["evidence"]
+    ]
+
+    assert refs == ["public.orders.payment_id", "`orders`.`payment_id`"]
+
+
+def test_ground_truth_rejects_fact_when_all_database_evidence_is_invalid(tmp_path):
+    page = json.loads(json.dumps(PAGE))
+    page["sections"][0]["facts"][0]["evidence"] = [
+        {"kind": "database", "ref": "orders.missing", "detail": "invalid"}
+    ]
+
+    try:
+        validate_page_evidence(page, tmp_path, {"orders": {"id"}})
+        assert False, "무효 DB 근거만 남은 fact는 거부해야 함"
+    except ValueError:
+        pass
+
+
 def test_ground_truth_rejects_unresolvable_code_evidence(tmp_path):
     (tmp_path / "server").mkdir()
     (tmp_path / "server" / "orders.py").write_text("def confirm_order(): pass")
     page = json.loads(json.dumps(PAGE))
-    assert validate_page_evidence(page, tmp_path)["sections"][0]["facts"][0][
+    evidence = validate_page_evidence(page, tmp_path)["sections"][0]["facts"][0][
         "evidence"
-    ][0]["ref"].startswith("server/orders.py")
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["ref"].startswith("server/orders.py")
 
     broken = json.loads(json.dumps(PAGE))
     broken["sections"][0]["facts"][0]["evidence"] = [
