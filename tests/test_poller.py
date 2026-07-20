@@ -206,6 +206,50 @@ def test_poll_once_isolates_repo_failure(db):
     }
     assert polled["acme/good"] is not None  # good은 폴링 완료 기록
     assert polled["acme/bad"] is None  # bad는 실패로 미기록(다음 틱 재시도)
+    errors = {
+        r["full_name"]: r["last_poll_error"]
+        for r in db.execute(
+            "SELECT full_name, last_poll_error FROM repo"
+        ).fetchall()
+    }
+    assert errors["acme/good"] is None
+    assert "gh boom" in errors["acme/bad"]
+
+
+def test_successful_poll_clears_previous_error_and_returns_summary(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    repo_repo.update(db, rid, last_poll_error="old failure")
+
+    result = poll_once(
+        db,
+        list_prs=lambda repo: [PrInfo(7, "t", "a", "sha1", "main", "u", "open")],
+        enqueue=lambda pid: True,
+    )[0]
+    repo = repo_repo.get(db, rid)
+
+    assert result["ok"] is True
+    assert result["open_prs"] == 1
+    assert result["enqueued_jobs"] == 1
+    assert repo["last_polled_at"] is not None
+    assert repo["last_poll_error"] is None
+
+
+def test_poll_failure_redacts_secret_before_persisting(db, monkeypatch):
+    from server import config
+
+    secret = "jira-secret-token"
+    monkeypatch.setattr(config, "JIRA_API_TOKEN", secret)
+    rid = repo_repo.add(db, full_name="acme/api")
+
+    poll_once(
+        db,
+        list_prs=lambda repo: (_ for _ in ()).throw(RuntimeError(f"failed {secret}")),
+        enqueue=lambda pid: None,
+    )
+
+    error = repo_repo.get(db, rid)["last_poll_error"]
+    assert secret not in error
+    assert "[redacted]" in error
 
 
 def test_poll_loop_survives_tick_error(tmp_path, monkeypatch):

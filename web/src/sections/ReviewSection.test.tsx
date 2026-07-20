@@ -25,6 +25,9 @@ vi.mock("../api", () => ({
     triggerReview: async () => ({ job_id: 42 }),
     cancelReview: async () => ({ job_id: 42, status: "canceled" }),
     retryVendors: async () => ({ job_id: 43 }),
+    syncRepos: async () => ({
+      ok: true, repositories: 2, open_prs: 5, enqueued_jobs: 1,
+    }),
   },
 }));
 
@@ -50,6 +53,23 @@ function renderReview(
     </MemoryRouter>,
   );
 }
+
+test("synchronizes all repositories and refreshes the overview", async () => {
+  let loads = 0;
+  const syncRepos = vi.fn(async () => ({
+    ok: true, repositories: 2, open_prs: 5, enqueued_jobs: 1,
+  }));
+  renderReview({ loadPrs: async () => { loads++; return PRS; }, syncRepos });
+  await screen.findByText("fix null");
+  const before = loads;
+
+  fireEvent.click(screen.getByRole("button", { name: "GitHub PR 전체 동기화" }));
+
+  expect(await screen.findByText(/Open PR 5개, 새 리뷰 job 1개/)).toBeInTheDocument();
+  expect(syncRepos).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(loads).toBeGreaterThan(before));
+});
+
 
 test("overview lists PRs and drills into detail", async () => {
   renderReview({ loadPrs: async () => PRS,

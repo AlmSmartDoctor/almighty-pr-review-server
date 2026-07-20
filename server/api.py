@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from server import config
 from server.context import feedback_source, jira_keys
+from server.context.base import redact_secrets
 from server.context.registry import _effective
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment, build_inline_comment
@@ -147,7 +148,13 @@ def add_repo(body: RepoIn, conn=Depends(get_conn)):
 
 @app.get("/api/repos")
 def list_repos(conn=Depends(get_conn)):
-    return [dict(r) for r in conn.execute("SELECT * FROM repo").fetchall()]
+    rows = conn.execute(
+        """SELECT r.*,
+                  (SELECT COUNT(*) FROM pull_request p
+                   WHERE p.repo_id=r.id AND p.state='open') AS open_pr_count
+           FROM repo r ORDER BY r.full_name COLLATE NOCASE"""
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 @app.get("/api/overview")
@@ -543,6 +550,31 @@ def repo_readiness(rid: int, conn=Depends(get_conn), gh=Depends(get_gh)) -> dict
     return check_repo_readiness(repo, gh)
 
 
+def _enqueue_polled_pr(conn, pr_id: int) -> bool:
+    """자동 폴링 job이 새로 생성·복구됐으면 True, 기존 job이면 False."""
+    pr = pr_repo.get(conn, pr_id)
+    before = conn.execute(
+        "SELECT status, error FROM review_job WHERE pr_id=? AND head_sha=?",
+        (pr_id, pr["head_sha"]),
+    ).fetchone()
+    job_repo.enqueue(conn, pr_id=pr_id, head_sha=pr["head_sha"], trigger="auto")
+    return before is None or (
+        before["status"] == "canceled"
+        and before["error"] == job_repo.CLOSED_PR_CANCEL_ERROR
+    )
+
+
+def _sync_repo_now(conn, repo, gh) -> dict:
+    from server.poller import sync_repo
+
+    return sync_repo(
+        conn,
+        repo,
+        list_prs=gh.list_open_prs,
+        enqueue=lambda pr_id: _enqueue_polled_pr(conn, pr_id),
+    )
+
+
 def _github_error_message(error: GitHubCliError) -> str:
     if error.http_status == 401:
         return "GitHub 인증이 필요합니다. GH_TOKEN, GITHUB_TOKEN, GITHUB_PERSONAL_ACCESS_TOKEN 중 하나를 확인하세요."
@@ -560,6 +592,41 @@ def _github_error_message(error: GitHubCliError) -> str:
             )
         return "GitHub repo 또는 PR에 접근할 수 없습니다."
     return error.message
+
+
+@app.post("/api/repos/{rid}/sync")
+def sync_registered_repo(rid: int, conn=Depends(get_conn), gh=Depends(get_gh)):
+    repo = repo_repo.get(conn, rid)
+    if repo is None:
+        raise HTTPException(404, "repo not found")
+    if not repo["enabled"]:
+        raise HTTPException(409, "비활성 레포입니다. 활성화한 뒤 동기화하세요")
+    try:
+        return _sync_repo_now(conn, repo, gh)
+    except GitHubCliError as exc:
+        status = exc.http_status if exc.http_status in {401, 403, 404} else 502
+        raise HTTPException(status, _github_error_message(exc))
+    except Exception as exc:
+        raise HTTPException(502, redact_secrets(f"{type(exc).__name__}: {exc}"))
+
+
+@app.post("/api/repos/sync")
+def sync_all_registered_repos(conn=Depends(get_conn), gh=Depends(get_gh)):
+    from server.poller import poll_once
+
+    results = poll_once(
+        conn,
+        list_prs=gh.list_open_prs,
+        enqueue=lambda pr_id: _enqueue_polled_pr(conn, pr_id),
+    )
+    successful = [result for result in results if result["ok"]]
+    return {
+        "ok": all(result["ok"] for result in results),
+        "results": results,
+        "repositories": len(results),
+        "open_prs": sum(result["open_prs"] for result in successful),
+        "enqueued_jobs": sum(result["enqueued_jobs"] for result in successful),
+    }
 
 
 def _health_status_code(health: dict) -> int:

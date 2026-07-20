@@ -47,6 +47,78 @@ def test_repo_readiness_endpoint_checks_registered_repo(tmp_path, monkeypatch):
     assert client.get("/api/repos/999/readiness").status_code == 404
 
 
+def test_sync_repo_discovers_pr_and_does_not_duplicate_auto_job(tmp_path):
+    from server.github.gh import PrInfo
+
+    client, conn = _client(tmp_path)
+    rid = client.post("/api/repos", json={"full_name": "acme/api"}).json()["id"]
+
+    class Gh:
+        def list_open_prs(self, full_name):
+            return [PrInfo(7, "new", "kim", "sha1", "main", "url", "open")]
+
+    app.dependency_overrides[get_gh] = lambda: Gh()
+
+    first = client.post(f"/api/repos/{rid}/sync")
+    second = client.post(f"/api/repos/{rid}/sync")
+
+    assert first.status_code == 200
+    assert first.json()["open_prs"] == 1
+    assert first.json()["enqueued_jobs"] == 1
+    assert second.json()["enqueued_jobs"] == 0
+    assert conn.execute("SELECT COUNT(*) n FROM review_job").fetchone()["n"] == 1
+    assert client.get("/api/repos").json()[0]["open_pr_count"] == 1
+    repo = conn.execute(
+        "SELECT last_polled_at, last_poll_error FROM repo WHERE id=?", (rid,)
+    ).fetchone()
+    assert repo["last_polled_at"] is not None and repo["last_poll_error"] is None
+
+
+def test_sync_repo_rejects_disabled_and_persists_failure(tmp_path):
+    from server.repos import repo_repo
+
+    client, conn = _client(tmp_path)
+    rid = client.post("/api/repos", json={"full_name": "acme/api"}).json()["id"]
+
+    class Gh:
+        def list_open_prs(self, full_name):
+            raise RuntimeError("network down")
+
+    app.dependency_overrides[get_gh] = lambda: Gh()
+    failed = client.post(f"/api/repos/{rid}/sync")
+    assert failed.status_code == 502
+    assert "network down" in failed.json()["detail"]
+    assert "network down" in repo_repo.get(conn, rid)["last_poll_error"]
+
+    client.patch(f"/api/repos/{rid}", json={"enabled": 0}).raise_for_status()
+    assert client.post(f"/api/repos/{rid}/sync").status_code == 409
+
+
+def test_sync_all_isolates_repository_failures(tmp_path):
+    from server.github.gh import PrInfo
+    from server.repos import repo_repo
+
+    client, conn = _client(tmp_path)
+    bad = client.post("/api/repos", json={"full_name": "acme/bad"}).json()["id"]
+    good = client.post("/api/repos", json={"full_name": "acme/good"}).json()["id"]
+
+    class Gh:
+        def list_open_prs(self, full_name):
+            if full_name == "acme/bad":
+                raise RuntimeError("gh unavailable")
+            return [PrInfo(8, "ok", "kim", "sha2", "main", "url", "open")]
+
+    app.dependency_overrides[get_gh] = lambda: Gh()
+    response = client.post("/api/repos/sync")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["repositories"] == 2
+    assert response.json()["open_prs"] == 1
+    assert repo_repo.get(conn, bad)["last_poll_error"] is not None
+    assert repo_repo.get(conn, good)["last_polled_at"] is not None
+
+
 def test_list_models_from_backend(tmp_path):
     client, _ = _client(tmp_path)
     m = client.get("/api/models").json()

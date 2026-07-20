@@ -162,6 +162,32 @@ test("renders repositories and toggles enabled state", async () => {
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { enabled: 0 }));
 });
 
+test("synchronizes repository PRs and shows polling status", async () => {
+  const repo = {
+    id: 7,
+    full_name: "acme/api",
+    local_path: null,
+    enabled: 1,
+    open_pr_count: 3,
+    last_polled_at: "2026-07-20 12:00:00",
+    last_poll_error: "previous network error",
+  };
+  const sync = vi.spyOn(api, "syncRepo").mockResolvedValue({
+    open_prs: 4,
+    enqueued_jobs: 1,
+    last_polled_at: "2026-07-20 12:01:00",
+  });
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  expect(await screen.findByText(/Open PR 3개/)).toBeInTheDocument();
+  expect(screen.getByText(/previous network error/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "GitHub PR 지금 동기화" }));
+
+  expect(await screen.findByText(/Open PR 4개, 새 리뷰 job 1개/)).toBeInTheDocument();
+  expect(sync).toHaveBeenCalledWith(7);
+});
+
+
 test("shows repository readiness failures and can recheck", async () => {
   const repo = { id: 7, full_name: "acme/api", local_path: "/bad/path", enabled: 1 };
   const check = vi.mocked(api.repoReadiness)

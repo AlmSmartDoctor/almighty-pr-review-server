@@ -40,7 +40,8 @@ ALLOWED = {
     "merge_enabled",
     "harness_name",
     "local_path",
-    "last_polled_at",  # ★개정: local_path
+    "last_polled_at",
+    "last_poll_error",
     "context_static_on",
     "context_jira_on",
     "context_db_schema_on",

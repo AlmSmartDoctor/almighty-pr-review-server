@@ -43,6 +43,9 @@ type Repo = {
   full_name: string;
   local_path: string | null;
   enabled: number;
+  last_polled_at?: string | null;
+  last_poll_error?: string | null;
+  open_pr_count?: number;
   trigger_mode?: string;
   claude_model?: string | null;
   claude_effort?: string | null;
@@ -108,6 +111,7 @@ export function SettingsSection({
   loadModels,
   checkReadiness,
   removeRepo,
+  syncRepo,
 }: {
   load?: () => Promise<Settings>;
   loadRepos?: () => Promise<Repo[]>;
@@ -115,6 +119,11 @@ export function SettingsSection({
   loadModels?: () => Promise<Models>;
   checkReadiness?: (repoId: number) => Promise<RepoReadiness>;
   removeRepo?: (repoId: number) => Promise<unknown>;
+  syncRepo?: (repoId: number) => Promise<{
+    open_prs: number;
+    enqueued_jobs: number;
+    last_polled_at: string;
+  }>;
 }) {
   const loader = load ?? api.settings;
   const repoLoader = loadRepos ?? api.repos;
@@ -122,6 +131,7 @@ export function SettingsSection({
   const modelsLoader = loadModels ?? api.models;
   const readinessLoader = checkReadiness ?? api.repoReadiness;
   const repoRemover = removeRepo ?? api.deleteRepo;
+  const repoSynchronizer = syncRepo ?? api.syncRepo;
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -131,6 +141,7 @@ export function SettingsSection({
   const [err, setErr] = useState("");
   const [readiness, setReadiness] = useState<Record<number, RepoReadiness>>({});
   const [checking, setChecking] = useState<Record<number, boolean>>({});
+  const [syncing, setSyncing] = useState<Record<number, boolean>>({});
 
   const refreshRepos = () =>
     Promise.resolve().then(repoLoader).then(setRepos).catch(() => setErr("레포 목록을 불러오지 못했습니다."));
@@ -214,7 +225,7 @@ export function SettingsSection({
     setRepos((rs) => rs.map((r) => (r.id === repo.id ? { ...r, ...patch } : r)));
     api.patchRepo(repo.id, patch)
       .then((updated) => {
-        setRepos((rs) => rs.map((r) => (r.id === repo.id ? updated : r)));
+        setRepos((rs) => rs.map((r) => (r.id === repo.id ? { ...r, ...updated } : r)));
         setStatus("레포 설정을 저장했습니다.");
         void inspectRepo(repo.id);
       })
@@ -222,6 +233,24 @@ export function SettingsSection({
         setRepos(prev);
         setErr(`레포 설정 저장 실패: ${errorMessage(cause, "알 수 없는 오류")}`);
       });
+  };
+
+  const syncRegisteredRepo = async (repo: Repo) => {
+    setErr("");
+    setStatus("");
+    setSyncing((current) => ({ ...current, [repo.id]: true }));
+    try {
+      const result = await repoSynchronizer(repo.id);
+      await refreshRepos();
+      setStatus(
+        `${repo.full_name} 동기화 완료: Open PR ${result.open_prs}개, 새 리뷰 job ${result.enqueued_jobs}개`,
+      );
+    } catch (cause) {
+      setErr(`PR 동기화 실패: ${errorMessage(cause, "알 수 없는 오류")}`);
+      await refreshRepos();
+    } finally {
+      setSyncing((current) => ({ ...current, [repo.id]: false }));
+    }
   };
 
   const deleteRegisteredRepo = async (repo: Repo) => {
@@ -268,7 +297,9 @@ export function SettingsSection({
                   harnessNames={harnessNames}
                   readiness={readiness[r.id]}
                   checking={!!checking[r.id]}
+                  syncing={!!syncing[r.id]}
                   onCheck={() => { void inspectRepo(r.id); }}
+                  onSync={() => { void syncRegisteredRepo(r); }}
                   onDelete={() => { void deleteRegisteredRepo(r); }}
                   onPatch={(patch) => patchRepo(r, patch)}
                   onLocalChange={(patch) => setRepos((rs) => rs.map((x) => (x.id === r.id ? { ...x, ...patch } : x)))}
@@ -509,7 +540,9 @@ function RepoCard({
   harnessNames,
   readiness,
   checking,
+  syncing,
   onCheck,
+  onSync,
   onDelete,
   onPatch,
   onLocalChange,
@@ -520,7 +553,9 @@ function RepoCard({
   harnessNames: string[];
   readiness?: RepoReadiness;
   checking: boolean;
+  syncing: boolean;
   onCheck: () => void;
+  onSync: () => void;
   onDelete: () => void;
   onPatch: (patch: Partial<Repo>) => void;
   onLocalChange: (patch: Partial<Repo>) => void;
@@ -556,13 +591,25 @@ function RepoCard({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button size="sm" onClick={onSync} disabled={syncing || !repo.enabled}>
+          <RefreshCw className={syncing ? "animate-spin" : ""} />
+          {syncing ? "GitHub PR 동기화 중" : "GitHub PR 지금 동기화"}
+        </Button>
         <Button variant="outline" size="sm" onClick={onCheck} disabled={checking}>
           <RefreshCw className={checking ? "animate-spin" : ""} /> 준비 상태 다시 검사
         </Button>
         <Button variant="ghost" size="sm" onClick={onDelete}>
           <Trash2 /> 레포 삭제
         </Button>
+        <StatusLine inline>
+          Open PR {repo.open_pr_count ?? 0}개 · 마지막 동기화 {repo.last_polled_at ?? "없음"}
+        </StatusLine>
       </div>
+      {repo.last_poll_error && (
+        <StatusLine tone="error" className="mt-2">
+          최근 동기화 실패: {repo.last_poll_error}
+        </StatusLine>
+      )}
       {readiness && !readiness.ready && (
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[11.5px] text-danger">
           {Object.entries(readiness.checks)

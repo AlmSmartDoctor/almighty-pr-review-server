@@ -33,6 +33,10 @@ export const api = {
     fetch(`/api/repos/${id}`, { method: "DELETE" }).then(json),
   repoReadiness: (id: number) =>
     fetch(`/api/repos/${id}/readiness`).then(json),
+  syncRepo: (id: number) =>
+    fetch(`/api/repos/${id}/sync`, { method: "POST" }).then(json),
+  syncRepos: () =>
+    fetch("/api/repos/sync", { method: "POST" }).then(json),
   overview: () => fetch("/api/overview").then(json),
   wiki: () => fetch("/api/wiki").then(json),
   refreshWiki: (repoId: number) =>

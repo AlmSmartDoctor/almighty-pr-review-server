@@ -55,8 +55,18 @@ class ContextProvider(Protocol):
 
 
 def redact_secrets(text: str) -> str:
-    """config의 비밀 값(있을 때만)을 [redacted]로 치환. 빈 값은 무시(전체 치환 방지)."""
-    for secret in (config.JIRA_API_TOKEN, config.JIRA_EMAIL):
+    """config/env의 비밀 값(있을 때만)을 [redacted]로 치환. 빈 값은 무시한다."""
+    secrets_to_hide = (
+        config.JIRA_API_TOKEN,
+        config.JIRA_EMAIL,
+        config.GITHUB_WEBHOOK_SECRET,
+        config.SLACK_BOT_TOKEN,
+        config.SLACK_SIGNING_SECRET,
+        os.environ.get("GH_TOKEN", ""),
+        os.environ.get("GITHUB_TOKEN", ""),
+        os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", ""),
+    )
+    for secret in secrets_to_hide:
         if secret:
             text = text.replace(secret, "[redacted]")
     return text

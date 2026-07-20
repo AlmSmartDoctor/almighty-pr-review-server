@@ -42,11 +42,28 @@ def test_repo_has_local_path_and_job_columns(tmp_path):  # ★개정
     conn = connect(tmp_path / "test.db")
     init_schema(conn)
     repo_cols = {r[1] for r in conn.execute("PRAGMA table_info(repo)")}
-    assert "local_path" in repo_cols
+    assert {"local_path", "last_polled_at", "last_poll_error"} <= repo_cols
     job_cols = {r[1] for r in conn.execute("PRAGMA table_info(review_job)")}
     assert {"status", "attempts", "locked_by", "next_run_at"} <= job_cols
     pr_cols = {r[1] for r in conn.execute("PRAGMA table_info(pull_request)")}
     assert "created_at" in pr_cols
+
+
+def test_init_schema_migrates_repo_poll_error_column(tmp_path):
+    conn = connect(tmp_path / "test.db")
+    conn.execute(
+        """CREATE TABLE repo (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          full_name TEXT NOT NULL UNIQUE,
+          last_polled_at TEXT
+        )"""
+    )
+
+    init_schema(conn)
+    init_schema(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(repo)")}
+    assert "last_poll_error" in columns
 
 
 def test_init_schema_migrates_app_settings_review_model(tmp_path):

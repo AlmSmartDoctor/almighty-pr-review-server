@@ -1,23 +1,50 @@
 import asyncio
 
 from server import config
+from server.context.base import redact_secrets
 from server.context.registry import _effective
 from server.github.gh import GhClient
 from server.repos import pr_repo, repo_repo, settings_repo
 
 
-def poll_once(conn, *, list_prs, enqueue) -> None:
+def poll_once(conn, *, list_prs, enqueue) -> list[dict]:
     """enabled 레포별로 open PR을 upsert하고 새 head sha면 enqueue.
     레포 하나의 실패(gh 에러 등)가 뒤 레포 폴링을 막지 않게 per-repo 격리한다."""
-    settings = settings_repo.get(conn)
+    results = []
     for repo in repo_repo.list_enabled(conn):
         try:
-            _poll_repo(conn, repo, settings, list_prs=list_prs, enqueue=enqueue)
-        except Exception as e:
-            print(f"[poller] {repo['full_name']} poll failed: {e!r}")
+            results.append(sync_repo(conn, repo, list_prs=list_prs, enqueue=enqueue))
+        except Exception as exc:
+            print(f"[poller] {repo['full_name']} poll failed: {exc!r}")
+            results.append(
+                {
+                    "repo_id": repo["id"],
+                    "repo": repo["full_name"],
+                    "ok": False,
+                    "error": _poll_error(exc),
+                }
+            )
+    return results
 
 
-def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> None:
+def sync_repo(conn, repo, *, list_prs, enqueue) -> dict:
+    """레포 한 곳을 동기화하고 성공·실패 상태를 DB에 남긴다."""
+    settings = settings_repo.get(conn)
+    try:
+        return _poll_repo(
+            conn, repo, settings, list_prs=list_prs, enqueue=enqueue
+        )
+    except Exception as exc:
+        message = _poll_error(exc)
+        repo_repo.update(conn, repo["id"], last_poll_error=message)
+        raise
+
+
+def _poll_error(exc: Exception) -> str:
+    return redact_secrets(f"{type(exc).__name__}: {exc}")[:1000]
+
+
+def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> dict:
     # ★개정: PR 발견·upsert·오버뷰·재조정·last_polled_at은 모든 enabled 레포에서
     # 항상 수행하고, **enqueue(자동 리뷰)만** trigger_mode/벤더로 가드한다. manual
     # 레포도 오픈 PR이 대시보드에 발견돼 사람이 리뷰 버튼으로 트리거할 수 있고(수동
@@ -36,6 +63,7 @@ def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> None:
     }
     open_prs = list_prs(repo["full_name"])
     open_numbers = []
+    enqueued_jobs = 0
     for pr in open_prs:
         pid = pr_repo.upsert(
             conn,
@@ -60,12 +88,26 @@ def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> None:
             and not (skip_draft and pr.is_draft)
             and pr_repo.needs_review(conn, pid)
         ):
-            enqueue(pid)
+            result = enqueue(pid)
+            if result is not False:
+                enqueued_jobs += 1
     # 병합/닫힌 PR 재조정: 이 폴 이전에 열려 있었으나 gh 오픈 목록에서 사라진 것만
     # closed로. 목록이 상한에 걸려 잘렸으면(len==limit) 불완전한 셋이라 skip.
     if len(open_prs) < config.POLL_OPEN_PR_LIMIT:
         pr_repo.mark_closed(conn, repo["id"], prev_open - set(open_numbers))
-    repo_repo.update(conn, repo["id"], last_polled_at=_now(conn))
+    polled_at = _now(conn)
+    repo_repo.update(
+        conn, repo["id"], last_polled_at=polled_at, last_poll_error=None
+    )
+    return {
+        "repo_id": repo["id"],
+        "repo": repo["full_name"],
+        "ok": True,
+        "open_prs": len(open_prs),
+        "enqueued_jobs": enqueued_jobs,
+        "last_polled_at": polled_at,
+        "error": None,
+    }
 
 
 def _now(conn):

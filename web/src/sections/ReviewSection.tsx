@@ -109,6 +109,12 @@ export function ReviewSection(props: {
   loadPreview?: (runId: number) => Promise<PostPreview>;
   loadPostHealth?: (prId: number) => Promise<PostHealth>;
   loadRuns?: (prId: number) => Promise<RunSummary[]>;
+  syncRepos?: () => Promise<{
+    ok: boolean;
+    repositories: number;
+    open_prs: number;
+    enqueued_jobs: number;
+  }>;
 }) {
   const navigate = useNavigate();
   const { prId } = useParams();
@@ -117,12 +123,14 @@ export function ReviewSection(props: {
   const loadVendors = props.loadVendors ?? api.runVendorResults;
   const loadContext = props.loadContext ?? api.runContext;
   const loadPreview = props.loadPreview ?? api.runPostPreview;
+  const syncRepos = props.syncRepos ?? api.syncRepos;
   const [prs, setPrs] = useState<Pr[]>([]);
   const [tab, setTab] = useState("전체");
   const [statusFilter, setStatusFilter] = useState<ReviewStatusFilter | null>(null);
   const [error, setError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [triggeringId, setTriggeringId] = useState<number | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   const refresh = () =>
     loadPrs().then((rows) => { setPrs(rows); setError(""); }).catch(() => setError("오버뷰를 불러오지 못했습니다."));
@@ -144,6 +152,23 @@ export function ReviewSection(props: {
     ? repoScoped.filter((p) => reviewStatus(p) === statusFilter)
     : repoScoped;
   const detail = prId ? prs.find((p) => p.id === Number(prId)) ?? null : null;
+
+  const syncAllRepos = () => {
+    setSyncing(true);
+    setActionMessage("");
+    syncRepos()
+      .then((result) => {
+        setActionMessage(
+          `GitHub 동기화 완료: ${result.repositories}개 레포, Open PR ${result.open_prs}개, 새 리뷰 job ${result.enqueued_jobs}개${result.ok ? "" : " · 일부 레포 실패"}`,
+        );
+        return refresh();
+      })
+      .catch((cause) => {
+        const message = cause instanceof Error ? cause.message : "알 수 없는 오류";
+        setActionMessage(`GitHub 동기화 실패: ${message}`);
+      })
+      .finally(() => setSyncing(false));
+  };
 
   const triggerReview = (pr: Pr, e?: MouseEvent) => {
     e?.stopPropagation();
@@ -192,7 +217,13 @@ export function ReviewSection(props: {
             사전 스크리닝, 벤더 리뷰 결과, 승인 대기 상태를 한 화면에서 봅니다.
           </p>
         </div>
-        <Button variant="outline" onClick={refresh}><RotateCw /> 새로고침</Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={syncAllRepos} disabled={syncing}>
+            <RotateCw className={syncing ? "animate-spin" : ""} />
+            {syncing ? "GitHub 동기화 중" : "GitHub PR 전체 동기화"}
+          </Button>
+          <Button variant="outline" onClick={refresh}><RotateCw /> 화면 새로고침</Button>
+        </div>
       </header>
 
       <RepoTabs

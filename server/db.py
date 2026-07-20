@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS repo (
   merge_enabled INTEGER NOT NULL DEFAULT 0,
   harness_name TEXT NOT NULL DEFAULT 'default',
   local_path TEXT,                                -- ★개정: 로컬 clone 경로(worktree 소스). 등록 시 검증
-  last_polled_at TEXT
+  last_polled_at TEXT,
+  last_poll_error TEXT
 );
 CREATE TABLE IF NOT EXISTS pull_request (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,6 +160,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _ensure_column(conn, "repo", "last_poll_error", "TEXT")
     _ensure_column(conn, "pull_request", "created_at", "TEXT")
     _ensure_column(conn, "pull_request", "head_ref", "TEXT")
     _ensure_column(conn, "pull_request", "body", "TEXT")
