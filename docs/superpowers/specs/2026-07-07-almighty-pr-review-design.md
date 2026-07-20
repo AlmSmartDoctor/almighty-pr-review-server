@@ -187,7 +187,7 @@ Identity는 암묵(=나) · RunnerPool은 런타임(세마포어). team-mode/컨
 | 리뷰 대시보드 | v1 | 아래 리뷰 인터랙션(기본 화면) |
 | 하네스 편집 | v1 | 웹에서 리뷰 하네스 직접 편집 — 리뷰 system prompt·툴 allowlist·MCP·모델/effort·샌드박스 (v1=`default` 1개) |
 | 설정 | v1 | 전역 기본값(effort/동시성 N/폴링/승인게이트/사전스크리닝 모델·임계) + 레포별 설정(트리거·effort·벤더 on/off·병합·auto-post·하네스) |
-| LLM Wiki | 🔜 C (v1=스텁) | **기능은 v1 플랜 밖(서브프로젝트 C).** v1은 nav 스텁 "곧 제공"만. 실제: 누적 리뷰 지식/규칙·Graphify식 위키 |
+| LLM Wiki | C (Ground Truth MVP 구현) | 레포 코드·문서·정적 DB DDL을 read-only로 분석해 도메인·구조·데이터 모델·흐름·불변식을 근거와 함께 레포별 스냅샷으로 저장. 라이브 DB introspection·Graphify식 지식 그래프는 후속 |
 | 자가 학습 | 🔜 C (v1=스텁) | **기능은 v1 플랜 밖(서브프로젝트 C).** v1은 nav 스텁 "실험 단계"만. 실제: 승인/기각·Slack 신호 기반 학습·규칙 진화 |
 
 **리뷰 섹션 인터랙션(핵심):**

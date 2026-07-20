@@ -91,6 +91,25 @@ def test_codex_adapter_passes_model_when_set(tmp_path):
     assert args[-1] != "gpt-5.4"  # prompt는 positional로 항상 마지막
 
 
+def test_adapter_complete_runs_isolated_freeform_task(tmp_path):
+    hp = HarnessProfile.load("default")
+    runner = fake_runner("ground truth json")
+    adapter = ClaudeAdapter(runner=runner)
+    out = asyncio.run(
+        adapter.complete(
+            prompt="레포를 분석해",
+            system_prompt="Ground Truth만 작성",
+            workdir=tmp_path,
+            harness=hp,
+            runtime_dir=str(tmp_path / "rt"),
+        )
+    )
+    assert out == "ground truth json"
+    assert "Ground Truth만 작성" in runner.calls[0]["args"][2]
+    assert "레포를 분석해" in runner.calls[0]["args"][2]
+    assert "CLAUDE_CONFIG_DIR" in runner.calls[0]["env"]
+
+
 def test_adapter_verify_parses_verdict(tmp_path):
     hp = HarnessProfile.load("default")
     runner = fake_runner('검토\n```json\n{"refuted":true,"rationale":"오탐"}\n```')

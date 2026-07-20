@@ -62,6 +62,14 @@ Slack 앱 설정:
 
 수신 검증은 `X-Slack-Signature`(`v0:{timestamp}:{body}` HMAC-SHA256, raw body 기준) 상수시간 비교다. Signing Secret 미설정이면 수신 거부(503), 서명 불일치는 401, 우리가 게시하지 않은 메시지·관심 밖 이모지는 2xx로 무시한다. 반응은 우리가 게시한 메시지에만 귀속되며(다른 채널 메시지는 무시), 레포별로 격리된다. 봇 토큰/서명 시크릿은 실패 로그에서도 제거(redact)된다. PR 봇 relay와 채널이 겹치면 알림이 중복될 수 있으니 반응 수집용 채널을 분리하는 걸 권장한다. 상세: `docs/superpowers/specs/2026-07-13-subproject-c-feedback-learning.md`.
 
+## LLM Wiki — 레포 Ground Truth
+
+`/wiki`는 특정 PR의 finding을 모으는 화면이 아니라, **해당 레포 자체의 Ground Truth**를 관리한다. 레포별 `Ground Truth 생성`을 실행하면 활성 Claude/Codex CLI가 격리된 read-only worktree에서 README·docs·코드·모델/엔티티·마이그레이션을 탐색하고, 설정된 `db_schema_path`의 DDL과 프로젝트 문서를 함께 분석한다.
+
+결과는 도메인 지식·시스템 구조·데이터 모델·주요 흐름·비즈니스 불변식을 사실 단위로 저장하며, 모든 사실에 코드 파일/심볼·문서·DB 테이블/컬럼 근거가 필수다. 근거가 부족한 내용은 추측하지 않고 `확정할 수 없는 항목`으로 분리한다. 생성 시점의 commit SHA와 분석 출처도 함께 보존한다. 최신 스냅샷은 `wiki_page`에 저장되고 재생성 실패 시 기존 Ground Truth를 유지한다.
+
+현재 DB 분석 범위는 레포에 체크인된 마이그레이션/ORM 코드와 설정된 정적 DDL이다. 라이브 DB read-only introspection은 별도 안전 연결 계약이 확정된 뒤 추가한다.
+
 ## 외부 컨텍스트 / Jira 연동
 
 ### Static 컨텍스트 (외부 의존 0)

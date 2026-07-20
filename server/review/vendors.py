@@ -53,6 +53,29 @@ class _BaseAdapter:
     def _build_argv(self, prompt: str, hp: HarnessProfile) -> list[str]:
         raise NotImplementedError
 
+    async def complete(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str,
+        workdir: Path,
+        harness: HarnessProfile,
+        runtime_dir: str,
+    ) -> str:
+        """Run a read-only, isolated free-form task with this vendor.
+
+        Review finding parsing stays in review(); Ground Truth Wiki generation uses this
+        narrower primitive and validates its own structured output.
+        """
+        full = f"{system_prompt}\n\n{prompt}"
+        env = harness.isolated_env(runtime_dir=runtime_dir)
+        return await self._run(
+            self._build_argv(full, harness),
+            env=env,
+            cwd=str(workdir),
+            timeout=self._timeout,
+        )
+
     async def review(
         self,
         *,

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from server import config
 from server.context import feedback_source, jira_keys
+from server.context.base import redact_secrets
 from server.context.registry import _effective
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment, build_inline_comment
@@ -24,6 +25,7 @@ from server.repos import (
     repo_repo,
     review_repo,
     settings_repo,
+    wiki_repo,
 )
 from server.review.diff_filter import commentable_lines
 from server.review.prescreen import THRESHOLDS
@@ -37,6 +39,7 @@ from server.review.harness import (
 
 
 _initialized = False
+_wiki_generator = None
 
 
 def _ensure_schema():
@@ -213,6 +216,45 @@ def _jira_links(*texts: str | None) -> list[dict]:
     return [
         {"key": k, "url": f"{base}/browse/{k}"} for k in jira_keys.find_keys(*texts)
     ]
+
+
+def get_wiki_generator():
+    global _wiki_generator
+    if _wiki_generator is None:
+        from server.wiki import GroundTruthGenerator
+
+        _wiki_generator = GroundTruthGenerator()
+    return _wiki_generator
+
+
+@app.get("/api/wiki")
+def wiki(conn=Depends(get_conn)):
+    """레포별 최신 Ground Truth Wiki 스냅샷과 생성 상태."""
+    return wiki_repo.list_pages(conn)
+
+
+@app.post("/api/repos/{rid}/wiki/refresh")
+async def refresh_wiki(
+    rid: int,
+    conn=Depends(get_conn),
+    generator=Depends(get_wiki_generator),
+):
+    repo = repo_repo.get(conn, rid)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="repo not found")
+    settings = settings_repo.get(conn)
+    if not wiki_repo.mark_generating(conn, rid):
+        raise HTTPException(status_code=409, detail="Wiki 생성이 이미 진행 중입니다")
+    try:
+        page, sources, source_sha = await generator.generate(repo, settings)
+        wiki_repo.save(
+            conn, rid, page=page, sources=sources, source_sha=source_sha
+        )
+    except Exception as exc:
+        message = redact_secrets(f"{type(exc).__name__}: {exc}")
+        wiki_repo.mark_failed(conn, rid, message)
+        raise HTTPException(status_code=502, detail="Wiki 생성 실패: " + message)
+    return wiki_repo.get_page(conn, rid)
 
 
 @app.get("/api/learn")

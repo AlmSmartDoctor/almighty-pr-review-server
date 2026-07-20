@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS feedback_signal (
   created_at TEXT NOT NULL,
   UNIQUE(run_id, source, slack_user, reaction)     -- 한 사람·한 이모지 = 한 신호
 );
+-- 레포 Ground Truth Wiki 최신 스냅샷. content/sources는 구조화 JSON이며 사람의 finding과
+-- 분리한다. 레포 코드·문서·DB 스키마를 다시 읽어 refresh할 때 이 행을 원자적으로 교체한다.
+CREATE TABLE IF NOT EXISTS wiki_page (
+  repo_id INTEGER PRIMARY KEY REFERENCES repo(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'empty',            -- empty|generating|ready|failed
+  content TEXT,
+  sources TEXT,
+  source_sha TEXT,
+  generated_at TEXT,
+  error TEXT,
+  updated_at TEXT NOT NULL
+);
 -- ★개정: 스케줄링 상태(review_job)와 실행 이력(review_run) 분리.
 CREATE TABLE IF NOT EXISTS review_job (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
