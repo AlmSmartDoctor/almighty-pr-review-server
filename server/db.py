@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS wiki_page (
   source_sha TEXT,
   generated_at TEXT,
   error TEXT,
+  locked_by TEXT,
+  locked_at TEXT,
   updated_at TEXT NOT NULL
 );
 -- ★개정: 스케줄링 상태(review_job)와 실행 이력(review_run) 분리.
@@ -159,6 +161,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "pull_request", "body", "TEXT")
     _ensure_column(conn, "pull_request", "is_draft", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "review_job", "retry_run_id", "INTEGER")
+    _ensure_column(conn, "wiki_page", "locked_by", "TEXT")
+    _ensure_column(conn, "wiki_page", "locked_at", "TEXT")
     _ensure_column(
         conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
     )

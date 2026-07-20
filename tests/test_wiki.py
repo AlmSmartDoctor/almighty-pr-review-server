@@ -1,11 +1,13 @@
+import asyncio
 import json
 
 from fastapi.testclient import TestClient
 
-from server.api import app, get_conn, get_wiki_generator
+from server.api import app, get_conn
 from server.db import connect, init_schema
 from server.repos import repo_repo, wiki_repo
 from server.wiki import build_prompt, parse_ground_truth, validate_page_evidence
+from server.worker import run_one_wiki_job
 
 
 PAGE = {
@@ -43,12 +45,10 @@ class FakeGenerator:
         return PAGE, [{"kind": "code", "ref": "abc123", "detail": "snapshot"}], "abc123"
 
 
-def _client(tmp_path, generator=None):
+def _client(tmp_path):
     conn = connect(tmp_path / "wiki.db")
     init_schema(conn)
     app.dependency_overrides[get_conn] = lambda: conn
-    if generator is not None:
-        app.dependency_overrides[get_wiki_generator] = lambda: generator
     return TestClient(app), conn
 
 
@@ -175,38 +175,48 @@ def test_wiki_stale_generation_lock_can_be_reacquired_atomically(tmp_path):
         conn.close()
 
 
-def test_refresh_generates_and_persists_repo_ground_truth(tmp_path):
-    client, conn = _client(tmp_path, FakeGenerator())
+def test_refresh_queues_then_worker_persists_repo_ground_truth(tmp_path):
+    client, conn = _client(tmp_path)
     rid = repo_repo.add(conn, full_name="acme/api")
     try:
         response = client.post(f"/api/repos/{rid}/wiki/refresh")
+        queued = response.json()
+        worked = asyncio.run(
+            run_one_wiki_job(conn, worker_id="test", generator=FakeGenerator())
+        )
         listed = client.get("/api/wiki").json()
     finally:
         _clear(conn)
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "ready"
-    assert response.json()["page"] == PAGE
-    assert response.json()["source_sha"] == "abc123"
+    assert response.status_code == 202
+    assert queued["status"] == "generating"
+    assert worked is True
+    assert listed[0]["status"] == "ready"
+    assert listed[0]["page"] == PAGE
+    assert listed[0]["source_sha"] == "abc123"
     evidence = listed[0]["page"]["sections"][0]["facts"][0]["evidence"]
     assert evidence[1]["ref"] == "orders.payment_id"
 
 
-def test_refresh_failure_is_persisted_without_destroying_previous_page(tmp_path):
+def test_worker_failure_is_persisted_without_destroying_previous_page(tmp_path):
     class Failing:
         async def generate(self, repo, settings):
             raise RuntimeError("vendor unavailable")
 
-    client, conn = _client(tmp_path, Failing())
+    client, conn = _client(tmp_path)
     rid = repo_repo.add(conn, full_name="acme/api")
     wiki_repo.save(conn, rid, page=PAGE, sources=[], source_sha="old")
     try:
         response = client.post(f"/api/repos/{rid}/wiki/refresh")
+        worked = asyncio.run(
+            run_one_wiki_job(conn, worker_id="test", generator=Failing())
+        )
         page = client.get("/api/wiki").json()[0]
     finally:
         _clear(conn)
 
-    assert response.status_code == 502
+    assert response.status_code == 202
+    assert worked is True
     assert page["status"] == "failed"
     assert page["page"] == PAGE
     assert page["source_sha"] == "old"

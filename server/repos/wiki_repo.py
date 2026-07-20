@@ -1,6 +1,7 @@
 """Persistence for the latest per-repository Ground Truth Wiki snapshot."""
 
 import json
+import sqlite3
 
 
 GENERATION_STALE_MINUTES = 30
@@ -59,11 +60,11 @@ def get_page(conn, repo_id: int):
 
 
 def recover_stale_generations(conn) -> int:
-    """프로세스 종료 등으로 남은 generating 잠금을 실패 상태로 복구한다."""
+    """오래 대기했지만 worker가 claim하지 못한 생성 요청을 실패로 복구한다."""
     cur = conn.execute(
         """UPDATE wiki_page
            SET status='failed', error=?, updated_at=datetime('now')
-           WHERE status='generating'
+           WHERE status='generating' AND locked_at IS NULL
              AND updated_at <= datetime('now', ?)""",
         (_STALE_ERROR, _stale_modifier()),
     )
@@ -72,19 +73,61 @@ def recover_stale_generations(conn) -> int:
     return cur.rowcount
 
 
-def mark_generating(conn, repo_id: int) -> bool:
-    """새 생성 잠금을 잡는다. 제한 시간을 넘긴 잠금은 한 번의 원자 연산으로 탈취한다."""
+def recover_running(conn) -> int:
+    """서버 재시작 시 이전 프로세스가 claim한 Wiki 요청을 다시 대기열로 돌린다."""
     cur = conn.execute(
-        """INSERT INTO wiki_page (repo_id, status, updated_at)
-           VALUES (?, 'generating', datetime('now'))
+        """UPDATE wiki_page
+           SET locked_by=NULL, locked_at=NULL, error=NULL, updated_at=datetime('now')
+           WHERE status='generating' AND locked_at IS NOT NULL"""
+    )
+    if cur.rowcount:
+        conn.commit()
+    return cur.rowcount
+
+
+def mark_generating(conn, repo_id: int) -> bool:
+    """생성 요청을 등록한다. 실행 중 요청은 유지하고 오래된 미claim 요청만 교체한다."""
+    cur = conn.execute(
+        """INSERT INTO wiki_page
+             (repo_id, status, locked_by, locked_at, error, updated_at)
+           VALUES (?, 'generating', NULL, NULL, NULL, datetime('now'))
            ON CONFLICT(repo_id) DO UPDATE SET
-             status='generating', error=NULL, updated_at=datetime('now')
+             status='generating', locked_by=NULL, locked_at=NULL,
+             error=NULL, updated_at=datetime('now')
            WHERE wiki_page.status <> 'generating'
-              OR wiki_page.updated_at <= datetime('now', ?)""",
+              OR (wiki_page.locked_at IS NULL
+                  AND wiki_page.updated_at <= datetime('now', ?))""",
         (repo_id, _stale_modifier()),
     )
     conn.commit()
     return cur.rowcount == 1
+
+
+def claim_next(conn, *, worker_id: str):
+    """가장 오래된 미claim Wiki 생성 요청 하나를 원자적으로 선점한다."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        return None
+    try:
+        row = conn.execute(
+            """SELECT repo_id FROM wiki_page
+               WHERE status='generating' AND locked_at IS NULL
+               ORDER BY updated_at, repo_id LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+        conn.execute(
+            """UPDATE wiki_page SET locked_by=?, locked_at=datetime('now')
+               WHERE repo_id=? AND status='generating' AND locked_at IS NULL""",
+            (worker_id, row["repo_id"]),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+        return None
+    return row["repo_id"]
 
 
 def save(conn, repo_id: int, *, page: dict, sources: list, source_sha: str) -> None:
@@ -95,7 +138,8 @@ def save(conn, repo_id: int, *, page: dict, sources: list, source_sha: str) -> N
            ON CONFLICT(repo_id) DO UPDATE SET
              status='ready', content=excluded.content, sources=excluded.sources,
              source_sha=excluded.source_sha, generated_at=excluded.generated_at,
-             error=NULL, updated_at=excluded.updated_at""",
+             error=NULL, locked_by=NULL, locked_at=NULL,
+             updated_at=excluded.updated_at""",
         (
             repo_id,
             json.dumps(page, ensure_ascii=False),
@@ -111,7 +155,8 @@ def mark_failed(conn, repo_id: int, error: str) -> None:
         """INSERT INTO wiki_page (repo_id, status, error, updated_at)
            VALUES (?, 'failed', ?, datetime('now'))
            ON CONFLICT(repo_id) DO UPDATE SET
-             status='failed', error=excluded.error, updated_at=excluded.updated_at""",
+             status='failed', error=excluded.error, locked_by=NULL, locked_at=NULL,
+             updated_at=excluded.updated_at""",
         (repo_id, error[:1000]),
     )
     conn.commit()

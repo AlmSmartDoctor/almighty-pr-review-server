@@ -38,6 +38,7 @@ const KIND_VARIANT: Record<Evidence["kind"], BadgeVariant> = {
   generator: "ok",
 };
 const KIND_ICON = { code: FileCode2, document: FileText, database: Database, generator: Sparkles } as const;
+const POLL_MS = 2_500;
 
 export function WikiSection({
   load,
@@ -76,6 +77,12 @@ export function WikiSection({
     [entries, tab],
   );
   const isGenerating = generating || active?.status === "generating";
+
+  useEffect(() => {
+    if (active?.status !== "generating") return;
+    const timer = window.setInterval(fetchPages, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [active?.repo_id, active?.status]);
 
   const generate = async () => {
     if (!active || isGenerating) return;

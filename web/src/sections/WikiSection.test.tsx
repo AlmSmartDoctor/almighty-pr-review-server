@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { WikiSection } from "./WikiSection";
 import type { WikiEntry } from "./WikiSection";
@@ -87,6 +87,30 @@ test("disables generation while the server is already generating", async () => {
   expect(screen.getByText(/서버에서 Ground Truth를 분석하고 있습니다/)).toBeInTheDocument();
   fireEvent.click(button);
   expect(refresh).not.toHaveBeenCalled();
+});
+
+
+test("polls while generation is running and shows the completed page", async () => {
+  vi.useFakeTimers();
+  try {
+    const generating: WikiEntry = { ...empty, status: "generating" };
+    let calls = 0;
+    render(
+      <WikiSection
+        load={async () => (++calls === 1 ? [generating] : [ready])}
+        refresh={async () => generating}
+      />,
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByRole("button", { name: "분석 중..." })).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+
+    expect(screen.getByText("주문과 결제를 처리하는 서비스")).toBeInTheDocument();
+    expect(calls).toBeGreaterThan(1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 

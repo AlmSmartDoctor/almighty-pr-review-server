@@ -1,8 +1,16 @@
 import asyncio
 
+from server.context.base import redact_secrets
 from server.notify import notify_review_done
 from server.pipeline import PipelineError, retry_pr, review_pr
-from server.repos import job_repo, pr_repo, repo_repo, review_repo, settings_repo
+from server.repos import (
+    job_repo,
+    pr_repo,
+    repo_repo,
+    review_repo,
+    settings_repo,
+    wiki_repo,
+)
 from server.review.gh_deps import build_deps  # Task 7.2에서 정의
 
 _RETRYABLE = ("rate limit", "rate_limit", "429", "overloaded", "timeout", "timed out")
@@ -65,6 +73,30 @@ async def run_one_job(conn, *, worker_id: str) -> bool:
     return True
 
 
+async def run_one_wiki_job(conn, *, worker_id: str, generator=None) -> bool:
+    """대기 중인 Wiki 생성 요청 한 건을 claim해 완료 상태까지 기록한다."""
+    repo_id = wiki_repo.claim_next(conn, worker_id=worker_id)
+    if repo_id is None:
+        return False
+    repo = repo_repo.get(conn, repo_id)
+    if repo is None:  # 레포 삭제와 claim 사이의 방어적 레이스 처리
+        return True
+    try:
+        if generator is None:
+            from server.wiki import GroundTruthGenerator
+
+            generator = GroundTruthGenerator()
+        settings = settings_repo.get(conn)
+        page, sources, source_sha = await generator.generate(repo, settings)
+        wiki_repo.save(
+            conn, repo_id, page=page, sources=sources, source_sha=source_sha
+        )
+    except Exception as exc:
+        message = redact_secrets(f"{type(exc).__name__}: {exc}")
+        wiki_repo.mark_failed(conn, repo_id, message)
+    return True
+
+
 def _notify_if_failed(conn, job):
     """터미널 failed일 때만 알림(재시도 대기 queued는 조용히). mark_failed가
     attempts/max_attempts로 최종 판정하므로 여기선 결과 상태를 다시 읽는다."""
@@ -96,13 +128,18 @@ async def worker_loop(db_path, *, worker_id="w1", idle_sleep=2.0, stop_event=Non
         r = review_repo.recover_stale_running(boot)
         if r:
             print(f"[worker] closed {r} stale running runs")
+        w = wiki_repo.recover_running(boot)
+        if w:
+            print(f"[worker] recovered {w} Wiki generation jobs")
     finally:
         boot.close()
 
     while stop_event is None or not stop_event.is_set():
         conn = connect(db_path)
         try:
-            worked = await run_one_job(conn, worker_id=worker_id)
+            review_worked = await run_one_job(conn, worker_id=worker_id)
+            wiki_worked = await run_one_wiki_job(conn, worker_id=worker_id)
+            worked = review_worked or wiki_worked
         except Exception as e:  # 한 틱의 실패가 워커를 영구히 죽이지 않게
             print(f"[worker] tick failed: {e!r}")
             worked = False
