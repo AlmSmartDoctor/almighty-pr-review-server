@@ -150,47 +150,13 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
 
     # 2. Pre-screen — 같은 (diff 내용, model) 직전 결과가 있으면 CLI 호출 재사용
     # (retry·동일 sha 재리뷰의 중복 haiku 호출 절약; 벤더 리뷰는 그대로 재실행).
-    diff_hash = hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()
-    t0 = time.monotonic()
-    reused = prescreen_repo.find_reusable(conn, pr["id"], diff_hash, prescreen_model)
-    if reused is not None:
-        complexity, score, reason = (
-            reused["complexity"],
-            reused["score"],
-            reused["reason"],
-        )
-    else:
-        try:
-            complexity, score, reason = await asyncio.to_thread(
-                deps.prescreen, diff, prescreen_model
-            )
-        except Exception as e:
-            # 사전평가는 최적화 게이트 — CLI 인프라 실패가 리뷰 전체를 막으면 안 된다
-            # (B-INV-8). 보수적 기본값으로 degrade하고 캐시엔 등록하지 않는다.
-            complexity, score, reason = (
-                "moderate",
-                0.5,
-                f"{PRESCREEN_CLI_FAILURE_REASON}: {type(e).__name__}",
-            )
-            print(
-                f"[pipeline] prescreen degraded: "
-                f"{redact_secrets(f'{type(e).__name__}: {e}')}"
-            )
-    prescreen_ms = int((time.monotonic() - t0) * 1000)
-    ps = PreScreenResult(complexity, score, reason)
-    decided = ps.decide(threshold=settings["prescreen_gate_threshold"])
-    prescreen_repo.add(
+    decided = await _prescreen_diff(
         conn,
-        pr_id=pr["id"],
-        head_sha=pr["head_sha"],
+        pr=pr,
+        diff=diff,
         model=prescreen_model,
-        complexity=complexity,
-        score=score,
-        reason=reason,
-        duration_ms=prescreen_ms,
-        decided=decided,
-        # 파싱/CLI 실패 fallback은 비결정적 → 캐시 미등록(다음 런이 CLI 재시도해 self-heal).
-        diff_hash=None if is_nondeterministic_reason(reason) else diff_hash,
+        prescreen=deps.prescreen,
+        threshold=settings["prescreen_gate_threshold"],
     )
     # skip은 자동 리뷰(폴러/웹훅 enqueue = trigger 'auto')에서만 취소로 이어진다.
     # 사람이 '리뷰' 버튼으로 명시 트리거(trigger 'manual')하면 임계 미만이라도 항상 리뷰한다.
@@ -232,40 +198,12 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
             changed_files=changed_files,
             workdir=str(wt),  # 파일 컨텍스트 봉쇄 root = PR-head worktree
         )
-        degraded = False
-        context_results = []
-        t_ctx = time.monotonic()
-        try:
-            context_text = await asyncio.wait_for(
-                asyncio.to_thread(deps.context.gather, req=req),
-                timeout=CONTEXT_GATHER_TIMEOUT_SEC,
-            )
-            context_results = getattr(deps.context, "results", [])
-        except Exception as e:  # B-INV-4/8: degrade — .results는 백그라운드 스레드가 변형 중일 수 있어 신뢰 안 함
-            context_text = ""
-            degraded = True
-            print(
-                f"[pipeline] context gather degraded: "
-                f"{redact_secrets(f'{type(e).__name__}: {e}')}"
-            )
-        context_ms = int((time.monotonic() - t_ctx) * 1000)
-
-        # 런당 외부 컨텍스트 감사 저장. error는 meta 조립에서도 redact(defense-in-depth, B-INV-4).
-        context_meta = {
-            "duration_ms": context_ms,
-            "sources": [
-                {
-                    "provider": r.provider,
-                    "status": r.status,
-                    "chars": len(r.text or ""),
-                    "error": redact_secrets(r.error) if r.error else None,
-                }
-                for r in context_results
-            ],
-        }
-        if degraded:
-            context_meta["degraded"] = True
-        review_repo.set_context(conn, run_id, text=context_text, meta=context_meta)
+        context_text = await _gather_context(
+            conn,
+            run_id=run_id,
+            provider=deps.context,
+            request=req,
+        )
 
         # 3. Prepare + 4. Review — 벤더 병렬(RunnerPool+gather), 실패 격리.
         # 예산 초과 diff는 파일 경계 청크로 나눠 벤더당 순차 리뷰 후 finding 합침(통째 취소 대신 스케일).
@@ -327,6 +265,90 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
     # 재실행(양 벤더 재실행). 벤더별 follow-up 자동 재시도는 v-next.
     review_repo.finish_run(conn, run_id, "done")
     pr_repo.mark_reviewed(conn, pr["id"], pr["head_sha"])
+
+
+async def _prescreen_diff(
+    conn, *, pr, diff: str, model: str, prescreen: Callable, threshold: float
+) -> str:
+    """Run or reuse pre-screening, persist its audit row, and return the gate decision."""
+    diff_hash = hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()
+    started_at = time.monotonic()
+    reused = prescreen_repo.find_reusable(conn, pr["id"], diff_hash, model)
+    if reused is not None:
+        complexity, score, reason = (
+            reused["complexity"],
+            reused["score"],
+            reused["reason"],
+        )
+    else:
+        try:
+            complexity, score, reason = await asyncio.to_thread(
+                prescreen, diff, model
+            )
+        except Exception as exc:
+            # Pre-screening is an optimization gate. Infrastructure failure must not
+            # block the review, and the fallback must not be cached.
+            complexity, score, reason = (
+                "moderate",
+                0.5,
+                f"{PRESCREEN_CLI_FAILURE_REASON}: {type(exc).__name__}",
+            )
+            error = redact_secrets(f"{type(exc).__name__}: {exc}")
+            print(f"[pipeline] prescreen degraded: {error}")
+
+    decision = PreScreenResult(complexity, score, reason).decide(
+        threshold=threshold
+    )
+    prescreen_repo.add(
+        conn,
+        pr_id=pr["id"],
+        head_sha=pr["head_sha"],
+        model=model,
+        complexity=complexity,
+        score=score,
+        reason=reason,
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+        decided=decision,
+        diff_hash=None if is_nondeterministic_reason(reason) else diff_hash,
+    )
+    return decision
+
+
+async def _gather_context(conn, *, run_id: int, provider, request: ContextRequest) -> str:
+    """Gather optional context without letting provider failures block a review."""
+    degraded = False
+    results = []
+    started_at = time.monotonic()
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(provider.gather, req=request),
+            timeout=CONTEXT_GATHER_TIMEOUT_SEC,
+        )
+        results = getattr(provider, "results", [])
+    except Exception as exc:
+        # A timed-out background thread may still mutate provider.results, so do not
+        # inspect it on the degraded path.
+        text = ""
+        degraded = True
+        error = redact_secrets(f"{type(exc).__name__}: {exc}")
+        print(f"[pipeline] context gather degraded: {error}")
+
+    meta = {
+        "duration_ms": int((time.monotonic() - started_at) * 1000),
+        "sources": [
+            {
+                "provider": result.provider,
+                "status": result.status,
+                "chars": len(result.text or ""),
+                "error": redact_secrets(result.error) if result.error else None,
+            }
+            for result in results
+        ],
+    }
+    if degraded:
+        meta["degraded"] = True
+    review_repo.set_context(conn, run_id, text=text, meta=meta)
+    return text
 
 
 def _build_prompts(pr, diff, context_text: str) -> list[str]:
