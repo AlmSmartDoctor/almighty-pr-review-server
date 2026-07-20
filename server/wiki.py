@@ -34,6 +34,20 @@ _TABLE_CONSTRAINTS = {
 }
 _MAX_WIKI_SCHEMA_CHARS = 2_000_000
 _MAX_PROMPT_SOURCE_CHARS = 20_000
+_MAX_EVIDENCE_FILE_BYTES = 2_000_000
+_LINE_ANCHOR_RE = re.compile(r"L?(\d+)(?:-L?(\d+))?", re.IGNORECASE)
+_DECLARATION_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:def|function|fn)\s+([A-Za-z_$][\w$]*)\b",
+        r"^\s*(?:(?:export|default|public|private|protected|internal|abstract|final|sealed|open|data)\s+)*(?:class|interface|enum|struct|trait|type|record|protocol|module|namespace)\s+([A-Za-z_$][\w$]*)\b",
+        r"^\s*(?:export\s+)?(?:const|let|var|static)\s+([A-Za-z_$][\w$]*)\b",
+        r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)\b",
+        r"^\s*([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=(?!=)",
+        r"^\s*(?:[A-Za-z_$][\w$]*\s+)*([A-Za-z_$][\w$]*)\s*\([^;{}]*\)[^;{}]*\{",
+        r"^\s*([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*:[^;{}]+;",
+    )
+)
 
 
 def _normalize_identifier(raw: str) -> str:
@@ -196,7 +210,7 @@ WIKI_SCHEMA_HINT = """마지막에 반드시 아래 형태의 JSON 코드 블록
         {
           "statement": "검증된 사실",
           "evidence": [
-            {"kind": "code|document|database", "ref": "파일:라인 또는 table.column", "detail": "근거 설명"}
+            {"kind": "code|document|database", "ref": "파일:라인, 파일:심볼 또는 table.column", "detail": "근거 설명"}
           ]
         }
       ]
@@ -215,6 +229,82 @@ def parse_ground_truth(raw: str) -> dict:
         raise ValueError(f"invalid Ground Truth Wiki output: {exc}") from exc
 
 
+def _split_file_reference(raw: str) -> tuple[str, str | None]:
+    """파일 ref를 path와 선택적 line/symbol anchor로 분리한다."""
+    value = raw.strip().strip("`")
+    if "#" in value:
+        path, anchor = value.split("#", 1)
+        return path.strip(), anchor.strip() or None
+    if ":" in value:
+        path, anchor = value.split(":", 1)
+        return path.strip(), anchor.strip() or None
+    return value.strip(), None
+
+
+def _declared_symbols(text: str) -> set[str]:
+    symbols = set()
+    for line in text.splitlines():
+        for pattern in _DECLARATION_PATTERNS:
+            match = pattern.match(line)
+            if match:
+                symbols.add(match.group(1))
+                break
+    return symbols
+
+
+def _valid_line_anchor(anchor: str, text: str) -> bool | None:
+    match = _LINE_ANCHOR_RE.fullmatch(anchor)
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2) or start)
+    lines = text.splitlines()
+    return 1 <= start <= end <= len(lines) and any(
+        line.strip() for line in lines[start - 1 : end]
+    )
+
+
+def _valid_symbol_anchor(anchor: str, text: str) -> bool:
+    value = anchor.strip().removesuffix("()")
+    value = value.split("(", 1)[0].strip()
+    parts = [part for part in re.split(r"\.|::", value) if part]
+    if not parts or any(not re.fullmatch(r"[A-Za-z_$][\w$]*", part) for part in parts):
+        return False
+    declared = _declared_symbols(text)
+    return all(part in declared for part in parts)
+
+
+def _valid_file_evidence(evidence: dict, root: Path) -> bool:
+    relative, anchor = _split_file_reference(evidence["ref"])
+    try:
+        target = (root / relative).resolve()
+        target.relative_to(root)
+        if not target.is_file() or target.stat().st_size > _MAX_EVIDENCE_FILE_BYTES:
+            return False
+    except (OSError, ValueError):
+        return False
+    if evidence["kind"] == "document":
+        return True
+    if anchor is None:
+        return False
+    text = read_confined(relative, str(root), _MAX_EVIDENCE_FILE_BYTES)
+    if text is None:
+        return False
+    line_result = _valid_line_anchor(anchor, text)
+    return line_result if line_result is not None else _valid_symbol_anchor(
+        anchor, text
+    )
+
+
+def _count_code_evidence(page: dict) -> int:
+    return sum(
+        evidence["kind"] == "code"
+        for section in page["sections"]
+        for fact in section["facts"]
+        for evidence in fact["evidence"]
+    )
+
+
 def validate_page_evidence(
     page: dict, workdir: Path, database_catalog: dict[str, set[str]] | None = None
 ) -> dict:
@@ -231,14 +321,7 @@ def validate_page_evidence(
                         if column in (database_catalog or {}).get(table, set()):
                             valid.append(evidence)
                     continue
-                raw_ref = evidence["ref"].strip("` ")
-                relative = raw_ref.split(":", 1)[0].split("#", 1)[0]
-                try:
-                    target = (root / relative).resolve()
-                    target.relative_to(root)
-                except (OSError, ValueError):
-                    continue
-                if target.is_file():
+                if _valid_file_evidence(evidence, root):
                     valid.append(evidence)
             if not valid:
                 raise ValueError(
@@ -375,14 +458,18 @@ class GroundTruthGenerator:
                     page = validate_page_evidence(
                         parse_ground_truth(raw), workdir, database_catalog
                     )
+                    model = (
+                        hp.model
+                        if adapter.vendor == "claude"
+                        else (hp.codex_model or "default")
+                    )
                     sources.append(
                         {
                             "kind": "generator",
                             "ref": adapter.vendor,
                             "detail": (
-                                hp.model
-                                if adapter.vendor == "claude"
-                                else (hp.codex_model or "default")
+                                f"{model}; validated {_count_code_evidence(page)} "
+                                "code references"
                             ),
                         }
                     )

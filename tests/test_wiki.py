@@ -7,6 +7,7 @@ from server.api import app, get_conn
 from server.db import connect, init_schema
 from server.repos import repo_repo, wiki_repo
 from server.wiki import (
+    GroundTruthGenerator,
     build_database_catalog,
     build_prompt,
     parse_ground_truth,
@@ -176,6 +177,130 @@ def test_ground_truth_rejects_unresolvable_code_evidence(tmp_path):
         assert False, "실재하지 않는 코드 근거는 거부해야 함"
     except ValueError:
         pass
+
+
+def test_ground_truth_validates_code_line_anchors(tmp_path):
+    code = tmp_path / "orders.py"
+    code.write_text("def confirm_order():\n    return True\n\n")
+    page = json.loads(json.dumps(PAGE))
+    page["sections"][0]["facts"][0]["evidence"] = [
+        {"kind": "code", "ref": "orders.py:1", "detail": "valid line"},
+        {"kind": "code", "ref": "orders.py:L1-L2", "detail": "valid range"},
+        {"kind": "code", "ref": "orders.py:3", "detail": "blank line"},
+        {"kind": "code", "ref": "orders.py:99", "detail": "out of range"},
+    ]
+
+    out = validate_page_evidence(page, tmp_path)
+    refs = [
+        evidence["ref"]
+        for evidence in out["sections"][0]["facts"][0]["evidence"]
+    ]
+
+    assert refs == ["orders.py:1", "orders.py:L1-L2"]
+
+
+def test_ground_truth_validates_declared_symbols_in_major_languages(tmp_path):
+    (tmp_path / "service.py").write_text(
+        "class OrderService:\n    def confirm_order(self):\n        return True\n"
+    )
+    (tmp_path / "service.ts").write_text(
+        "export class CheckoutService {\n  confirmOrder(): boolean { return true; }\n}\n"
+        "export const DEFAULT_CURRENCY = 'KRW';\n"
+    )
+    (tmp_path / "PaymentService.java").write_text(
+        "public class PaymentService {\n"
+        "  public boolean approvePayment() { return true; }\n}\n"
+    )
+    page = json.loads(json.dumps(PAGE))
+    page["sections"][0]["facts"][0]["evidence"] = [
+        {"kind": "code", "ref": "service.py:OrderService.confirm_order", "detail": "python"},
+        {"kind": "code", "ref": "service.ts#CheckoutService.confirmOrder", "detail": "typescript"},
+        {"kind": "code", "ref": "service.ts:DEFAULT_CURRENCY", "detail": "constant"},
+        {"kind": "code", "ref": "PaymentService.java:PaymentService", "detail": "java class"},
+        {"kind": "code", "ref": "PaymentService.java:PaymentService.approvePayment", "detail": "java method"},
+        {"kind": "code", "ref": "service.py:missing_symbol", "detail": "invalid"},
+    ]
+
+    out = validate_page_evidence(page, tmp_path)
+    refs = [
+        evidence["ref"]
+        for evidence in out["sections"][0]["facts"][0]["evidence"]
+    ]
+
+    assert refs == [
+        "service.py:OrderService.confirm_order",
+        "service.ts#CheckoutService.confirmOrder",
+        "service.ts:DEFAULT_CURRENCY",
+        "PaymentService.java:PaymentService",
+        "PaymentService.java:PaymentService.approvePayment",
+    ]
+
+
+def test_ground_truth_rejects_unanchored_code_and_path_escape(tmp_path):
+    (tmp_path / "orders.py").write_text("def confirm_order(): pass\n")
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("def stolen(): pass\n")
+    for ref in ("orders.py", "orders.py:missing_symbol", "../outside.py:stolen"):
+        page = json.loads(json.dumps(PAGE))
+        page["sections"][0]["facts"][0]["evidence"] = [
+            {"kind": "code", "ref": ref, "detail": "invalid"}
+        ]
+        try:
+            validate_page_evidence(page, tmp_path)
+            assert False, f"검증 불가능한 코드 근거를 거부해야 함: {ref}"
+        except ValueError:
+            pass
+
+
+def test_ground_truth_rejects_oversized_and_binary_code_evidence(tmp_path):
+    (tmp_path / "large.py").write_text("def valid(): pass\n" + "x" * 2_000_000)
+    (tmp_path / "binary.py").write_bytes(b"def valid(): pass\n\xff")
+    for ref in ("large.py:valid", "binary.py:valid"):
+        page = json.loads(json.dumps(PAGE))
+        page["sections"][0]["facts"][0]["evidence"] = [
+            {"kind": "code", "ref": ref, "detail": "invalid"}
+        ]
+        try:
+            validate_page_evidence(page, tmp_path)
+            assert False, f"안전하게 읽을 수 없는 코드 근거를 거부해야 함: {ref}"
+        except ValueError:
+            pass
+
+
+def test_generator_records_validated_code_reference_count(tmp_path, monkeypatch):
+    class Adapter:
+        vendor = "claude"
+
+        async def complete(self, **kwargs):
+            page = json.loads(json.dumps(PAGE))
+            page["sections"][0]["facts"][0]["evidence"] = [
+                {"kind": "code", "ref": "orders.py:confirm_order", "detail": "valid"}
+            ]
+            return "```json\n" + json.dumps(page) + "\n```"
+
+    (tmp_path / "orders.py").write_text("def confirm_order(): pass\n")
+    monkeypatch.setattr(
+        "server.wiki._prepare_source", lambda repo, clone: (tmp_path, "abc123")
+    )
+    monkeypatch.setattr(
+        "server.wiki.prepared_worktree",
+        lambda source, sha: __import__("contextlib").nullcontext(tmp_path),
+    )
+    repo = {
+        "full_name": "acme/api",
+        "harness_name": "default",
+        "vendor_claude_on": 1,
+        "local_path": str(tmp_path),
+    }
+
+    _, sources, _ = asyncio.run(
+        GroundTruthGenerator(adapters=[Adapter()], clone=lambda _: None).generate(
+            repo, {}
+        )
+    )
+
+    assert sources[-1]["kind"] == "generator"
+    assert "validated 1 code references" in sources[-1]["detail"]
 
 
 def test_prompt_distinguishes_ground_truth_from_review_findings():
