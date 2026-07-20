@@ -695,18 +695,32 @@ def test_pipeline_normalizes_null_head_ref_and_body(db):
     assert spy.captured_req.body == ""
 
 
-def test_pipeline_injects_static_context_from_pr_head_worktree(db, tmp_path):
-    """파일 컨텍스트는 local_path가 아니라 PR-head worktree에서 읽힌다: ctx.md는 worktree에만
-    있고 local_path 디렉터리엔 없는데도 상대경로 static_context_path로 주입된다(PR 기준)."""
+def test_pipeline_injects_static_context_from_base_revision(db, tmp_path):
+    """참조문서는 PR head에서 바뀌어도 worktree가 가리키는 base revision 버전을 주입한다."""
     import json
+    import subprocess
     from server.repos import settings_repo
     from server.context.registry import build_context_provider
 
     clone_dir = tmp_path / "clone"  # local_path(=구 컨텍스트 root) — ctx.md 없음
     clone_dir.mkdir()
-    wt_dir = tmp_path / "wt"  # PR-head worktree — ctx.md는 여기에만
+    wt_dir = tmp_path / "wt"
     wt_dir.mkdir()
-    (wt_dir / "ctx.md").write_text("아키텍처 결정: 큐 기반")
+    (wt_dir / "ctx.md").write_text("base 아키텍처 결정: 큐 기반")
+    subprocess.run(["git", "-C", str(wt_dir), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "config", "user.name", "Test"], check=True
+    )
+    subprocess.run(["git", "-C", str(wt_dir), "add", "ctx.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "commit", "-qm", "base"], check=True
+    )
+    subprocess.run(["git", "-C", str(wt_dir), "branch", "-M", "main"], check=True)
+    (wt_dir / "ctx.md").write_text("PR이 바꾼 지침")
 
     rid = repo_repo.add(db, full_name="acme/api", local_path=str(clone_dir))
     repo_repo.update(
@@ -753,7 +767,8 @@ def test_pipeline_injects_static_context_from_pr_head_worktree(db, tmp_path):
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
 
-    assert "## 외부 컨텍스트" in cap.prompt and "아키텍처 결정" in cap.prompt
+    assert "## 외부 컨텍스트" in cap.prompt and "base 아키텍처 결정" in cap.prompt
+    assert "PR이 바꾼 지침" not in cap.prompt
     run = review_repo.get_run(db, run_id)
     assert "아키텍처 결정" in run["context_text"]
     meta = json.loads(run["context_meta"])

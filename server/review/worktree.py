@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 import tempfile
@@ -88,19 +89,57 @@ def prepared_worktree(repo: Path, sha: str, pr_number: int | None = None):
         shutil.rmtree(tmp, ignore_errors=True)  # ★개정: rm -rf 서브프로세스 대신
 
 
+def _fetch_base_ref(repo: Path, base_ref: str) -> None:
+    """참조문서를 신뢰 가능한 base 버전에서 읽도록 remote branch를 best-effort 갱신한다."""
+    if (
+        not base_ref
+        or base_ref.startswith("-")
+        or ".." in base_ref
+        or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
+    ):
+        return
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "fetch",
+                "origin",
+                f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
+                "--depth=1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=config.GH_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # provider가 base revision 미도달을 error로 self-degrade한다.
+
+
 @contextmanager
-def checkout(worktree, clone, *, local_path, full_name, sha, pr_number=None):
+def checkout(
+    worktree,
+    clone,
+    *,
+    local_path,
+    full_name,
+    sha,
+    pr_number=None,
+    base_ref: str | None = None,
+):
     """리뷰 소스 체크아웃을 연다. 기본은 서비스 전용 영구 clone(CLONE_DIR)에서 worktree를
     떠 사용자의 라이브 체크아웃에 의존하지 않는다(작업 경로가 실시간으로 바뀌어도 안전).
     local_path가 지정되면(고급 옵션) 그 기존 clone을 소스로 쓴다. worktree 인자는 테스트
     주입 가능한 prepared_worktree(또는 fake)이며 PR head ref fetch·체크아웃은 그쪽이 담당."""
     if local_path:
-        with worktree(Path(local_path), sha, pr_number) as wt:
-            yield wt
-        return
-    if clone is None:
-        raise WorktreePrepareError(f"{full_name}: local_path 미설정 + clone 미배선")
-    repo_dir = persistent_clone(clone, full_name)
+        repo_dir = Path(local_path)
+    else:
+        if clone is None:
+            raise WorktreePrepareError(f"{full_name}: local_path 미설정 + clone 미배선")
+        repo_dir = persistent_clone(clone, full_name)
+    if base_ref:
+        _fetch_base_ref(repo_dir, base_ref)
     with worktree(repo_dir, sha, pr_number) as wt:
         yield wt
 

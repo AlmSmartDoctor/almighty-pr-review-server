@@ -18,7 +18,8 @@
 - `context_static_on`이 켜지면 PR 변경 파일마다 해당 디렉터리에서 레포 루트까지 올라가며 `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`를 탐색한다. 루트 문서는 변경 파일 신호가 없어도 탐색한다.
 - 여러 변경 파일이 같은 문서를 참조하면 한 번만 포함하고, 블록에 적용되는 변경 파일 경로를 표시한다. 렌더 순서는 루트에서 하위 디렉터리 순이며, 예산 선택 시 기존 `static_context_path` 고정 문서와 변경 파일에 가까운 문서를 우선한다.
 - `static_context_path`는 자동 탐색을 대체하지 않는 선택적 고정 문서다. 설정하면 변경 경로와 관계없이 자동 탐색 결과와 함께 포함한다.
-- 파일당 3,000자, static 소스 전체는 `MAX_CONTEXT_CHARS_PER_SOURCE`로 제한한다. 모든 경로와 심볼릭 링크는 PR-head worktree의 레포 root 하위로 realpath 봉쇄한다(B-INV-9).
+- 파일당 3,000자, static 소스 전체는 `MAX_CONTEXT_CHARS_PER_SOURCE`로 제한한다. 경로는 레포 root 하위로 봉쇄한다(B-INV-9).
+- PR이 지침 파일 자체를 수정해 리뷰를 조작하지 못하도록 참조문서는 `base_ref`의 최신 remote commit에서 읽는다. PR 변경 목록에 `AGENTS.md`/`CLAUDE.md` 또는 설정된 고정 문서가 포함되면 base 버전을 사용한다는 경고와 변경 경로를 컨텍스트에 표시한다. base revision을 확인할 수 없으면 head로 폴백하지 않고 static provider만 `error`로 degrade한다.
 
 ## 사내 DB 스키마 (B9)
 

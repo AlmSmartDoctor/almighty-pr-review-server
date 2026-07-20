@@ -1,4 +1,6 @@
 import os
+import re
+import subprocess
 from pathlib import PurePosixPath
 
 from server import config
@@ -41,27 +43,47 @@ class StaticContextProvider:
             )
             candidates[self._path]["explicit"] = True
 
+        # PR이 문서 자체를 바꿔 리뷰 지침을 조작하지 못하도록 base 버전만 읽는다.
+        # base_ref가 없는 직접 provider 사용(유닛 테스트/비-PR 호출)만 현재 root를 읽는다.
+        base_revision = self._resolve_base_revision(root, req.base_ref)
+        if req.base_ref and base_revision is None:
+            return ContextResult(
+                provider=self.name,
+                status="error",
+                text="",
+                error="base reference unavailable",
+            )
+
         documents: dict[str, dict] = {}
         rejected_explicit = False
         for path, meta in candidates.items():
-            real = self._confined_realpath(root, path)
-            if real is None:
+            display_path = self._confined_relative_path(root, path)
+            if display_path is None:
                 rejected_explicit = rejected_explicit or bool(meta["explicit"])
                 continue
-            try:
-                with open(real, encoding="utf-8") as f:
-                    content = f.read(_MAX_CHARS_PER_DOCUMENT + 1)
-            except (OSError, ValueError, TypeError, IsADirectoryError):
-                continue
-            if not content.strip():
+            if base_revision:
+                content = self._read_git_file(root, base_revision, display_path)
+                identity = display_path
+            else:
+                real = self._confined_realpath(root, path)
+                if real is None:
+                    rejected_explicit = rejected_explicit or bool(meta["explicit"])
+                    continue
+                try:
+                    with open(real, encoding="utf-8") as f:
+                        content = f.read(_MAX_CHARS_PER_DOCUMENT + 1)
+                except (OSError, ValueError, TypeError, IsADirectoryError):
+                    continue
+                display_path = os.path.relpath(real, root).replace(os.sep, "/")
+                identity = real
+            if not content or not content.strip():
                 continue
             if len(content) > _MAX_CHARS_PER_DOCUMENT:
                 content = content[:_MAX_CHARS_PER_DOCUMENT] + "\n…[document truncated]"
 
-            display_path = os.path.relpath(real, root).replace(os.sep, "/")
-            existing = documents.get(real)
+            existing = documents.get(identity)
             if existing is None:
-                documents[real] = {
+                documents[identity] = {
                     "path": display_path,
                     "content": content,
                     "scopes": set(meta["scopes"]),
@@ -74,7 +96,8 @@ class StaticContextProvider:
                 existing["explicit"] = existing["explicit"] or bool(meta["explicit"])
                 existing["depth"] = max(existing["depth"], meta["depth"])
 
-        if not documents:
+        changed_instructions = self._changed_instruction_documents(req.changed_files)
+        if not documents and not (changed_instructions and base_revision):
             return ContextResult(
                 provider=self.name,
                 status="error" if rejected_explicit else "empty",
@@ -84,12 +107,24 @@ class StaticContextProvider:
 
         selected = self._select_within_budget(list(documents.values()))
         selected.sort(key=lambda d: (d["depth"], d["path"]))
-        text = "\n\n".join(self._render_document(doc) for doc in selected)
+        blocks = []
+        if changed_instructions and base_revision:
+            blocks.append(
+                "⚠ This PR changes repository instruction documents. "
+                "The trusted base-branch versions are used for this review:\n"
+                + "\n".join(f"- {path}" for path in changed_instructions)
+            )
+        blocks.extend(self._render_document(doc) for doc in selected)
+        text = "\n\n".join(blocks)
         return ContextResult(
             provider=self.name,
             status="ok" if text.strip() else "empty",
             text=text,
-            meta={"documents": [doc["path"] for doc in selected]},
+            meta={
+                "documents": [doc["path"] for doc in selected],
+                "revision": base_revision or "worktree",
+                "changed_instruction_documents": changed_instructions,
+            },
         )
 
     def _candidate_paths(self, changed_files: tuple) -> dict[str, dict]:
@@ -123,6 +158,77 @@ class StaticContextProvider:
             return False
         parsed = PurePosixPath(path)
         return not parsed.is_absolute() and ".." not in parsed.parts
+
+    @staticmethod
+    def _confined_relative_path(root: str, path: str) -> str | None:
+        if not isinstance(path, str) or not path or "\x00" in path or ":" in path:
+            return None
+        try:
+            candidate = path if os.path.isabs(path) else os.path.join(root, path)
+            relative = os.path.relpath(candidate, root).replace(os.sep, "/")
+        except (OSError, ValueError, TypeError):
+            return None
+        parsed = PurePosixPath(relative)
+        if parsed.is_absolute() or ".." in parsed.parts:
+            return None
+        return parsed.as_posix()
+
+    @staticmethod
+    def _resolve_base_revision(root: str, base_ref: str) -> str | None:
+        if (
+            not base_ref
+            or base_ref.startswith("-")
+            or ".." in base_ref
+            or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
+        ):
+            return None
+        for candidate in (f"refs/remotes/origin/{base_ref}", base_ref):
+            try:
+                result = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        root,
+                        "rev-parse",
+                        "--verify",
+                        f"{candidate}^{{commit}}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired, ValueError):
+                return None
+            if result.returncode == 0:
+                return result.stdout.strip()
+        return None
+
+    @staticmethod
+    def _read_git_file(root: str, revision: str, path: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", root, "show", f"{revision}:{path}"],
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode("utf-8", "replace")[: _MAX_CHARS_PER_DOCUMENT + 1]
+
+    def _changed_instruction_documents(self, changed_files: tuple) -> list[str]:
+        configured = None
+        if self._path:
+            configured = PurePosixPath(self._path.replace(os.sep, "/")).as_posix()
+        changed = []
+        for path in changed_files:
+            if not self._safe_changed_path(path):
+                continue
+            parsed = PurePosixPath(path)
+            if parsed.name in ("AGENTS.md", "CLAUDE.md") or path == configured:
+                changed.append(path)
+        return sorted(set(changed))
 
     @staticmethod
     def _confined_realpath(root: str, path: str) -> str | None:

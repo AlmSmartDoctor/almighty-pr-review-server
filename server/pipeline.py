@@ -173,8 +173,8 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
         review_repo.finish_run(conn, run_id, "canceled", error="no vendor enabled")
         return
 
-    # worktree(PR-head 체크아웃)를 먼저 열고 그 안에서 컨텍스트를 수집한다 → 파일 컨텍스트
-    # (Static/DBSchema/Graphify-문서)가 PR-head 버전을 본다(local_path 불필요·PR 기준).
+    # worktree(PR-head 체크아웃)를 먼저 열고 그 안에서 컨텍스트를 수집한다. DBSchema와
+    # Graphify는 head를 보되, Static 지침은 PR 조작 방지를 위해 fetch한 base_ref를 읽는다.
     # B-INV-1(격리): 수집은 여전히 부모 프로세스에서·자식 벤더 exec 이전. 외부 데이터는
     # render_context의 nonce fence로 "지시 아닌 데이터"로 감싸 신뢰 경계를 유지한다.
     # B-INV-8: to_thread+총 타임아웃, 실패/초과는 ''로 degrade → 리뷰 절대 차단 안 함.
@@ -186,6 +186,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
         full_name=repo["full_name"],
         sha=pr["head_sha"],
         pr_number=pr["number"],
+        base_ref=pr["base_ref"] or "",
     ) as wt:
         req = ContextRequest(
             repo=repo["full_name"],
