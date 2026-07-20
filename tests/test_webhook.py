@@ -41,7 +41,7 @@ def _pr_body(full_name="acme/api", number=7, sha="sha1", action="opened"):
                 "state": "open",
                 "body": "closes #1",
                 "head": {"sha": sha, "ref": "feature"},
-                "base": {"ref": "main"},
+                "base": {"ref": "main", "sha": "base-sha-1"},
             },
         }
     ).encode()
@@ -74,7 +74,8 @@ def test_verify_signature_roundtrip():
 def test_parse_pull_request_event_filters_actions():
     info = parse_pull_request_event(_pr_body(action="synchronize"))
     assert info["head_sha"] == "sha1" and info["full_name"] == "acme/api"
-    assert info["base_ref"] == "main" and info["author"] == "octocat"
+    assert info["base_ref"] == "main" and info["base_sha"] == "base-sha-1"
+    assert info["author"] == "octocat"
     assert parse_pull_request_event(_pr_body(action="labeled")) is None  # 무관 action
     assert parse_pull_request_event(b"not json") is None  # 파싱 실패
 
@@ -112,6 +113,7 @@ def test_webhook_enqueues_on_valid_pull_request(tmp_path, monkeypatch):
     jobs = conn.execute("SELECT * FROM review_job").fetchall()
     assert len(jobs) == 1
     assert jobs[0]["head_sha"] == "sha1" and jobs[0]["trigger"] == "auto"
+    assert conn.execute("SELECT base_sha FROM pull_request").fetchone()["base_sha"] == "base-sha-1"
 
 
 def test_webhook_rejects_bad_signature(tmp_path, monkeypatch):

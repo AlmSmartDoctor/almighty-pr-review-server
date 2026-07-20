@@ -28,6 +28,7 @@ def test_list_open_prs_parses_json():
                 "author": {"login": "kim"},
                 "headRefOid": "abc",
                 "baseRefName": "main",
+                "baseRefOid": "base123",
                 "url": "https://x/7",
                 "state": "OPEN",
                 "createdAt": "2026-07-07T11:22:33Z",
@@ -46,11 +47,13 @@ def test_list_open_prs_parses_json():
     prs = client.list_open_prs("acme/api")
     assert prs[0].number == 7
     assert prs[0].head_sha == "abc"
+    assert prs[0].base_sha == "base123"
     assert prs[0].author == "kim"
     assert prs[0].created_at == "2026-07-07T11:22:33Z"
     assert prs[0].head_ref == "feature/PROJ-1"
     assert prs[0].body == "Closes PROJ-1"
     assert prs[0].is_draft is True
+    assert any("baseRefOid" in arg for arg in runner.calls[0][0])
     assert any("createdAt" in arg for arg in runner.calls[0][0])
     assert any("headRefName" in arg for arg in runner.calls[0][0])
     assert any("isDraft" in arg for arg in runner.calls[0][0])

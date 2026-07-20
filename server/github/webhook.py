@@ -47,6 +47,7 @@ def parse_pull_request_event(body: bytes):
         "number": number,
         "head_sha": head,
         "base_ref": _dict(pr.get("base")).get("ref", "") or "",
+        "base_sha": _dict(pr.get("base")).get("sha", "") or "",
         "head_ref": _dict(pr.get("head")).get("ref", "") or "",
         "title": pr.get("title") or "",
         "author": _dict(pr.get("user")).get("login", "") or "",

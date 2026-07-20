@@ -39,6 +39,30 @@ def test_checkout_uses_local_path_and_skips_clone():
     assert str(seen["repo"]) == "/local/x" and seen["sha"] == "s1"
 
 
+def test_checkout_fetches_exact_base_revision(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        "server.review.worktree._fetch_base_revision",
+        lambda repo, base_ref, base_sha: seen.update(
+            repo=str(repo), base_ref=base_ref, base_sha=base_sha
+        ),
+    )
+    with _spy_worktree(seen) as wt:
+        with checkout(
+            wt,
+            None,
+            local_path=str(tmp_path),
+            full_name="acme/api",
+            sha="head",
+            base_ref="main",
+            base_sha="a" * 40,
+        ):
+            pass
+
+    assert seen["base_ref"] == "main"
+    assert seen["base_sha"] == "a" * 40
+
+
 def test_checkout_uses_persistent_service_clone(tmp_path, monkeypatch):
     from server import config as cfg
 

@@ -20,6 +20,7 @@ class PrInfo:
     head_ref: str = ""
     body: str = ""
     is_draft: bool = False
+    base_sha: str = ""
 
 
 def _default_runner(args: list[str], *, env=None, input=None) -> str:
@@ -178,7 +179,7 @@ class GhClient:
                 "--limit",
                 str(config.POLL_OPEN_PR_LIMIT),
                 "--json",
-                "number,title,author,headRefOid,baseRefName,url,state,createdAt,"
+                "number,title,author,headRefOid,baseRefName,baseRefOid,url,state,createdAt,"
                 "headRefName,body,isDraft",
             ],
             kind="list_open_prs",
@@ -196,6 +197,7 @@ class GhClient:
                 head_ref=d.get("headRefName", ""),
                 body=d.get("body", ""),
                 is_draft=bool(d.get("isDraft", False)),
+                base_sha=d.get("baseRefOid", ""),
             )
             for d in json.loads(out)
         ]

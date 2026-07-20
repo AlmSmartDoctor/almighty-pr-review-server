@@ -89,8 +89,8 @@ def prepared_worktree(repo: Path, sha: str, pr_number: int | None = None):
         shutil.rmtree(tmp, ignore_errors=True)  # ★개정: rm -rf 서브프로세스 대신
 
 
-def _fetch_base_ref(repo: Path, base_ref: str) -> None:
-    """참조문서를 신뢰 가능한 base 버전에서 읽도록 remote branch를 best-effort 갱신한다."""
+def _fetch_base_revision(repo: Path, base_ref: str, base_sha: str = "") -> None:
+    """참조문서용 base branch와 poll/webhook 시점의 정확한 commit을 확보한다."""
     if (
         not base_ref
         or base_ref.startswith("-")
@@ -113,8 +113,17 @@ def _fetch_base_ref(repo: Path, base_ref: str) -> None:
             text=True,
             timeout=config.GH_TIMEOUT_SEC,
         )
+        if re.fullmatch(r"[0-9a-fA-F]{40,64}", base_sha) and not _has_commit(
+            repo, base_sha
+        ):
+            subprocess.run(
+                ["git", "-C", str(repo), "fetch", "origin", base_sha, "--depth=1"],
+                capture_output=True,
+                text=True,
+                timeout=config.GH_TIMEOUT_SEC,
+            )
     except (OSError, subprocess.TimeoutExpired):
-        pass  # provider가 base revision 미도달을 error로 self-degrade한다.
+        pass  # provider가 정확한 base revision 미도달을 error로 self-degrade한다.
 
 
 @contextmanager
@@ -127,6 +136,7 @@ def checkout(
     sha,
     pr_number=None,
     base_ref: str | None = None,
+    base_sha: str | None = None,
 ):
     """리뷰 소스 체크아웃을 연다. 기본은 서비스 전용 영구 clone(CLONE_DIR)에서 worktree를
     떠 사용자의 라이브 체크아웃에 의존하지 않는다(작업 경로가 실시간으로 바뀌어도 안전).
@@ -139,7 +149,7 @@ def checkout(
             raise WorktreePrepareError(f"{full_name}: local_path 미설정 + clone 미배선")
         repo_dir = persistent_clone(clone, full_name)
     if base_ref:
-        _fetch_base_ref(repo_dir, base_ref)
+        _fetch_base_revision(repo_dir, base_ref, base_sha or "")
     with worktree(repo_dir, sha, pr_number) as wt:
         yield wt
 

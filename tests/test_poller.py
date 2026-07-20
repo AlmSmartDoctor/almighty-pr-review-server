@@ -7,7 +7,9 @@ from server.github.gh import PrInfo
 
 def test_poll_once_upserts_new_prs(db):
     repo_repo.add(db, full_name="acme/api")
-    fake_prs = [PrInfo(7, "t", "kim", "sha1", "main", "u", "open")]
+    fake_prs = [
+        PrInfo(7, "t", "kim", "sha1", "main", "u", "open", base_sha="base1")
+    ]
     enqueued = []
     poll_once(
         db, list_prs=lambda repo: fake_prs, enqueue=lambda pr_id: enqueued.append(pr_id)
@@ -15,6 +17,7 @@ def test_poll_once_upserts_new_prs(db):
     # PR upsert + head_sha != last_reviewed_sha → enqueue
     pid = pr_repo.get(db, 1)["id"]
     assert enqueued == [pid]
+    assert pr_repo.get(db, pid)["base_sha"] == "base1"
 
 
 def test_poll_once_skips_already_reviewed(db):

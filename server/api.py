@@ -819,6 +819,7 @@ async def github_webhook(request: Request, conn=Depends(get_conn)):
         author=info["author"],
         head_sha=info["head_sha"],
         base_ref=info["base_ref"],
+        base_sha=info["base_sha"],
         url=info["url"],
         state=info["state"],
         head_ref=info["head_ref"],

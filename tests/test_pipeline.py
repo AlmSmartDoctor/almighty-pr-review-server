@@ -720,7 +720,14 @@ def test_pipeline_injects_static_context_from_base_revision(db, tmp_path):
         ["git", "-C", str(wt_dir), "commit", "-qm", "base"], check=True
     )
     subprocess.run(["git", "-C", str(wt_dir), "branch", "-M", "main"], check=True)
+    base_sha = subprocess.check_output(
+        ["git", "-C", str(wt_dir), "rev-parse", "HEAD"], text=True
+    ).strip()
     (wt_dir / "ctx.md").write_text("PR이 바꾼 지침")
+    subprocess.run(["git", "-C", str(wt_dir), "add", "ctx.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "commit", "-qm", "move main"], check=True
+    )
 
     rid = repo_repo.add(db, full_name="acme/api", local_path=str(clone_dir))
     repo_repo.update(
@@ -737,6 +744,7 @@ def test_pipeline_injects_static_context_from_base_revision(db, tmp_path):
         author="a",
         head_sha="s40",
         base_ref="main",
+        base_sha=base_sha,
         url="u",
     )
     repo = repo_repo.get(db, rid)

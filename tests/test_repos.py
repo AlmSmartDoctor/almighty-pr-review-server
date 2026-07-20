@@ -25,6 +25,7 @@ def test_upsert_pr_updates_head_sha(db):
         author="a",
         head_sha="aaa",
         base_ref="main",
+        base_sha="base-aaa",
         url="u",
     )
     p2 = pr_repo.upsert(
@@ -35,10 +36,12 @@ def test_upsert_pr_updates_head_sha(db):
         author="a",
         head_sha="bbb",
         base_ref="main",
+        base_sha="base-bbb",
         url="u",
     )
     assert p1 == p2  # 같은 (repo, number) → 같은 id
     assert pr_repo.get(db, p1)["head_sha"] == "bbb"
+    assert pr_repo.get(db, p1)["base_sha"] == "base-bbb"
 
 
 def test_upsert_pr_stores_and_updates_created_at(db):

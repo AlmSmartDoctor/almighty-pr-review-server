@@ -45,7 +45,7 @@ class StaticContextProvider:
 
         # PR이 문서 자체를 바꿔 리뷰 지침을 조작하지 못하도록 base 버전만 읽는다.
         # base_ref가 없는 직접 provider 사용(유닛 테스트/비-PR 호출)만 현재 root를 읽는다.
-        base_revision = self._resolve_base_revision(root, req.base_ref)
+        base_revision = self._resolve_base_revision(root, req.base_ref, req.base_sha)
         if req.base_ref and base_revision is None:
             return ContextResult(
                 provider=self.name,
@@ -174,7 +174,9 @@ class StaticContextProvider:
         return parsed.as_posix()
 
     @staticmethod
-    def _resolve_base_revision(root: str, base_ref: str) -> str | None:
+    def _resolve_base_revision(
+        root: str, base_ref: str, base_sha: str = ""
+    ) -> str | None:
         if (
             not base_ref
             or base_ref.startswith("-")
@@ -182,7 +184,15 @@ class StaticContextProvider:
             or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
         ):
             return None
-        for candidate in (f"refs/remotes/origin/{base_ref}", base_ref):
+        # SHA가 제공됐으면 그 정확한 snapshot만 허용한다. 미도달 시 branch tip으로
+        # 폴백하면 폴링 이후 base 이동에 따라 리뷰 컨텍스트가 비결정적으로 바뀐다.
+        if base_sha:
+            if not re.fullmatch(r"[0-9a-fA-F]{40,64}", base_sha):
+                return None
+            candidates = (base_sha,)
+        else:
+            candidates = (f"refs/remotes/origin/{base_ref}", base_ref)
+        for candidate in candidates:
             try:
                 result = subprocess.run(
                     [

@@ -187,6 +187,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
         sha=pr["head_sha"],
         pr_number=pr["number"],
         base_ref=pr["base_ref"] or "",
+        base_sha=(pr["base_sha"] if "base_sha" in pr.keys() else "") or "",
     ) as wt:
         req = ContextRequest(
             repo=repo["full_name"],
@@ -195,6 +196,7 @@ async def _execute_run(conn, *, run_id, pr, repo, settings, deps, trigger) -> No
             author=pr["author"] or "",
             head_ref=(pr["head_ref"] if "head_ref" in pr.keys() else "") or "",
             base_ref=pr["base_ref"] or "",
+            base_sha=(pr["base_sha"] if "base_sha" in pr.keys() else "") or "",
             body=(pr["body"] if "body" in pr.keys() else "") or "",
             changed_files=changed_files,
             workdir=str(wt),  # 파일 컨텍스트 봉쇄 root = PR-head worktree

@@ -29,6 +29,7 @@ class ContextRequest:
     author: str = ""
     head_ref: str = ""
     base_ref: str = ""
+    base_sha: str = ""
     body: str = ""
     changed_files: tuple = ()
     # PR-head 체크아웃 경로. 파일 컨텍스트의 봉쇄 root로 사용(비면 provider 생성자 root 폴백).

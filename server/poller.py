@@ -45,6 +45,7 @@ def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> None:
             author=pr.author,
             head_sha=pr.head_sha,
             base_ref=pr.base_ref,
+            base_sha=pr.base_sha,
             url=pr.url,
             state=pr.state,
             created_at=pr.created_at,
