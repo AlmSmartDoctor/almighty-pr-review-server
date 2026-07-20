@@ -202,6 +202,9 @@ def test_wiki_lists_registered_repo_before_generation(tmp_path):
             "source_sha": None,
             "generated_at": None,
             "error": None,
+            "attempts": 0,
+            "max_attempts": 3,
+            "next_run_at": None,
         }
     ]
 
@@ -256,6 +259,90 @@ def test_wiki_stale_generation_lock_can_be_reacquired_atomically(tmp_path):
         conn.close()
 
 
+def test_wiki_retry_backoff_blocks_claim_until_due_and_stops_at_max(tmp_path):
+    conn = connect(tmp_path / "wiki.db")
+    init_schema(conn)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    try:
+        assert wiki_repo.mark_generating(conn, rid) is True
+        assert wiki_repo.claim_next(conn, worker_id="w1") == rid
+        assert wiki_repo.schedule_retry(conn, rid, "timeout", base_seconds=120)
+        waiting = wiki_repo.get_page(conn, rid)
+        first_delay = conn.execute(
+            "SELECT CAST((julianday(next_run_at)-julianday('now'))*86400 AS INTEGER) delay FROM wiki_page WHERE repo_id=?",
+            (rid,),
+        ).fetchone()["delay"]
+        assert waiting["attempts"] == 1
+        assert waiting["next_run_at"] is not None
+        assert 119 <= first_delay <= 120
+        assert wiki_repo.claim_next(conn, worker_id="w1") is None
+
+        conn.execute(
+            "UPDATE wiki_page SET next_run_at=datetime('now', '-1 second') WHERE repo_id=?",
+            (rid,),
+        )
+        conn.commit()
+        assert wiki_repo.claim_next(conn, worker_id="w2") == rid
+        assert wiki_repo.schedule_retry(conn, rid, "timeout", base_seconds=120)
+        second_delay = conn.execute(
+            "SELECT CAST((julianday(next_run_at)-julianday('now'))*86400 AS INTEGER) delay FROM wiki_page WHERE repo_id=?",
+            (rid,),
+        ).fetchone()["delay"]
+        assert 239 <= second_delay <= 240
+
+        conn.execute(
+            "UPDATE wiki_page SET next_run_at=datetime('now', '-1 second') WHERE repo_id=?",
+            (rid,),
+        )
+        conn.commit()
+        assert wiki_repo.claim_next(conn, worker_id="w3") == rid
+        assert wiki_repo.schedule_retry(conn, rid, "timeout", base_seconds=120) is False
+    finally:
+        conn.close()
+
+
+def test_wiki_restart_recovers_claimed_attempt_without_losing_retry_state(tmp_path):
+    conn = connect(tmp_path / "wiki.db")
+    init_schema(conn)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    try:
+        wiki_repo.mark_generating(conn, rid)
+        assert wiki_repo.claim_next(conn, worker_id="old-worker") == rid
+        assert wiki_repo.recover_running(conn) == 1
+        recovered = wiki_repo.get_page(conn, rid)
+        assert wiki_repo.claim_next(conn, worker_id="new-worker") == rid
+        reclaimed = wiki_repo.get_page(conn, rid)
+    finally:
+        conn.close()
+
+    assert recovered["status"] == "generating"
+    assert recovered["attempts"] == 1
+    assert reclaimed["attempts"] == 2
+
+
+def test_wiki_manual_regeneration_resets_retry_attempts(tmp_path):
+    conn = connect(tmp_path / "wiki.db")
+    init_schema(conn)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    try:
+        wiki_repo.mark_failed(conn, rid, "old failure")
+        conn.execute(
+            "UPDATE wiki_page SET attempts=3, next_run_at=datetime('now', '+1 hour') WHERE repo_id=?",
+            (rid,),
+        )
+        conn.commit()
+
+        assert wiki_repo.mark_generating(conn, rid) is True
+        page = wiki_repo.get_page(conn, rid)
+    finally:
+        conn.close()
+
+    assert page["status"] == "generating"
+    assert page["attempts"] == 0
+    assert page["next_run_at"] is None
+    assert page["error"] is None
+
+
 def test_refresh_queues_then_worker_persists_repo_ground_truth(tmp_path):
     client, conn = _client(tmp_path)
     rid = repo_repo.add(conn, full_name="acme/api")
@@ -277,6 +364,70 @@ def test_refresh_queues_then_worker_persists_repo_ground_truth(tmp_path):
     assert listed[0]["source_sha"] == "abc123"
     evidence = listed[0]["page"]["sections"][0]["facts"][0]["evidence"]
     assert evidence[1]["ref"] == "orders.payment_id"
+
+
+def test_worker_retryable_failure_is_requeued_without_destroying_previous_page(
+    tmp_path,
+):
+    class TimeoutFailure:
+        async def generate(self, repo, settings):
+            raise RuntimeError("vendor timed out")
+
+    client, conn = _client(tmp_path)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    wiki_repo.save(conn, rid, page=PAGE, sources=[], source_sha="old")
+    try:
+        client.post(f"/api/repos/{rid}/wiki/refresh")
+        worked = asyncio.run(
+            run_one_wiki_job(conn, worker_id="test", generator=TimeoutFailure())
+        )
+        page = client.get("/api/wiki").json()[0]
+        immediate = asyncio.run(
+            run_one_wiki_job(conn, worker_id="test", generator=FakeGenerator())
+        )
+    finally:
+        _clear(conn)
+
+    assert worked is True
+    assert immediate is False
+    assert page["status"] == "generating"
+    assert page["attempts"] == 1
+    assert page["max_attempts"] == 3
+    assert page["next_run_at"] is not None
+    assert page["page"] == PAGE
+    assert page["source_sha"] == "old"
+    assert "timed out" in page["error"]
+
+
+def test_worker_retryable_failure_becomes_final_at_max_attempts(tmp_path):
+    class TimeoutFailure:
+        async def generate(self, repo, settings):
+            raise RuntimeError("vendor timed out")
+
+    conn = connect(tmp_path / "wiki.db")
+    init_schema(conn)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    try:
+        wiki_repo.mark_generating(conn, rid)
+        conn.execute(
+            "UPDATE wiki_page SET max_attempts=2 WHERE repo_id=?", (rid,)
+        )
+        conn.commit()
+        asyncio.run(run_one_wiki_job(conn, worker_id="w1", generator=TimeoutFailure()))
+        conn.execute(
+            "UPDATE wiki_page SET next_run_at=datetime('now', '-1 second') WHERE repo_id=?",
+            (rid,),
+        )
+        conn.commit()
+        asyncio.run(run_one_wiki_job(conn, worker_id="w2", generator=TimeoutFailure()))
+        page = wiki_repo.get_page(conn, rid)
+    finally:
+        conn.close()
+
+    assert page["status"] == "failed"
+    assert page["attempts"] == 2
+    assert page["next_run_at"] is None
+    assert "timed out" in page["error"]
 
 
 def test_worker_failure_is_persisted_without_destroying_previous_page(tmp_path):

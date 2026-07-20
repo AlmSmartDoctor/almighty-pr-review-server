@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS wiki_page (
   source_sha TEXT,
   generated_at TEXT,
   error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  next_run_at TEXT,
   locked_by TEXT,
   locked_at TEXT,
   updated_at TEXT NOT NULL
@@ -164,6 +167,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "review_job", "retry_run_id", "INTEGER")
     _ensure_column(conn, "wiki_page", "locked_by", "TEXT")
     _ensure_column(conn, "wiki_page", "locked_at", "TEXT")
+    _ensure_column(conn, "wiki_page", "attempts", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(
+        conn, "wiki_page", "max_attempts", "INTEGER NOT NULL DEFAULT 3"
+    )
+    _ensure_column(conn, "wiki_page", "next_run_at", "TEXT")
     _ensure_column(
         conn, "app_settings", "review_model", "TEXT NOT NULL DEFAULT 'sonnet'"
     )

@@ -13,7 +13,21 @@ from server.repos import (
 )
 from server.review.gh_deps import build_deps  # Task 7.2에서 정의
 
-_RETRYABLE = ("rate limit", "rate_limit", "429", "overloaded", "timeout", "timed out")
+_RETRYABLE = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "overloaded",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "service unavailable",
+    "connection reset",
+    "connection refused",
+    "502",
+    "503",
+    "504",
+)
 
 
 def _is_retryable(msg: str) -> bool:
@@ -93,7 +107,11 @@ async def run_one_wiki_job(conn, *, worker_id: str, generator=None) -> bool:
         )
     except Exception as exc:
         message = redact_secrets(f"{type(exc).__name__}: {exc}")
-        wiki_repo.mark_failed(conn, repo_id, message)
+        retrying = _is_retryable(message) and wiki_repo.schedule_retry(
+            conn, repo_id, message
+        )
+        if not retrying:
+            wiki_repo.mark_failed(conn, repo_id, message)
     return True
 
 

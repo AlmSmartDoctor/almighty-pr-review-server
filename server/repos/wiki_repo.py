@@ -5,6 +5,8 @@ import sqlite3
 
 
 GENERATION_STALE_MINUTES = 30
+DEFAULT_MAX_ATTEMPTS = 3
+RETRY_BASE_SECONDS = 120
 _STALE_ERROR = "이전 Wiki 생성 작업이 제한 시간을 초과해 종료된 것으로 처리되었습니다"
 
 
@@ -30,6 +32,9 @@ def _row(row) -> dict:
         "source_sha": row["source_sha"],
         "generated_at": row["generated_at"],
         "error": row["error"],
+        "attempts": row["attempts"] or 0,
+        "max_attempts": row["max_attempts"] or DEFAULT_MAX_ATTEMPTS,
+        "next_run_at": row["next_run_at"],
     }
 
 
@@ -38,7 +43,8 @@ def list_pages(conn) -> list[dict]:
     rows = conn.execute(
         """SELECT r.id AS repo_id, r.full_name AS repo,
                   w.status, w.content, w.sources, w.source_sha,
-                  w.generated_at, w.error
+                  w.generated_at, w.error, w.attempts, w.max_attempts,
+                  w.next_run_at
            FROM repo r
            LEFT JOIN wiki_page w ON w.repo_id = r.id
            ORDER BY r.full_name COLLATE NOCASE"""
@@ -50,7 +56,8 @@ def get_page(conn, repo_id: int):
     row = conn.execute(
         """SELECT r.id AS repo_id, r.full_name AS repo,
                   w.status, w.content, w.sources, w.source_sha,
-                  w.generated_at, w.error
+                  w.generated_at, w.error, w.attempts, w.max_attempts,
+                  w.next_run_at
            FROM repo r
            LEFT JOIN wiki_page w ON w.repo_id = r.id
            WHERE r.id=?""",
@@ -63,7 +70,8 @@ def recover_stale_generations(conn) -> int:
     """오래 대기했지만 worker가 claim하지 못한 생성 요청을 실패로 복구한다."""
     cur = conn.execute(
         """UPDATE wiki_page
-           SET status='failed', error=?, updated_at=datetime('now')
+           SET status='failed', error=?, next_run_at=NULL,
+               updated_at=datetime('now')
            WHERE status='generating' AND locked_at IS NULL
              AND updated_at <= datetime('now', ?)""",
         (_STALE_ERROR, _stale_modifier()),
@@ -89,15 +97,17 @@ def mark_generating(conn, repo_id: int) -> bool:
     """생성 요청을 등록한다. 실행 중 요청은 유지하고 오래된 미claim 요청만 교체한다."""
     cur = conn.execute(
         """INSERT INTO wiki_page
-             (repo_id, status, locked_by, locked_at, error, updated_at)
-           VALUES (?, 'generating', NULL, NULL, NULL, datetime('now'))
+             (repo_id, status, attempts, max_attempts, next_run_at,
+              locked_by, locked_at, error, updated_at)
+           VALUES (?, 'generating', 0, ?, NULL, NULL, NULL, NULL, datetime('now'))
            ON CONFLICT(repo_id) DO UPDATE SET
-             status='generating', locked_by=NULL, locked_at=NULL,
+             status='generating', attempts=0, max_attempts=excluded.max_attempts,
+             next_run_at=NULL, locked_by=NULL, locked_at=NULL,
              error=NULL, updated_at=datetime('now')
            WHERE wiki_page.status <> 'generating'
               OR (wiki_page.locked_at IS NULL
                   AND wiki_page.updated_at <= datetime('now', ?))""",
-        (repo_id, _stale_modifier()),
+        (repo_id, DEFAULT_MAX_ATTEMPTS, _stale_modifier()),
     )
     conn.commit()
     return cur.rowcount == 1
@@ -113,13 +123,16 @@ def claim_next(conn, *, worker_id: str):
         row = conn.execute(
             """SELECT repo_id FROM wiki_page
                WHERE status='generating' AND locked_at IS NULL
-               ORDER BY updated_at, repo_id LIMIT 1"""
+                 AND (next_run_at IS NULL OR next_run_at <= datetime('now'))
+               ORDER BY COALESCE(next_run_at, updated_at), repo_id LIMIT 1"""
         ).fetchone()
         if row is None:
             conn.execute("ROLLBACK")
             return None
         conn.execute(
-            """UPDATE wiki_page SET locked_by=?, locked_at=datetime('now')
+            """UPDATE wiki_page
+               SET locked_by=?, locked_at=datetime('now'), attempts=attempts+1,
+                   next_run_at=NULL
                WHERE repo_id=? AND status='generating' AND locked_at IS NULL""",
             (worker_id, row["repo_id"]),
         )
@@ -138,7 +151,7 @@ def save(conn, repo_id: int, *, page: dict, sources: list, source_sha: str) -> N
            ON CONFLICT(repo_id) DO UPDATE SET
              status='ready', content=excluded.content, sources=excluded.sources,
              source_sha=excluded.source_sha, generated_at=excluded.generated_at,
-             error=NULL, locked_by=NULL, locked_at=NULL,
+             error=NULL, next_run_at=NULL, locked_by=NULL, locked_at=NULL,
              updated_at=excluded.updated_at""",
         (
             repo_id,
@@ -150,13 +163,34 @@ def save(conn, repo_id: int, *, page: dict, sources: list, source_sha: str) -> N
     conn.commit()
 
 
+def schedule_retry(
+    conn, repo_id: int, error: str, *, base_seconds: int = RETRY_BASE_SECONDS
+) -> bool:
+    """현재 attempt가 남아 있으면 지수 backoff로 다시 대기시키고 True를 반환한다."""
+    row = conn.execute(
+        "SELECT attempts, max_attempts FROM wiki_page WHERE repo_id=?", (repo_id,)
+    ).fetchone()
+    if row is None or row["attempts"] >= row["max_attempts"]:
+        return False
+    delay = base_seconds * (2 ** max(row["attempts"] - 1, 0))
+    cur = conn.execute(
+        """UPDATE wiki_page
+           SET status='generating', error=?, next_run_at=datetime('now', ?),
+               locked_by=NULL, locked_at=NULL, updated_at=datetime('now')
+           WHERE repo_id=? AND status='generating'""",
+        (error[:1000], f"+{delay} seconds", repo_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
 def mark_failed(conn, repo_id: int, error: str) -> None:
     conn.execute(
         """INSERT INTO wiki_page (repo_id, status, error, updated_at)
            VALUES (?, 'failed', ?, datetime('now'))
            ON CONFLICT(repo_id) DO UPDATE SET
-             status='failed', error=excluded.error, locked_by=NULL, locked_at=NULL,
-             updated_at=excluded.updated_at""",
+             status='failed', error=excluded.error, next_run_at=NULL,
+             locked_by=NULL, locked_at=NULL, updated_at=excluded.updated_at""",
         (repo_id, error[:1000]),
     )
     conn.commit()

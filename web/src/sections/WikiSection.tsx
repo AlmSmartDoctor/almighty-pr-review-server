@@ -28,6 +28,9 @@ export type WikiEntry = {
   source_sha: string | null;
   generated_at: string | null;
   error: string | null;
+  attempts: number;
+  max_attempts: number;
+  next_run_at: string | null;
 };
 
 const KIND_LABEL = { code: "코드", document: "문서", database: "DB", generator: "생성 모델" } as const;
@@ -142,8 +145,16 @@ export function WikiSection({
 function GroundTruthView({ entry }: { entry: WikiEntry }) {
   return (
     <div className="flex flex-col gap-4">
-      {entry.status === "generating" && (
-        <StatusLine>서버에서 Ground Truth를 분석하고 있습니다. 완료 후 화면을 다시 열어 확인하세요.</StatusLine>
+      {entry.status === "generating" && entry.next_run_at && (
+        <StatusLine>
+          일시적 오류로 재시도 대기 중입니다. 시도 {entry.attempts}/{entry.max_attempts}, 다음 실행 {entry.next_run_at}.
+          {entry.error && <> 최근 오류: {entry.error}</>}
+        </StatusLine>
+      )}
+      {entry.status === "generating" && !entry.next_run_at && (
+        <StatusLine>
+          서버에서 Ground Truth를 분석하고 있습니다. 진행한 시도 {entry.attempts}/{entry.max_attempts}.
+        </StatusLine>
       )}
       {entry.status === "failed" && entry.error && (
         <StatusLine tone="error">최근 분석 실패: {entry.error} 기존 Ground Truth는 유지됩니다.</StatusLine>

@@ -10,6 +10,9 @@ const ready: WikiEntry = {
   source_sha: "abc123456789",
   generated_at: "2026-07-20 11:00",
   error: null,
+  attempts: 1,
+  max_attempts: 3,
+  next_run_at: null,
   sources: [
     { kind: "code", ref: "abc123456789", detail: "detached repository snapshot" },
     { kind: "database", ref: "db/schema.sql", detail: "database schema" },
@@ -44,6 +47,9 @@ const empty: WikiEntry = {
   source_sha: null,
   generated_at: null,
   error: null,
+  attempts: 0,
+  max_attempts: 3,
+  next_run_at: null,
 };
 
 test("shows repository ground truth with code and database evidence", async () => {
@@ -87,6 +93,24 @@ test("disables generation while the server is already generating", async () => {
   expect(screen.getByText(/서버에서 Ground Truth를 분석하고 있습니다/)).toBeInTheDocument();
   fireEvent.click(button);
   expect(refresh).not.toHaveBeenCalled();
+});
+
+
+test("shows retry backoff state and keeps polling", async () => {
+  const retrying: WikiEntry = {
+    ...ready,
+    status: "generating",
+    error: "RuntimeError: vendor timed out",
+    attempts: 1,
+    max_attempts: 3,
+    next_run_at: "2026-07-20 11:02:00",
+  };
+  render(<WikiSection load={async () => [retrying]} refresh={async () => retrying} />);
+
+  expect(await screen.findByText(/재시도 대기 중입니다/)).toBeInTheDocument();
+  expect(screen.getByText(/시도 1\/3/)).toBeInTheDocument();
+  expect(screen.getByText(/vendor timed out/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "분석 중..." })).toBeDisabled();
 });
 
 
