@@ -14,6 +14,7 @@ const contextSettings = {
   ...settings,
   context_static_on: 0, context_jira_on: 0,
   context_db_schema_on: 0, context_graphify_on: 0,
+  context_feedback_on: 0, context_current_pr_reviews_on: 0,
 };
 
 beforeEach(() => {
@@ -34,11 +35,67 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("renders global defaults from settings", async () => {
+async function expandRepo(name = "acme/api") {
+  fireEvent.click(await screen.findByRole("button", { name: `${name} 설정 펼치기` }));
+}
+
+async function expandGlobalSettings() {
+  fireEvent.click(await screen.findByRole("button", { name: "전역 고급 설정 펼치기" }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+test("shows common global settings first and keeps technical settings collapsed", async () => {
   render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
-  expect(await screen.findByDisplayValue("haiku")).toBeInTheDocument();
-  expect(screen.getByText(/동시성/)).toBeInTheDocument();
+
+  expect(await screen.findByText("리뷰 방식 선택")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "변경만 재리뷰" })).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "사전 스크리닝 모델" })).not.toBeInTheDocument();
   expect(screen.getByText("등록된 레포가 없습니다.")).toBeInTheDocument();
+
+  await expandGlobalSettings();
+  expect(screen.getByDisplayValue("haiku")).toBeInTheDocument();
+  expect(screen.getByText("AI CLI 총 동시 실행 수")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "전역 고급 설정 접기" })).toBeInTheDocument();
+});
+
+test("warns when an existing non-Claude prescreen model will fall back", async () => {
+  render(<SettingsSection
+    load={async () => ({ ...settings, prescreen_model: "gpt-5.6-terra" })}
+    loadRepos={async () => []}
+  />);
+
+  await expandGlobalSettings();
+  expect(screen.getByText(/실행 시 haiku로 대체됩니다/)).toBeInTheDocument();
+});
+
+test("applies a recommended review preset and saves it", async () => {
+  const patchSettings = vi.spyOn(api, "patchSettings").mockResolvedValue({
+    ...settings,
+    claude_effort: "medium",
+    codex_effort: "medium",
+    prescreen_gate_threshold: "moderate",
+    verify_singles_on: 1,
+  });
+  render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "권장 균형 프리셋" }));
+  fireEvent.click(screen.getByRole("button", { name: "저장" }));
+
+  await waitFor(() => expect(patchSettings).toHaveBeenCalledWith(expect.objectContaining({
+    claude_effort: "medium",
+    codex_effort: "medium",
+    prescreen_gate_threshold: "moderate",
+    verify_singles_on: 1,
+  })));
 });
 
 test("sets per-repo claude model and effort", async () => {
@@ -47,6 +104,7 @@ test("sets per-repo claude model and effort", async () => {
     .spyOn(api, "patchRepo")
     .mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
   fireEvent.change(model, { target: { value: "opus" } });
@@ -63,6 +121,7 @@ test("toggles high-severity single verification and saves it", async () => {
     .spyOn(api, "patchSettings")
     .mockResolvedValue({ ...settings, verify_singles_on: 1 });
   render(<SettingsSection load={async () => settings} loadRepos={async () => []} />);
+  await expandGlobalSettings();
 
   const toggle = await screen.findByRole("switch", { name: "교차확인" });
   fireEvent.click(toggle);
@@ -98,6 +157,7 @@ test("sets per-repo codex model and effort", async () => {
     .spyOn(api, "patchRepo")
     .mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const model = await screen.findByRole("combobox", { name: "acme/api Codex 모델" });
   expect(model.getAttribute("placeholder")).toContain("상속");  // 미설정 → 전역 기본값 상속
@@ -125,6 +185,7 @@ test("per-repo model select can restore inheritance", async () => {
   const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, claude_model: "opus" };
   const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(async (_id, patch) => ({ ...repo, ...patch }));
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
   expect(model).toHaveDisplayValue("opus");
@@ -137,6 +198,7 @@ test("failed per-repo model patch rolls back to the prior saved value", async ()
   const repo = { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, claude_model: "opus" };
   vi.spyOn(api, "patchRepo").mockRejectedValue(new Error("network"));
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const model = await screen.findByRole("combobox", { name: "acme/api Claude 모델" });
   expect(model).toHaveDisplayValue("opus");
@@ -146,6 +208,83 @@ test("failed per-repo model patch rolls back to the prior saved value", async ()
   await waitFor(() => expect(model).toHaveDisplayValue("opus"));
 });
 
+test("a failed repo patch does not roll back another field that saved successfully", async () => {
+  const repo = {
+    id: 7,
+    full_name: "acme/api",
+    local_path: "/work/acme-api",
+    enabled: 1,
+    claude_model: "opus",
+    claude_effort: "medium",
+  };
+  const modelRequest = deferred<Record<string, unknown>>();
+  const effortRequest = deferred<Record<string, unknown>>();
+  vi.spyOn(api, "patchRepo").mockImplementation((_id, patch) =>
+    "claude_model" in patch ? modelRequest.promise : effortRequest.promise,
+  );
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
+
+  const model = screen.getByRole("combobox", { name: "acme/api Claude 모델" });
+  const effort = screen.getByRole("combobox", { name: "acme/api Claude effort" });
+  fireEvent.change(model, { target: { value: "haiku" } });
+  fireEvent.blur(model);
+  fireEvent.change(effort, { target: { value: "high" } });
+
+  effortRequest.resolve({ ...repo, claude_effort: "high" });
+  await waitFor(() => expect(effort).toHaveDisplayValue("high"));
+  modelRequest.reject(new Error("model save failed"));
+
+  await waitFor(() => expect(model).toHaveDisplayValue("opus"));
+  expect(effort).toHaveDisplayValue("high");
+});
+
+test("serializes rapid updates to the same repo field", async () => {
+  const repo = {
+    id: 7,
+    full_name: "acme/api",
+    local_path: "/work/acme-api",
+    enabled: 1,
+    claude_model: "opus",
+  };
+  const first = deferred<Record<string, unknown>>();
+  const second = deferred<Record<string, unknown>>();
+  const patchRepo = vi.spyOn(api, "patchRepo")
+    .mockImplementationOnce(() => first.promise)
+    .mockImplementationOnce(() => second.promise);
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
+
+  const model = screen.getByRole("combobox", { name: "acme/api Claude 모델" });
+  fireEvent.change(model, { target: { value: "haiku" } });
+  fireEvent.blur(model);
+  fireEvent.change(model, { target: { value: "sonnet" } });
+  fireEvent.blur(model);
+
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledTimes(1));
+  first.resolve({ ...repo, claude_model: "haiku" });
+  await waitFor(() => expect(patchRepo).toHaveBeenCalledTimes(2));
+  second.resolve({ ...repo, claude_model: "sonnet" });
+  await waitFor(() => expect(model).toHaveDisplayValue("sonnet"));
+});
+
+test("keeps advanced repository settings collapsed and groups them when opened", async () => {
+  const repo = { id: 7, full_name: "acme/api", local_path: null, enabled: 1, trigger_mode: "auto" };
+  render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+
+  expect(await screen.findByText("자동 리뷰 · Claude + Codex · 전역 기본값 사용")).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "acme/api Claude 모델" })).not.toBeInTheDocument();
+
+  await expandRepo();
+  expect(screen.getByText("리뷰 모델과 결과")).toBeInTheDocument();
+  expect(screen.getByText("리뷰 동작")).toBeInTheDocument();
+  expect(screen.getByText("추가 컨텍스트")).toBeInTheDocument();
+  expect(screen.getByText("운영 설정")).toBeInTheDocument();
+  expect(screen.getByText("문서 또는 DB 컨텍스트를 켜면 필요한 경로 입력란이 표시됩니다.")).toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "acme/api 참조 문서 경로" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "acme/api 설정 접기" })).toBeInTheDocument();
+});
+
 test("renders repositories and toggles enabled state", async () => {
   const patchRepo = vi.spyOn(api, "patchRepo").mockResolvedValue({});
   render(<SettingsSection load={async () => settings} loadRepos={async () => [
@@ -153,6 +292,7 @@ test("renders repositories and toggles enabled state", async () => {
   ]} />);
 
   expect(await screen.findByRole("textbox", { name: "acme/api 레포 이름" })).toHaveValue("acme/api");
+  await expandRepo();
   expect(screen.getByDisplayValue("/work/acme-api")).toBeInTheDocument();
 
   const toggle = screen.getByRole("switch", { name: "활성" });
@@ -278,24 +418,153 @@ test("renders external context toggles", async () => {
   expect(await screen.findByRole("switch", { name: "참조 문서" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Jira 연동" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "사내 DB 스키마" })).toBeInTheDocument();
-  expect(screen.getByRole("switch", { name: "프로젝트 컨텍스트" })).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "프로젝트 컨텍스트" })).not.toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "현재 PR 기존 리뷰 참고" })).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "과거 판정 반영" })).toBeInTheDocument();
   expect(screen.queryByPlaceholderText(/토큰|token|url/i)).toBeNull();
 });
 
+test("shows context readiness and blocks unavailable integrations", async () => {
+  const ready = () => ({
+    available: true,
+    status: "ready" as const,
+    message: "사용할 수 있습니다.",
+    enabled_repos: 0,
+    configured_repos: 0,
+    missing: [],
+  });
+  render(<SettingsSection
+    load={async () => contextSettings}
+    loadRepos={async () => []}
+    loadContextStatus={async () => ({
+      total_repos: 2,
+      sources: {
+        context_static_on: ready(),
+        context_jira_on: {
+          ...ready(),
+          available: false,
+          status: "needs_server_setup" as const,
+          message: "서버에 Jira 연결 정보를 먼저 설정해야 합니다.",
+          missing: ["ALMIGHTY_JIRA_API_TOKEN"],
+        },
+        context_db_schema_on: {
+          ...ready(),
+          capabilities: {
+            file_schema: { available: true, missing: [] },
+            safe_db: { vendored: true, runtime_dependency: false },
+            live_db: { available: false, missing: ["ALMIGHTY_MSSQL_GATEWAY_TOKEN"] },
+          },
+        },
+        context_feedback_on: ready(),
+        context_current_pr_reviews_on: ready(),
+      },
+    })}
+  />);
+
+  const jira = await screen.findByRole("switch", { name: "Jira 연동" });
+  expect(jira).toBeDisabled();
+  expect(screen.getByText("서버에 Jira 연결 정보를 먼저 설정해야 합니다.")).toBeInTheDocument();
+  expect(screen.getByText("ALMIGHTY_JIRA_API_TOKEN")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "사내 DB 스키마" })).not.toBeDisabled();
+  expect(screen.getByText("Safe-DB 로컬 복사본")).toBeInTheDocument();
+  expect(screen.getByText("Live DB 미설정")).toBeInTheDocument();
+  expect(screen.getByText("ALMIGHTY_MSSQL_GATEWAY_TOKEN")).toBeInTheDocument();
+  expect(screen.queryByText("다른 열린 PR의 지적")).not.toBeInTheDocument();
+});
+
+test("context card distinguishes enabled repositories from actually configured ones", async () => {
+  const ready = () => ({
+    available: true,
+    status: "ready" as const,
+    message: "사용할 수 있습니다.",
+    enabled_repos: 0,
+    configured_repos: 0,
+    missing: [],
+  });
+  render(<SettingsSection
+    load={async () => ({ ...contextSettings, context_db_schema_on: 1 })}
+    loadRepos={async () => []}
+    loadContextStatus={async () => ({
+      total_repos: 2,
+      sources: {
+        context_static_on: ready(),
+        context_jira_on: ready(),
+        context_db_schema_on: {
+          ...ready(), enabled_repos: 2, configured_repos: 0,
+        },
+        context_feedback_on: ready(),
+        context_current_pr_reviews_on: ready(),
+      },
+    })}
+  />);
+
+  expect(await screen.findByText("일부 설정 필요")).toBeInTheDocument();
+  expect(screen.getByText("활성 2/2")).toBeInTheDocument();
+  expect(screen.getByText("준비 0/2")).toBeInTheDocument();
+  expect(screen.getByText(/적용 중인 레포 2개에 스키마 경로나 Live DB 대상 설정이 필요/)).toBeInTheDocument();
+});
+
+test("context card shows per-repo usage even when the global default is off", async () => {
+  const ready = () => ({
+    available: true,
+    status: "ready" as const,
+    message: "사용할 수 있습니다.",
+    enabled_repos: 0,
+    configured_repos: 0,
+    missing: [],
+  });
+  render(<SettingsSection
+    load={async () => ({ ...contextSettings, context_db_schema_on: 0 })}
+    loadRepos={async () => []}
+    loadContextStatus={async () => ({
+      total_repos: 2,
+      sources: {
+        context_static_on: ready(),
+        context_jira_on: ready(),
+        context_db_schema_on: {
+          ...ready(), enabled_repos: 1, configured_repos: 0,
+        },
+        context_feedback_on: ready(),
+        context_current_pr_reviews_on: ready(),
+      },
+    })}
+  />);
+
+  expect(await screen.findByText("일부 설정 필요")).toBeInTheDocument();
+  expect(screen.getByText("활성 1/2")).toBeInTheDocument();
+  expect(screen.getByText("준비 0/1")).toBeInTheDocument();
+  expect(screen.getByText(/적용 중인 레포 1개에 스키마 경로나 Live DB 대상 설정이 필요/)).toBeInTheDocument();
+});
+
 test("context save patches only the context fields", async () => {
+  const sourceReady = {
+    available: true, status: "ready" as const, message: "사용할 수 있습니다.",
+    enabled_repos: 0, configured_repos: 0, missing: [],
+  };
   const patchSettings = vi
     .spyOn(api, "patchSettings")
     .mockResolvedValue({ ...contextSettings, context_static_on: 1 });
-  render(<SettingsSection load={async () => contextSettings} loadRepos={async () => []} />);
+  render(<SettingsSection
+    load={async () => contextSettings}
+    loadRepos={async () => []}
+    loadContextStatus={async () => ({
+      total_repos: 0,
+      sources: {
+        context_static_on: sourceReady, context_jira_on: sourceReady,
+        context_db_schema_on: sourceReady, context_feedback_on: sourceReady,
+        context_current_pr_reviews_on: sourceReady,
+      },
+    })}
+  />);
 
   const toggle = await screen.findByRole("switch", { name: "참조 문서" });
+  await waitFor(() => expect(toggle).not.toBeDisabled());
   fireEvent.click(toggle);
   fireEvent.click(screen.getByRole("button", { name: "컨텍스트 저장" }));
 
   await waitFor(() => expect(patchSettings).toHaveBeenCalledTimes(1));
   expect(Object.keys(patchSettings.mock.calls[0][0]).sort()).toEqual([
-    "context_db_schema_on", "context_feedback_on", "context_graphify_on",
+    "context_current_pr_reviews_on", "context_db_schema_on", "context_feedback_on",
     "context_jira_on", "context_static_on",
   ]);
   expect(patchSettings.mock.calls[0][0]).toEqual(
@@ -311,6 +580,7 @@ test("sets per-repo provider overrides independently", async () => {
   render(<SettingsSection load={async () => settings} loadRepos={async () => [
     repo,
   ]} />);
+  await expandRepo();
 
   const staticOverride = await screen.findByRole("combobox", { name: "acme/api 참조 문서 컨텍스트" });
   fireEvent.change(staticOverride, { target: { value: "1" } });
@@ -328,6 +598,7 @@ test("sets per-repo verify and incremental overrides", async () => {
     async (_id, patch) => ({ ...repo, ...patch }),
   );
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const verify = await screen.findByRole("combobox", { name: "acme/api 교차확인" });
   fireEvent.change(verify, { target: { value: "1" } });
@@ -346,6 +617,7 @@ test("per-repo provider override shows and restores inheritance", async () => {
   render(<SettingsSection
     load={async () => ({ ...contextSettings, context_jira_on: 1 })}
     loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const override = await screen.findByRole("combobox", { name: "acme/api Jira 컨텍스트" });
   expect(override).toHaveDisplayValue("꺼짐");
@@ -354,15 +626,17 @@ test("per-repo provider override shows and restores inheritance", async () => {
   await waitFor(() => expect(patchRepo).toHaveBeenCalledWith(7, { context_jira_on: null }));
 });
 
-test("edits per-repo static_context_path and db_schema_path", async () => {
+test("edits per-repo context paths and live DB target", async () => {
   const repo = {
     id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1,
+    context_static_on: 1, context_db_schema_on: 1,
     static_context_path: "docs/old.md",
   };
   const patchRepo = vi.spyOn(api, "patchRepo").mockImplementation(
     async (_id, patch) => ({ ...repo, ...patch }),
   );
   render(<SettingsSection load={async () => settings} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const pathInput = await screen.findByRole("textbox", { name: "acme/api 참조 문서 경로" });
   expect(pathInput).toHaveDisplayValue("docs/old.md");
@@ -378,6 +652,13 @@ test("edits per-repo static_context_path and db_schema_path", async () => {
   await waitFor(() =>
     expect(patchRepo).toHaveBeenCalledWith(7, { db_schema_path: "db/structure.sql" }),
   );
+
+  const liveInput = screen.getByRole("textbox", { name: "acme/api Live DB 대상 ID" });
+  fireEvent.change(liveInput, { target: { value: "tenant-7" } });
+  fireEvent.blur(liveInput);
+  await waitFor(() =>
+    expect(patchRepo).toHaveBeenCalledWith(7, { live_db_target_id: "tenant-7" }),
+  );
 });
 
 test("repo harness select is populated from the harness list", async () => {
@@ -388,6 +669,7 @@ test("repo harness select is populated from the harness list", async () => {
       { id: 7, full_name: "acme/api", local_path: "/work/acme-api", enabled: 1, harness_name: "default" },
     ]}
     loadHarnesses={async () => ["default", "security-focus"]} />);
+  await expandRepo();
 
   const sel = await screen.findByRole("combobox", { name: "acme/api 하네스" });
   expect(within(sel).getByRole("option", { name: "security-focus" })).toBeInTheDocument();
@@ -406,6 +688,7 @@ test("toggles draft skip globally and per repo", async () => {
     async (_id, patch) => ({ ...repo, ...patch }),
   );
   render(<SettingsSection load={async () => ({ ...settings, skip_draft_on: 1 })} loadRepos={async () => [repo]} />);
+  await expandRepo();
 
   const toggle = await screen.findByRole("switch", { name: "draft 건너뛰기" });
   expect(toggle).toBeChecked();

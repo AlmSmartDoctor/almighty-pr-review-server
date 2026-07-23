@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, test } from "vitest";
 import { LearnSection } from "./LearnSection";
 
 const feedback = [
   {
+    repo_id: 1,
     repo: "acme/api",
     total: 5,
     categories: [
@@ -37,8 +38,22 @@ const feedback = [
       },
     ],
     slack_reactions: { positive: 8, negative: 2 },
+    review_rules: [
+      {
+        id: 10,
+        repo_id: 1,
+        category: "style",
+        text: "스타일 지적은 동작 영향이 있을 때만 제기한다.",
+        status: "proposed" as const,
+        evidence_total: 4,
+        evidence_rejected: 3,
+        created_at: "2026-07-14 10:20:00",
+        updated_at: "2026-07-14 10:20:00",
+      },
+    ],
   },
   {
+    repo_id: 2,
     repo: "acme/web",
     total: 2,
     categories: [{ category: "perf", approved: 2, edited: 0, rejected: 0 }],
@@ -46,6 +61,7 @@ const feedback = [
     rejected_examples: [],
     edited_examples: [],
     recent_decisions: [],
+    review_rules: [],
   },
 ];
 
@@ -105,6 +121,67 @@ test("switches repo tab and re-scopes the view", async () => {
   const table = screen.getByRole("table");
   expect(within(table).getByText("perf")).toBeInTheDocument();
   expect(screen.queryByText("변수명 개선")).not.toBeInTheDocument();
+});
+
+test("proposes rules and requires explicit activation", async () => {
+  const proposed = {
+    id: 20,
+    repo_id: 1,
+    category: "style",
+    text: "취향 차이만으로 지적하지 않는다.",
+    status: "proposed" as const,
+    evidence_total: 5,
+    evidence_rejected: 4,
+    created_at: "2026-07-14 11:00:00",
+    updated_at: "2026-07-14 11:00:00",
+  };
+  const activated = { ...proposed, status: "active" as const };
+  const proposeCalls: number[] = [];
+  const patchCalls: Array<[number, "active" | "disabled"]> = [];
+
+  render(
+    <LearnSection
+      load={async () => [{ ...feedback[0], review_rules: [] }]}
+      proposeRules={async (repoId) => {
+        proposeCalls.push(repoId);
+        return [proposed];
+      }}
+      patchRule={async (id, status) => {
+        patchCalls.push([id, status]);
+        return activated;
+      }}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "규칙 제안 만들기" }));
+  expect(await screen.findByText("취향 차이만으로 지적하지 않는다.")).toBeInTheDocument();
+  expect(proposeCalls).toEqual([1]);
+  expect(screen.getByText("제안")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "규칙 승인" }));
+  await waitFor(() => expect(patchCalls).toEqual([[20, "active"]]));
+  expect(await screen.findByText("적용 중")).toBeInTheDocument();
+});
+
+test("can disable an active review rule", async () => {
+  const active = {
+    ...feedback[0].review_rules[0],
+    status: "active" as const,
+  };
+  const patchCalls: Array<[number, "active" | "disabled"]> = [];
+  render(
+    <LearnSection
+      load={async () => [{ ...feedback[0], review_rules: [active] }]}
+      patchRule={async (id, status) => {
+        patchCalls.push([id, status]);
+        return { ...active, status };
+      }}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "규칙 비활성화" }));
+  await waitFor(() => expect(patchCalls).toEqual([[10, "disabled"]]));
+  expect(await screen.findByText("비활성")).toBeInTheDocument();
 });
 
 test("empty state when no team feedback exists", async () => {

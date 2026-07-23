@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { Check, ExternalLink, Pencil, RotateCw, Send, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "../api";
@@ -12,6 +12,8 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { StatusLine } from "@/components/status-line";
 import { Empty } from "@/components/empty";
 import { RepoTabs } from "@/components/repo-tabs";
+import { PageHead } from "@/components/page-head";
+import { LoadingState } from "@/components/loading-state";
 import { formatDateTime, formatDuration } from "@/lib/format";
 
 type JiraLink = { key: string; url: string };
@@ -22,6 +24,8 @@ type Pr = {
   title: string;
   repo: string;
   url?: string | null;
+  head_sha?: string | null;
+  run_head_sha?: string | null;
   jira_links?: JiraLink[];
   author?: string | null;
   created_at?: string | null;
@@ -56,16 +60,59 @@ type Finding = {
   vendor: string;
   consensus?: string;
   edited_text?: string | null;
+  verify_status?: string | null;
+  verify_rationale?: string | null;
+  verify_independent?: number | boolean | null;
+  verify_evidence_status?: string | null;
+  source_chunk_index?: number | null;
+  owner_chunk_index?: number | null;
+  scope_status?: string | null;
+  posting_eligible?: number | boolean;
+  duplicate_group_id?: number | null;
+  duplicate_suggested?: number | boolean;
 };
 
-type VendorResult = { id: number; vendor: string; status: string; error: string | null; duration_ms?: number | null; raw_path?: string | null };
+type ExecutionChunk = { status: string; total_tokens?: number | null; tool_calls?: number | null; telemetry_status?: string };
+type VendorExecutionMeta = { attempts?: { attempt: number; phase: string; chunks: ExecutionChunk[] }[] };
+type VendorResult = { id: number; vendor: string; status: string; error: string | null; duration_ms?: number | null; execution_meta?: VendorExecutionMeta | null };
 type RunSummary = { id: number; head_sha: string; trigger: string | null; status: string; error: string | null; started_at: string | null; finished_at: string | null; finding_count: number };
+type ContextManifestItem = {
+  source: string;
+  block_id: string;
+  selected: boolean;
+  reason?: string | null;
+  sensitivity?: string;
+  retention?: string;
+};
+type ContextChunkMeta = {
+  chunk_hash: string;
+  context_chars?: number;
+  selected_blocks: number;
+  omitted_blocks: number;
+  payload_persisted?: boolean;
+  manifest: ContextManifestItem[];
+};
+type ContextSourceMeta = {
+  provider: string;
+  status: string;
+  chars: number;
+  error: string | null;
+  items_read?: number | null;
+  items_selected?: number | null;
+  automated_items_selected?: number | null;
+};
 type RunContext = {
   text: string;
   meta: {
-    sources: { provider: string; status: string; chars: number; error: string | null }[];
+    sources: ContextSourceMeta[];
     degraded?: boolean;
     duration_ms?: number | null;
+    context_chars?: number | null;
+    context_budget_chars?: number | null;
+    chunk_context_chars?: number | null;
+    context_payload_persisted?: boolean;
+    context_payload_policy?: string;
+    chunk_contexts?: ContextChunkMeta[];
   } | null;
 };
 type PostPreview = { comments: { vendor: string; body: string }[] };
@@ -131,14 +178,38 @@ export function ReviewSection(props: {
   const [actionMessage, setActionMessage] = useState("");
   const [triggeringId, setTriggeringId] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const requestSequence = useRef(0);
+  const appliedRequestSequence = useRef(0);
+  const mounted = useRef(true);
 
-  const refresh = () =>
-    loadPrs().then((rows) => { setPrs(rows); setError(""); }).catch(() => setError("오버뷰를 불러오지 못했습니다."));
+  const refresh = () => {
+    const sequence = ++requestSequence.current;
+    return loadPrs()
+      .then((rows) => {
+        if (!mounted.current || sequence < appliedRequestSequence.current) return;
+        appliedRequestSequence.current = sequence;
+        setPrs(rows);
+        setError("");
+      })
+      .catch(() => {
+        if (mounted.current && sequence >= appliedRequestSequence.current) {
+          setError("오버뷰를 불러오지 못했습니다.");
+        }
+      })
+      .finally(() => {
+        if (mounted.current) setLoaded(true);
+      });
+  };
 
   useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, LIST_POLL_MS);
-    return () => clearInterval(timer);
+    mounted.current = true;
+    void refresh();
+    const timer = setInterval(() => void refresh(), LIST_POLL_MS);
+    return () => {
+      mounted.current = false;
+      clearInterval(timer);
+    };
   }, []);
 
   const repos = ["전체", ...Array.from(new Set(prs.map((p) => p.repo)))];
@@ -183,6 +254,10 @@ export function ReviewSection(props: {
       .finally(() => setTriggeringId(null));
   };
 
+  if (!loaded) {
+    return <LoadingState label="리뷰 현황을 불러오는 중입니다." />;
+  }
+
   if (prId && detail) {
     return (
       <Detail
@@ -210,21 +285,19 @@ export function ReviewSection(props: {
 
   return (
     <div>
-      <header className="mb-5 flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-[21px] font-bold leading-tight">리뷰 상황판</h1>
-          <p className="mt-1 text-[13px] text-muted-foreground">
-            사전 스크리닝, 벤더 리뷰 결과, 승인 대기 상태를 한 화면에서 봅니다.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={syncAllRepos} disabled={syncing}>
-            <RotateCw className={syncing ? "animate-spin" : ""} />
-            {syncing ? "GitHub 동기화 중" : "GitHub PR 전체 동기화"}
-          </Button>
-          <Button variant="outline" onClick={refresh}><RotateCw /> 화면 새로고침</Button>
-        </div>
-      </header>
+      <PageHead
+        title="리뷰 상황판"
+        sub="사전 스크리닝, 벤더 리뷰 결과, 승인 대기 상태를 한 화면에서 봅니다."
+        actions={(
+          <>
+            <Button onClick={syncAllRepos} disabled={syncing}>
+              <RotateCw className={syncing ? "animate-spin" : ""} />
+              {syncing ? "GitHub 동기화 중" : "GitHub PR 전체 동기화"}
+            </Button>
+            <Button variant="outline" onClick={() => void refresh()}><RotateCw /> 화면 새로고침</Button>
+          </>
+        )}
+      />
 
       <RepoTabs
         items={repos.map((r) => ({
@@ -233,8 +306,10 @@ export function ReviewSection(props: {
         }))}
         activeKey={tab}
         onSelect={setTab}
+        panelId="review-repo-panel"
       />
 
+      <section id="review-repo-panel" role="tabpanel" aria-label={`${tab} 레포 리뷰`} className="min-w-0">
       <div className="mb-5 flex flex-wrap gap-2" role="group" aria-label="리뷰 상태 필터">
         {STATUS_FILTERS.map((f) => {
           const active = statusFilter === f.key;
@@ -279,26 +354,25 @@ export function ReviewSection(props: {
           {shown.map((p) => (
             <article
               key={p.id}
-              onClick={() => navigate(`/reviews/${p.id}`)}
               className={cn(
-                "group grid cursor-pointer grid-cols-1 gap-x-5 gap-y-3 rounded-xl border border-l-[3px] border-border border-l-transparent bg-card p-4 shadow-sm transition-all",
-                "hover:border-l-primary hover:shadow-md sm:grid-cols-[minmax(0,1fr)_auto]",
+                "group grid grid-cols-1 gap-x-5 gap-y-3 rounded-xl border border-l-[3px] border-border border-l-transparent bg-card p-4 shadow-sm transition-all",
+                "hover:border-l-primary hover:shadow-md focus-within:border-l-primary focus-within:shadow-md sm:grid-cols-[minmax(0,1fr)_auto]",
               )}
             >
               <div className="min-w-0">
                 <div className="mb-1.5 flex flex-wrap items-center gap-2">
                   <span className="font-mono text-[12px] font-bold text-muted-foreground">#{p.number}</span>
                   {!!p.is_draft && <Badge variant="neutral">Draft</Badge>}
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); navigate(`/reviews/${p.id}`); }}
+                  <Link
+                    to={`/reviews/${p.id}`}
+                    aria-label={`${p.repo} PR #${p.number} ${p.title} 상세 보기`}
                     className={cn(
                       "rounded text-left text-[15px] font-bold text-foreground transition-colors hover:text-primary",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
                     )}
                   >
                     {p.title}
-                  </button>
+                  </Link>
                   <NeedBadge value={p.prescreen} />
                   <SeverityBadge pr={p} />
                 </div>
@@ -328,6 +402,7 @@ export function ReviewSection(props: {
           ))}
         </div>
       )}
+      </section>
     </div>
   );
 }
@@ -398,15 +473,21 @@ function JobBadge({ pr }: { pr: Pr }) {
       <Badge variant="danger" title={pr.job_error ?? undefined}>잡 실패</Badge>
     );
   }
-  if (pr.job_status === "queued" && pr.job_next_run_at) {
-    return (
+  if (pr.job_status === "queued") {
+    return pr.job_next_run_at ? (
       <Badge variant="warn" title={`재시도 예정: ${pr.job_next_run_at}`}>재시도 대기</Badge>
+    ) : (
+      <Badge variant="warn">잡 대기</Badge>
     );
+  }
+  if (pr.job_status === "running") {
+    return <Badge variant="warn">잡 실행 중</Badge>;
   }
   return null;
 }
 
 function reviewStatus(pr: Pr): ReviewStatusFilter | null {
+  if (["queued", "running"].includes(pr.job_status ?? "")) return "inProgress";
   if (!pr.run_id) return "unreviewed";
   if (["queued", "running"].includes(pr.run_status ?? "")) return "inProgress";
   if (pr.run_status === "done") return "completed";
@@ -442,11 +523,25 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   const loadPostPreview = loadPreview ?? api.runPostPreview;
   const loadHealth = loadPostHealth ?? api.prPostHealth;
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [findingsRunId, setFindingsRunId] = useState<number | null>(null);
   const [vendors, setVendors] = useState<VendorResult[]>([]);
+  const [vendorsRunId, setVendorsRunId] = useState<number | null>(null);
   const [context, setContext] = useState<RunContext | null>(null);
+  const [contextRunId, setContextRunId] = useState<number | null>(null);
   const [postHealth, setPostHealth] = useState<PostHealth | null>(null);
   const [preview, setPreview] = useState("승인된 finding이 없습니다.");
+  const [previewRunId, setPreviewRunId] = useState<number | null>(null);
+  const previewRequestSeq = useRef(0);
+  const findingsRequestSeq = useRef(0);
+  const findingsAppliedSeq = useRef(0);
+  const vendorsRequestSeq = useRef(0);
+  const vendorsAppliedSeq = useRef(0);
+  const contextRequestSeq = useRef(0);
+  const contextAppliedSeq = useRef(0);
+  const [savingFindingIds, setSavingFindingIds] = useState<Set<number>>(new Set());
+  const savingFindingIdsRef = useRef<Set<number>>(new Set());
   const [posting, setPosting] = useState(false);
+  const postingRef = useRef(false);
   const [triggering, setTriggering] = useState(false);
   const [message, setMessage] = useState("");
   // 트리거 직후 새 run이 아직 안 생긴 구간을 폴링으로 메우기 위해, 트리거 시점의 run_id를 기억.
@@ -456,22 +551,75 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   // null = 최신 run 따라감(새 run이 생기면 자동 전환). 숫자 = 과거 run 고정 조회.
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
   const runId = selectedRun ?? pr.run_id;
+  const runIdRef = useRef(runId);
+  runIdRef.current = runId;
+  const findingsLoaded = findingsRunId === runId;
+  const currentFindings = findingsLoaded ? findings : [];
+  const currentVendors = vendorsRunId === runId ? vendors : [];
+  const currentContext = contextRunId === runId ? context : null;
+  const currentPreview = previewRunId === runId ? preview : "승인된 finding이 없습니다.";
   const viewingPast = selectedRun !== null && selectedRun !== pr.run_id;
+  const currentRunStale = Boolean(
+    !viewingPast && pr.head_sha && pr.run_head_sha && pr.head_sha !== pr.run_head_sha,
+  );
   const selInfo = runs.find((r) => r.id === runId);
   const runDuration = formatDuration(pr.run_duration_ms);
   const prescreenDuration = formatDuration(pr.prescreen_duration_ms);
 
   const reloadFindings = () => {
-    if (!runId) return Promise.resolve();
-    return load(runId).then(setFindings).catch(() => setMessage("findings를 불러오지 못했습니다."));
+    const targetRunId = runId;
+    const requestSeq = ++findingsRequestSeq.current;
+    if (!targetRunId) {
+      setFindings([]);
+      setFindingsRunId(null);
+      return Promise.resolve();
+    }
+    return load(targetRunId)
+      .then((loaded) => {
+        if (runIdRef.current !== targetRunId || requestSeq < findingsAppliedSeq.current) return;
+        findingsAppliedSeq.current = requestSeq;
+        setFindings(loaded);
+        setFindingsRunId(targetRunId);
+      })
+      .catch(() => {
+        if (runIdRef.current === targetRunId && requestSeq >= findingsAppliedSeq.current) {
+          setMessage("findings를 불러오지 못했습니다.");
+        }
+      });
   };
   const reloadVendors = () => {
-    if (!runId) return;
-    loadVR(runId).then(setVendors).catch(() => setVendors([]));
+    const targetRunId = runId;
+    const requestSeq = ++vendorsRequestSeq.current;
+    if (!targetRunId) return Promise.resolve();
+    return loadVR(targetRunId)
+      .then((loaded) => {
+        if (runIdRef.current !== targetRunId || requestSeq < vendorsAppliedSeq.current) return;
+        vendorsAppliedSeq.current = requestSeq;
+        setVendors(loaded);
+        setVendorsRunId(targetRunId);
+      })
+      .catch(() => {
+        if (runIdRef.current !== targetRunId || requestSeq < vendorsAppliedSeq.current) return;
+        setVendors([]);
+        setVendorsRunId(targetRunId);
+      });
   };
   const reloadContext = () => {
-    if (!runId) return;
-    loadCtx(runId).then(setContext).catch(() => setContext(null));
+    const targetRunId = runId;
+    const requestSeq = ++contextRequestSeq.current;
+    if (!targetRunId) return Promise.resolve();
+    return loadCtx(targetRunId)
+      .then((loaded) => {
+        if (runIdRef.current !== targetRunId || requestSeq < contextAppliedSeq.current) return;
+        contextAppliedSeq.current = requestSeq;
+        setContext(loaded);
+        setContextRunId(targetRunId);
+      })
+      .catch(() => {
+        if (runIdRef.current !== targetRunId || requestSeq < contextAppliedSeq.current) return;
+        setContext(null);
+        setContextRunId(targetRunId);
+      });
   };
 
   useEffect(() => {
@@ -498,7 +646,8 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
 
   // 리뷰 진행 중(큐 대기/실행 중)이거나 트리거 직후 새 run을 기다리는 동안 폴링해
   // run 상태·단계별 소요시간·finding·벤더 결과를 새로고침 없이 실시간 갱신한다.
-  const inProgress = ["queued", "running"].includes(pr.run_status ?? "");
+  const inProgress = ["queued", "running"].includes(pr.run_status ?? "")
+    || ["queued", "running"].includes(pr.job_status ?? "");
   const awaitingNewRun = awaitingBase !== undefined && pr.run_id === awaitingBase;
   const live = inProgress || awaitingNewRun;
 
@@ -523,51 +672,95 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, runId]);
 
-  const ctxSources = context?.meta?.sources ?? [];
-  const ctxPresent = Boolean(context?.text);
-  const ctxBase = context?.meta?.degraded
+  const displayedRunStatus = viewingPast ? selInfo?.status : pr.run_status;
+  const displayedRunError = viewingPast ? selInfo?.error : pr.run_error;
+  const ctxSources = currentContext?.meta?.sources ?? [];
+  const ctxChunks = currentContext?.meta?.chunk_contexts ?? [];
+  const selectedContextBlocks = ctxChunks.reduce((sum, item) => sum + item.selected_blocks, 0);
+  const omittedContextBlocks = ctxChunks.reduce((sum, item) => sum + item.omitted_blocks, 0);
+  const contextCollecting = !viewingPast
+    && ["queued", "running"].includes(displayedRunStatus ?? "")
+    && currentContext?.meta == null;
+  const ctxPresent = Boolean(currentContext?.text) || selectedContextBlocks > 0;
+  const ctxBase = currentContext?.meta?.degraded
     ? "컨텍스트 수집 실패 · 컨텍스트 없이 진행"
-    : ctxSources.length > 0
-      ? ctxSources.map((s) => `${s.provider}·${s.status}`).join(" · ")
-      : "주입된 외부 컨텍스트 없음";
-  const ctxDesc = [ctxBase, formatDuration(context?.meta?.duration_ms)].filter(Boolean).join(" · ");
+    : contextCollecting
+      ? displayedRunStatus === "queued" ? "컨텍스트 수집 대기 중" : "컨텍스트 수집 중"
+      : ctxSources.length > 0
+        ? ctxSources.map((s) => `${s.provider}·${s.status}`).join(" · ")
+        : "주입된 외부 컨텍스트 없음";
+  const ctxRetention = selectedContextBlocks > 0 && !currentContext?.text
+    ? "민감/manifest-only 본문 미보존"
+    : null;
+  const ctxDesc = [
+    ctxBase,
+    selectedContextBlocks ? `${selectedContextBlocks} block 선택 · ${omittedContextBlocks} block 생략` : null,
+    ctxRetention,
+    formatDuration(currentContext?.meta?.duration_ms),
+  ].filter(Boolean).join(" · ");
+  const ctxEffects = contextEffectSummary(currentContext);
 
-  const failed = vendors.filter((v) => v.status === "failed");
-  const approved = findings.filter((f) => f.status === "approved" || f.status === "edited");
+  const failed = currentVendors.filter((v) => ["failed", "partial", "timeout"].includes(v.status));
+  const approved = currentFindings.filter((f) => f.status === "approved" || f.status === "edited");
   const runStoppedWithoutFindings =
-    ["canceled", "failed"].includes(pr.run_status ?? "") && findings.length === 0;
+    findingsLoaded
+    && ["canceled", "failed"].includes(displayedRunStatus ?? "")
+    && currentFindings.length === 0;
 
-  const reloadPreview = () => {
-    if (!runId || approved.length === 0) {
+  const reloadPreview = (hasApproved = approved.length > 0) => {
+    const requestSeq = ++previewRequestSeq.current;
+    const targetRunId = runId;
+    if (!targetRunId || !hasApproved) {
       setPreview("승인된 finding이 없습니다.");
+      setPreviewRunId(targetRunId ?? null);
       return Promise.resolve();
     }
-    return loadPostPreview(runId)
+    return loadPostPreview(targetRunId)
       .then((res) => {
+        if (runIdRef.current !== targetRunId || previewRequestSeq.current !== requestSeq) return;
         const bodies = res.comments.map((c: { body: string }) => c.body);
         setPreview(bodies.length > 0 ? bodies.join("\n\n---\n\n") : "승인된 finding이 없습니다.");
+        setPreviewRunId(targetRunId);
       })
-      .catch(() => setPreview("프리뷰를 불러오지 못했습니다."));
+      .catch(() => {
+        if (runIdRef.current !== targetRunId || previewRequestSeq.current !== requestSeq) return;
+        setPreview("프리뷰를 불러오지 못했습니다.");
+        setPreviewRunId(targetRunId);
+      });
   };
 
-  useEffect(() => { reloadPreview(); }, [runId, findings]);
+  useEffect(() => { reloadPreview(); }, [runId, findings, findingsRunId]);
 
   const setStatus = (id: number, status: string, edited_text?: string) => {
-    const prev = findings.find((f) => f.id === id);
+    if (savingFindingIdsRef.current.has(id)) return;
+    const prev = currentFindings.find((f) => f.id === id);
+    savingFindingIdsRef.current.add(id);
+    setSavingFindingIds(new Set(savingFindingIdsRef.current));
     setMessage("");
-    setFindings((fs) => fs.map((f) => (
-      f.id === id ? { ...f, status, edited_text: edited_text ?? f.edited_text } : f
-    )));
+    const nextFindings = currentFindings.map((finding) => (
+      finding.id === id
+        ? { ...finding, status, edited_text: edited_text ?? finding.edited_text }
+        : finding
+    ));
+    const hasApprovedAfterSave = nextFindings.some(
+      (finding) => finding.status === "approved" || finding.status === "edited",
+    );
+    setFindings(nextFindings);
     api.patchFinding(id, edited_text === undefined ? { status } : { status, edited_text })
-      .then(() => reloadPreview())
+      .then(() => reloadPreview(hasApprovedAfterSave))
       .catch(() => {
         if (prev) setFindings((fs) => fs.map((f) => (f.id === id ? prev : f)));
         setMessage("상태 저장에 실패했습니다.");
+      })
+      .finally(() => {
+        savingFindingIdsRef.current.delete(id);
+        setSavingFindingIds(new Set(savingFindingIdsRef.current));
       });
   };
 
   const post = () => {
-    if (!runId || approved.length === 0) return;
+    if (!runId || approved.length === 0 || postingRef.current) return;
+    postingRef.current = true;
     setPosting(true);
     setMessage("");
     api.postRun(runId)
@@ -577,7 +770,10 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
         return reloadFindings();
       })
       .catch((e) => setMessage(`포스팅에 실패했습니다: ${e instanceof Error ? e.message : "원인 미상"}`))
-      .finally(() => setPosting(false));
+      .finally(() => {
+        postingRef.current = false;
+        setPosting(false);
+      });
   };
 
   const retryVendors = () => {
@@ -681,6 +877,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
           </NativeSelect>
         )}
         {viewingPast && <Badge variant="warn">과거 run 조회 중</Badge>}
+        {currentRunStale && <Badge variant="warn">현재 head 이전 run</Badge>}
         <Button variant="outline" size="sm" onClick={triggerReview} disabled={triggering}>수동 리뷰</Button>
         {cancelable && (
           <Button variant="outline" size="sm" onClick={cancelReview} disabled={triggering}>
@@ -693,13 +890,13 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
         <Card className="mb-4 border-danger/30 bg-danger-soft/40">
           <CardContent className="flex flex-wrap items-center gap-2 py-3.5">
             <Badge variant="danger">
-              {vendors.length > 0 && failed.length === vendors.length ? "⚠ 벤더 리뷰 실패" : "⚠ 일부 벤더 리뷰 실패"}
+              {currentVendors.length > 0 && failed.length === currentVendors.length ? "⚠ 벤더 리뷰 실패/일부 누락" : "⚠ 일부 벤더 리뷰 실패/누락"}
             </Badge>
             <StatusLine inline>
-              자동 재시도 안 함: {failed.map((v) => `${v.vendor}(${v.error ?? "실패"})`).join(", ")}
+              자동 재시도 안 함: {failed.map((v) => `${v.vendor}(${v.status === "partial" ? "일부 청크 누락" : v.error ?? v.status})`).join(", ")}
             </StatusLine>
-            <Button variant="outline" size="sm" onClick={retryVendors} disabled={triggering}>
-              실패 벤더만 재시도
+            <Button variant="outline" size="sm" onClick={retryVendors} disabled={triggering || viewingPast || currentRunStale}>
+              실패·누락 벤더 재시도
             </Button>
           </CardContent>
         </Card>
@@ -708,8 +905,8 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       {runStoppedWithoutFindings && (
         <Card className="mb-4">
           <CardContent className="flex flex-wrap items-center gap-2 py-3.5">
-            <Badge variant={pr.run_status === "failed" ? "danger" : "neutral"}>리뷰가 실행되지 않았습니다</Badge>
-            <StatusLine inline>{summarizeRunError(pr.run_error)}</StatusLine>
+            <Badge variant={displayedRunStatus === "failed" ? "danger" : "neutral"}>리뷰가 실행되지 않았습니다</Badge>
+            <StatusLine inline>{summarizeRunError(displayedRunError ?? null)}</StatusLine>
           </CardContent>
         </Card>
       )}
@@ -732,44 +929,71 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
                 />
                 <Trace
                   title="사전 스크리닝"
-                  desc={[pr.prescreen ?? "대기", pr.severity ?? "low", prescreenDuration].filter(Boolean).join(" · ")}
-                  done={Boolean(pr.prescreen)}
+                  desc={viewingPast
+                    ? "과거 run의 사전 스크리닝 상세는 저장되지 않았습니다."
+                    : [pr.prescreen ?? "대기", pr.severity ?? "low", prescreenDuration].filter(Boolean).join(" · ")}
+                  done={!viewingPast && Boolean(pr.prescreen)}
                 />
                 <Trace
                   title="외부 컨텍스트"
                   desc={ctxDesc}
                   done={ctxPresent}
-                  failed={Boolean(context?.meta?.degraded)}
+                  failed={Boolean(currentContext?.meta?.degraded)}
                 />
-                {vendors.length === 0 ? (
+                {currentVendors.length === 0 ? (
                   <Trace
                     title="벤더 리뷰"
                     desc={!viewingPast && ["queued", "running"].includes(pr.run_status ?? "") ? "벤더 결과를 기다리는 중" : "벤더 결과 없음"}
                   />
-                ) : vendors.map((v) => (
+                ) : currentVendors.map((v) => (
                   <Trace key={v.vendor} title={`${v.vendor} 리뷰`}
-                         desc={[v.status, formatDuration(v.duration_ms), v.error].filter(Boolean).join(" · ")}
-                         done={v.status === "done"} failed={v.status === "failed"}
-                         action={v.raw_path ? (
-                           <a href={`/api/vendor-results/${v.id}/raw`} target="_blank" rel="noreferrer"
-                              className="text-[12px] font-semibold text-primary hover:underline">
-                             원문 보기
-                           </a>
-                         ) : undefined} />
+                         desc={[
+                           v.status === "partial" ? "완료(일부 범위 누락)" : v.status,
+                           formatDuration(v.duration_ms),
+                           executionSummary(v.execution_meta),
+                           v.error,
+                         ].filter(Boolean).join(" · ")}
+                         done={v.status === "done"} failed={["failed", "partial", "timeout"].includes(v.status)} />
                 ))}
                 <Trace
                   title="트리아지"
-                  desc={`${approved.length} 승인 · ${findings.filter((f) => f.status === "dismissed").length} 기각 · ${findings.length} 전체`}
+                  desc={`${approved.length} 승인 · ${currentFindings.filter((f) => f.status === "dismissed").length} 기각 · ${currentFindings.length} 전체`}
                   done={approved.length > 0}
                   last
                 />
               </ol>
-              {ctxPresent && (
+              {ctxEffects.length > 0 && (
+                <div aria-label="컨텍스트 적용 요약" className="mt-3 flex flex-wrap gap-1.5">
+                  {ctxEffects.map((effect) => (
+                    <Badge key={effect} variant="neutral">{effect}</Badge>
+                  ))}
+                </div>
+              )}
+              {currentContext?.text && (
                 <details className="mt-3">
-                  <summary className="cursor-pointer text-[12.5px] font-semibold text-muted-foreground">주입된 컨텍스트 원문 보기</summary>
+                  <summary className="cursor-pointer text-[12.5px] font-semibold text-muted-foreground">보존된 컨텍스트 원문 보기</summary>
                   <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#1c2230] px-4 py-3.5 font-mono text-[12px] leading-relaxed text-[#d7deea]">
-                    {context?.text}
+                    {currentContext.text}
                   </pre>
+                </details>
+              )}
+              {ctxChunks.length > 0 && (
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-[12.5px] font-semibold text-muted-foreground">청크 컨텍스트 manifest 보기</summary>
+                  <div className="mt-2 space-y-2 text-[12px] text-muted-foreground">
+                    {ctxChunks.map((chunk, index) => (
+                      <div key={`${chunk.chunk_hash}-${index}`} className="rounded-lg border border-border p-2.5">
+                        <div>청크 {index + 1} · 선택 {chunk.selected_blocks} · 생략 {chunk.omitted_blocks} · 본문 {chunk.payload_persisted ? "보존" : "미보존"}</div>
+                        {chunk.manifest.map((item) => (
+                          <div key={`${item.source}-${item.block_id}`} className="mt-1 font-mono">
+                            {item.selected ? "✓" : "−"} {item.source}/{item.block_id}
+                            {item.reason ? ` · ${item.reason}` : ""}
+                            {item.sensitivity ? ` · ${item.sensitivity}` : ""}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
                 </details>
               )}
             </CardContent>
@@ -778,15 +1002,23 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
           <Card>
             <CardHeader>
               <CardTitle>Findings 트리아지</CardTitle>
-              <StatusLine inline>{findings.length}건</StatusLine>
+              <StatusLine inline>{currentFindings.length}건</StatusLine>
             </CardHeader>
             <CardContent>
-              {findings.length === 0 ? (
+              {!findingsLoaded ? (
+                <Empty>findings를 불러오는 중입니다.</Empty>
+              ) : currentFindings.length === 0 ? (
                 <Empty>표시할 finding이 없습니다.</Empty>
               ) : (
                 <div className="flex flex-col gap-3">
-                  {findings.map((f) => (
-                    <FindingCard key={f.id} finding={f} onSet={setStatus} readOnly={viewingPast} />
+                  {currentFindings.map((f) => (
+                    <FindingCard
+                      key={f.id}
+                      finding={f}
+                      onSet={setStatus}
+                      readOnly={viewingPast || currentRunStale}
+                      saving={savingFindingIds.has(f.id)}
+                    />
                   ))}
                 </div>
               )}
@@ -802,13 +1034,13 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
             </CardHeader>
             <CardContent>
               <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#1c2230] px-4 py-3.5 font-mono text-[12px] leading-relaxed text-[#d7deea]">
-                {preview}
+                {currentPreview}
               </pre>
               {postHealth && !postHealth.ok && (
                 <StatusLine tone="error" className="mt-2">{postHealth.message}</StatusLine>
               )}
               <div className="mt-3 flex items-center gap-3">
-                <Button onClick={post} disabled={posting || approved.length === 0 || !postHealth?.ok || viewingPast}>
+                <Button onClick={post} disabled={posting || savingFindingIds.size > 0 || approved.length === 0 || !postHealth?.ok || viewingPast || currentRunStale}>
                   <Send /> 승인분 포스팅
                 </Button>
                 {viewingPast && <StatusLine inline>과거 run은 게시할 수 없습니다.</StatusLine>}
@@ -820,6 +1052,75 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       </div>
     </div>
   );
+}
+
+function contextEffectSummary(context: RunContext | null): string[] {
+  const meta = context?.meta;
+  if (!meta) return [];
+  const chunks = meta.chunk_contexts ?? [];
+  const selected = chunks.flatMap((chunk) => chunk.manifest).filter((item) => item.selected);
+  const uniqueBlocks = (source: string) => new Set(
+    selected.filter((item) => item.source === source).map((item) => item.block_id),
+  );
+  const effects: string[] = [];
+  for (const source of meta.sources ?? []) {
+    if (source.provider === "current_pr_reviews") {
+      const automated = source.automated_items_selected ?? 0;
+      effects.push(
+        `기존 리뷰 ${source.items_read ?? 0}건 → ${source.items_selected ?? 0}건 선택`
+        + (automated > 0 ? ` · 자동 ${automated}건` : ""),
+      );
+    } else if (source.provider === "jira") {
+      const issues = new Set(
+        [...uniqueBlocks("jira")].map((blockId) => blockId.split(":", 1)[0]),
+      ).size;
+      const jiraStatus = source.status === "empty"
+        ? "연결 이슈 없음"
+        : source.status === "error" ? "조회 실패" : source.status;
+      effects.push(source.status === "ok" ? `Jira ${issues}개 이슈` : `Jira ${jiraStatus}`);
+    } else if (source.provider === "static") {
+      const documents = [...uniqueBlocks("static")].filter(
+        (blockId) => blockId !== "instruction-change-warning",
+      ).length;
+      effects.push(`참조 문서 ${documents}개`);
+    } else if (source.provider === "db_schema") {
+      effects.push(source.status === "skipped" ? "DB 스키마 설정 없음" : `DB 스키마 ${source.status}`);
+    }
+  }
+  const contextChars = meta.chunk_context_chars ?? meta.context_chars ?? 0;
+  if (contextChars > 0) {
+    if (chunks.length > 1) {
+      effects.push(
+        `청크 컨텍스트 합계 ${contextChars.toLocaleString()}자`
+        + (meta.context_budget_chars
+          ? ` · 청크당 예산 ${meta.context_budget_chars.toLocaleString()}자`
+          : ""),
+      );
+    } else {
+      effects.push(
+        `컨텍스트 ${contextChars.toLocaleString()}자`
+        + (meta.context_budget_chars
+          ? ` / 예산 ${meta.context_budget_chars.toLocaleString()}자`
+          : ""),
+      );
+    }
+  }
+  return effects;
+}
+
+function executionSummary(meta?: VendorExecutionMeta | null) {
+  const chunks = meta?.attempts?.flatMap((attempt) => attempt.chunks ?? []) ?? [];
+  if (chunks.length === 0) return "telemetry 없음";
+  const tokens = chunks.reduce((sum, chunk) => sum + (chunk.total_tokens ?? 0), 0);
+  const tools = chunks.reduce((sum, chunk) => sum + (chunk.tool_calls ?? 0), 0);
+  const unavailable = chunks.every((chunk) => chunk.telemetry_status === "unavailable");
+  if (unavailable) return `${chunks.length}개 청크 · telemetry 없음`;
+  return [
+    `${chunks.length}개 청크`,
+    tokens > 0 ? `${tokens.toLocaleString()} tokens` : null,
+    tools > 0 ? `${tools} tools` : null,
+    tokens >= 500_000 || tools >= 24 ? "탐색 비용 높음" : null,
+  ].filter(Boolean).join(" · ");
 }
 
 function summarizeRunError(error: string | null) {
@@ -897,10 +1198,11 @@ function Trace({ title, desc, done = false, failed = false, last = false, action
   );
 }
 
-function FindingCard({ finding, onSet, readOnly = false }: {
+function FindingCard({ finding, onSet, readOnly = false, saving = false }: {
   finding: Finding;
   onSet: (id: number, status: string, edited_text?: string) => void;
   readOnly?: boolean;
+  saving?: boolean;
 }) {
   const [draft, setDraft] = useState(finding.edited_text ?? finding.claim);
   const state = finding.status;
@@ -918,21 +1220,32 @@ function FindingCard({ finding, onSet, readOnly = false }: {
         <code className="font-mono text-[12px] font-semibold">{finding.file}:{finding.line}</code>
         <Badge variant={vendorVariant(finding.vendor)}>{finding.vendor}</Badge>
         {finding.category && <Badge variant="neutral">{finding.category}</Badge>}
+        {finding.scope_status === "reassigned" && <Badge variant="warn">청크 재귀속</Badge>}
+        {finding.posting_eligible === 0 || finding.posting_eligible === false ? (
+          <Badge variant="warn">게시 제외 위치</Badge>
+        ) : null}
+        {finding.duplicate_suggested ? <Badge variant="neutral">중복 후보 #{finding.duplicate_group_id}</Badge> : null}
+        {finding.verify_status === "confirmed" && <Badge variant="ok">독립 재검증 확인</Badge>}
+        {finding.verify_status === "supported_self" && <Badge variant="neutral">동일 벤더 자체 지지</Badge>}
+        {finding.verify_status === "contested" && <Badge variant="warn">재검증 대립</Badge>}
+        {finding.verify_status === "refuted" && <Badge variant="danger">재검증 반박</Badge>}
+        {finding.verify_status === "degraded" && <Badge variant="neutral">재검증 미완료</Badge>}
         <span className="text-[12px] text-muted-foreground">상태: {FINDING_STATUS_LABEL[state] ?? state}</span>
       </div>
       <div className="my-1.5 font-semibold leading-relaxed">{finding.edited_text || finding.claim}</div>
       {finding.rationale && <p className="text-[12.5px] leading-relaxed text-muted-foreground">{finding.rationale}</p>}
       {!readOnly && (
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => onSet(finding.id, "approved")}><Check /> 승인</Button>
-          <Button variant="outline" size="sm" onClick={() => onSet(finding.id, "dismissed")}><X /> 기각</Button>
+          <Button variant="outline" size="sm" disabled={saving} onClick={() => onSet(finding.id, "approved")}><Check /> 승인</Button>
+          <Button variant="outline" size="sm" disabled={saving} onClick={() => onSet(finding.id, "dismissed")}><X /> 기각</Button>
           <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             aria-label={`finding ${finding.id} 수정`}
+            disabled={saving}
             className="h-8 min-w-0 flex-1"
           />
-          <Button variant="secondary" size="sm" onClick={() => onSet(finding.id, "edited", draft)}><Pencil /> 수정 저장</Button>
+          <Button variant="secondary" size="sm" disabled={saving} onClick={() => onSet(finding.id, "edited", draft)}><Pencil /> 수정 저장</Button>
         </div>
       )}
     </div>

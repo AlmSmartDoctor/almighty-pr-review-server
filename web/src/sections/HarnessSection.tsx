@@ -3,6 +3,7 @@ import { Plus, RotateCcw, Save } from "lucide-react";
 import { api } from "../api";
 import { PageHead } from "@/components/page-head";
 import { StatusLine } from "@/components/status-line";
+import { LoadingState } from "@/components/loading-state";
 import { Field } from "@/components/field";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ export function HarnessSection({ load, save, loadList }: {
   const [newName, setNewName] = useState("");
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const apply = (h: Harness) => {
     setHarness(h);
@@ -46,9 +48,11 @@ export function HarnessSection({ load, save, loadList }: {
 
   const loadHarness = (name: string) => {
     setErr("");
+    setLoading(true);
     return loader(name)
       .then(apply)
-      .catch(() => setErr("하네스를 불러오지 못했습니다."));
+      .catch(() => setErr("하네스를 불러오지 못했습니다."))
+      .finally(() => setLoading(false));
   };
 
   useEffect(() => {
@@ -85,7 +89,24 @@ export function HarnessSection({ load, save, loadList }: {
       .catch(() => setErr("하네스 생성에 실패했습니다."));
   };
 
-  if (!harness) return <p className="text-sm text-muted-foreground">불러오는 중...</p>;
+  if (!harness) {
+    return (
+      <div>
+        <PageHead
+          title="하네스 편집"
+          sub="리뷰 워커 전용 실행 환경을 관리합니다. 레포/상황별로 여러 하네스를 둘 수 있습니다."
+        />
+        {loading ? (
+          <LoadingState label="하네스 설정을 불러오는 중입니다." />
+        ) : (
+          <div className="rounded-xl border border-danger/20 bg-danger-soft p-5">
+            <StatusLine tone="error" className="mb-3">{err || "하네스를 불러오지 못했습니다."}</StatusLine>
+            <Button variant="outline" onClick={() => void loadHarness(selected)}>다시 시도</Button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   const vp = harness.vendor_prompts ?? {};
   const dirty =

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BookOpen, Database, FileCode2, FileText, RotateCw, Sparkles } from "lucide-react";
+import { Database, FileCode2, FileText, RotateCw, Sparkles } from "lucide-react";
 import { api } from "../api";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty } from "@/components/empty";
 import { RepoTabs } from "@/components/repo-tabs";
 import { StatusLine } from "@/components/status-line";
+import { PageHead } from "@/components/page-head";
+import { LoadingState } from "@/components/loading-state";
 
 type Evidence = {
   kind: "code" | "document" | "database" | "generator";
@@ -102,24 +104,20 @@ export function WikiSection({
     }
   };
 
+  if (!loaded) return <LoadingState label="Ground Truth를 불러오는 중입니다." />;
+
   return (
     <div>
-      <header className="mb-5 flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="flex items-center gap-2 text-[21px] font-bold leading-tight">
-            <BookOpen className="size-5 text-brand" /> LLM Wiki
-          </h1>
-          <p className="mt-1 text-[13px] text-muted-foreground">
-            레포 코드·문서·DB 스키마를 읽고 근거와 함께 정리한 Ground Truth입니다.
-          </p>
-        </div>
-        {active && (
+      <PageHead
+        title="LLM Wiki"
+        sub="레포 코드·문서·DB 스키마를 읽고 근거와 함께 정리한 Ground Truth입니다."
+        actions={active && (
           <Button onClick={generate} disabled={isGenerating}>
             {isGenerating ? <RotateCw className="animate-spin" /> : <Sparkles />}
             {isGenerating ? "분석 중..." : active.page ? "Ground Truth 다시 분석" : "Ground Truth 생성"}
           </Button>
         )}
-      </header>
+      />
 
       {error && <StatusLine tone="error" className="mb-3">{error}</StatusLine>}
 
@@ -132,8 +130,13 @@ export function WikiSection({
             }))}
             activeKey={active?.repo ?? null}
             onSelect={setTab}
+            panelId="wiki-repo-panel"
           />
-          {active && <GroundTruthView entry={active} />}
+          {active && (
+            <section id="wiki-repo-panel" role="tabpanel" aria-label={`${active.repo} Ground Truth`} className="min-w-0">
+              <GroundTruthView entry={active} />
+            </section>
+          )}
         </>
       ) : (
         loaded && !error && <Empty>등록된 레포가 없습니다. 설정에서 리뷰 대상 레포를 먼저 등록하세요.</Empty>
