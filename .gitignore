@@ -5,10 +5,16 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+node_modules/
 web/node_modules/
 web/dist/
+.idea/
+.pi-subagents/
+.safe-db-locks/
+.safe-db-audit.jsonl
 harness/**/runtime/
 .clones/
 .raw/
 .env
 .env.*
+.playwright-mcp/
