@@ -1,11 +1,13 @@
 import asyncio
 import json
+import re
 import sqlite3
+import threading
+import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from server import config
@@ -15,30 +17,45 @@ from server.context.registry import _effective
 from server.db import connect, init_schema
 from server.formatter import MARKER, build_comment, build_inline_comment
 from server.github.gh import GhClient, GitHubCliError
+from server.http_security import protect_management_api
 from server.models import Finding
 from server.repos import (
     feedback_repo,
     finding_repo,
     job_repo,
+    post_operation_repo,
     posted_repo,
     pr_repo,
     repo_repo,
     review_repo,
+    review_rule_repo,
     settings_repo,
     wiki_repo,
 )
 from server.review.diff_filter import commentable_lines
-from server.review.prescreen import THRESHOLDS
-from server.review.harness import (
-    HarnessProfile,
-    create_harness,
-    list_harnesses,
-    set_vendor_prompt,
-    validate_harness_name,
+from server.review.finding_policy import (
+    policy_snapshot_from_row,
+    resolve_policy_snapshot,
+)
+from server.review.prescreen import THRESHOLDS, is_valid_prescreen_model
+from server.routes.harness import (
+    HarnessPut,
+    _valid_name_or_400,
+    get_harness,
+    list_harness,
+    put_harness,
+    router as harness_router,
 )
 
 
 _initialized = False
+_POST_LOCKS: dict[int, threading.Lock] = {}
+_POST_LOCKS_GUARD = threading.Lock()
+
+
+def _post_lock(run_id: int) -> threading.Lock:
+    with _POST_LOCKS_GUARD:
+        return _POST_LOCKS.setdefault(run_id, threading.Lock())
 
 
 def _ensure_schema():
@@ -50,28 +67,163 @@ def _ensure_schema():
         _initialized = True
 
 
+def _diagnostic_cleanup_coro(stop_event):
+    if not config.DIAGNOSTIC_CLEANUP_ENABLED:
+        return None
+    from server.retention import diagnostic_cleanup_loop
+
+    return diagnostic_cleanup_loop(
+        config.DB_PATH,
+        retention_days=config.DIAGNOSTIC_RETENTION_DAYS,
+        raw_dir=config.RAW_DIR,
+        stop_event=stop_event,
+        context_retention_days=config.CONTEXT_PAYLOAD_RETENTION_DAYS,
+    )
+
+
+class BackgroundShutdownError(RuntimeError):
+    pass
+
+
+async def _shutdown_background_tasks(tasks, stop_event) -> list:
+    stop_event.set()
+    if not tasks:
+        return []
+    _done, pending = await asyncio.wait(
+        tasks, timeout=config.BACKGROUND_SHUTDOWN_GRACE_SEC
+    )
+    for task in pending:
+        task.cancel()
+    if pending:
+        _cleaned, pending = await asyncio.wait(
+            pending, timeout=config.BACKGROUND_CLEANUP_TIMEOUT_SEC
+        )
+    if pending:
+        for task in pending:
+            task.cancel()
+        names = sorted(task.get_name() for task in pending)
+        raise BackgroundShutdownError(
+            f"background cleanup deadline exceeded: {','.join(names)}"
+        )
+    # Every task is already terminal, so gather cannot extend the deadline.
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from server.pipeline import _safe_concurrency_limit
     from server.poller import poll_loop
-    from server.worker import worker_loop
+    from server.review.runner import RunnerPool
+    from server.worker import (
+        lease_heartbeat_loop,
+        recover_worker_state,
+        worker_loop,
+    )
+    from server.repos import process_repo
 
     _ensure_schema()
+    # review job lane은 최대 2개로 병렬화하되 vendor CLI 총동시성은 기존 전역 설정을
+    # 공유 RunnerPool로 그대로 지킨다. stale 복구는 lane 시작 전에 단 한 번 수행한다.
+    startup = connect(config.DB_PATH)
+    try:
+        vendor_limit = _safe_concurrency_limit(
+            settings_repo.get(startup)["concurrency_limit"]
+        )
+    finally:
+        startup.close()
+    process_id = uuid.uuid4().hex
+    lease = connect(config.DB_PATH)
+    try:
+        process_repo.register(lease, process_id)
+    finally:
+        lease.close()
+    recover_worker_state(config.DB_PATH)
+    pool = RunnerPool(limit=vendor_limit)
     stop = asyncio.Event()
     tasks = [
-        asyncio.create_task(poll_loop(config.DB_PATH, stop_event=stop)),
-        asyncio.create_task(worker_loop(config.DB_PATH, stop_event=stop)),
+        asyncio.create_task(
+            poll_loop(config.DB_PATH, stop_event=stop), name="poller"
+        ),
+        asyncio.create_task(
+            lease_heartbeat_loop(config.DB_PATH, process_id, stop_event=stop),
+            name="process-lease",
+        ),
     ]
+    diagnostic_cleanup = _diagnostic_cleanup_coro(stop)
+    if diagnostic_cleanup is not None:
+        tasks.append(
+            asyncio.create_task(
+                diagnostic_cleanup, name="diagnostic-retention"
+            )
+        )
+    if config.RETENTION_DAYS > 0:
+        from server.retention import cleanup_loop
+
+        tasks.append(
+            asyncio.create_task(
+                cleanup_loop(
+                    config.DB_PATH,
+                    retention_days=config.RETENTION_DAYS,
+                    raw_dir=config.RAW_DIR,
+                    stop_event=stop,
+                ),
+                name="retention",
+            )
+        )
+    for index in range(min(2, vendor_limit)):
+        tasks.append(
+            asyncio.create_task(
+                worker_loop(
+                    config.DB_PATH,
+                    worker_id=f"w{index + 1}",
+                    owner_process_id=process_id,
+                    stop_event=stop,
+                    pool=pool,
+                    recover=False,
+                    wiki_enabled=index == 0,
+                ),
+                name=f"worker-w{index + 1}",
+            )
+        )
+    app.state.background_tasks = tasks
+    app.state.runtime_concurrency_limit = vendor_limit
+    app.state.runtime_worker_lanes = min(2, vendor_limit)
     try:
         yield
     finally:
-        stop.set()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await _shutdown_background_tasks(tasks, stop)
         for r in results:
             if isinstance(r, Exception):
                 print(f"[lifespan] background loop exited with error: {r!r}")
+        lease = connect(config.DB_PATH)
+        try:
+            process_repo.release(lease, process_id)
+        finally:
+            lease.close()
 
 
 app = FastAPI(title="Almighty PR Review Server", lifespan=lifespan)
+app.middleware("http")(protect_management_api)
+app.include_router(harness_router)
+
+
+async def _bounded_webhook_body(request: Request) -> bytes:
+    raw_length = request.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(400, "invalid content length") from exc
+        if content_length < 0:
+            raise HTTPException(400, "invalid content length")
+        if content_length > config.WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(413, "webhook body too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > config.WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(413, "webhook body too large")
+        body.extend(chunk)
+    return bytes(body)
 
 
 def get_conn():
@@ -87,7 +239,7 @@ def get_conn():
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "admin_auth_required": bool(config.ADMIN_TOKEN)}
 
 
 @app.get("/api/models")
@@ -124,6 +276,50 @@ def _normalize_full_name(raw: str) -> str:
     return name
 
 
+def _policy_snapshot_payload(snapshot) -> dict:
+    if snapshot is None:
+        return {
+            "snapshot_status": "unknown",
+            "scope": None,
+            "dedupe": None,
+            "cohort_key": None,
+            "decision_hash": None,
+            "config_hash": None,
+            "benchmark_attestation_hash": None,
+        }
+    return {
+        "snapshot_status": "known",
+        "scope": {
+            "requested_mode": snapshot.scope.requested_mode,
+            "effective_mode": snapshot.scope.effective_mode,
+            "reason": snapshot.scope.reason,
+            "selection_source": snapshot.scope.selection_source,
+        },
+        "dedupe": {
+            "requested_mode": snapshot.dedupe.requested_mode,
+            "effective_mode": snapshot.dedupe.effective_mode,
+            "reason": snapshot.dedupe.reason,
+            "selection_source": snapshot.dedupe.selection_source,
+        },
+        "cohort_key": snapshot.cohort_key,
+        "decision_hash": snapshot.decision_hash,
+        "config_hash": snapshot.config_hash,
+        "benchmark_attestation_hash": snapshot.benchmark_attestation_hash,
+    }
+
+
+def _repo_payload(row) -> dict:
+    payload = dict(row)
+    snapshot = resolve_policy_snapshot(row)
+    payload["policy_decision"] = _policy_snapshot_payload(snapshot)
+    for policy, decision in (("scope", snapshot.scope), ("dedupe", snapshot.dedupe)):
+        payload[f"requested_review_{policy}_mode"] = decision.requested_mode
+        payload[f"effective_review_{policy}_mode"] = decision.effective_mode
+        payload[f"effective_review_{policy}_reason"] = decision.reason
+        payload[f"review_{policy}_selection_source"] = decision.selection_source
+    return payload
+
+
 class RepoIn(BaseModel):
     full_name: str
     local_path: str | None = None  # ★개정: worktree 소스 경로
@@ -143,7 +339,7 @@ def add_repo(body: RepoIn, conn=Depends(get_conn)):
         )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "이미 등록된 레포입니다.")
-    return dict(repo_repo.get(conn, rid))
+    return _repo_payload(repo_repo.get(conn, rid))
 
 
 @app.get("/api/repos")
@@ -154,28 +350,33 @@ def list_repos(conn=Depends(get_conn)):
                    WHERE p.repo_id=r.id AND p.state='open') AS open_pr_count
            FROM repo r ORDER BY r.full_name COLLATE NOCASE"""
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_repo_payload(row) for row in rows]
 
 
 @app.get("/api/overview")
 def overview(conn=Depends(get_conn)):
     rows = conn.execute("""
       SELECT p.id, p.number, p.title, r.full_name AS repo,
-             p.url, p.head_ref, p.body,
+             p.url, p.head_ref, p.head_sha, p.body,
              p.author, p.created_at, p.first_seen_at, p.is_draft,
-             (SELECT complexity FROM pre_screen ps WHERE ps.pr_id=p.id
+             (SELECT complexity FROM pre_screen ps
+                WHERE ps.pr_id=p.id AND ps.head_sha=p.head_sha
                 ORDER BY ps.id DESC LIMIT 1) AS prescreen,
-             (SELECT duration_ms FROM pre_screen ps WHERE ps.pr_id=p.id
+             (SELECT duration_ms FROM pre_screen ps
+                WHERE ps.pr_id=p.id AND ps.head_sha=p.head_sha
                 ORDER BY ps.id DESC LIMIT 1) AS prescreen_duration_ms,
-             (SELECT COUNT(*)
-                FROM finding f JOIN review_run rr ON rr.id=f.run_id
-                WHERE rr.pr_id=p.id) AS finding_count,
+             (SELECT COUNT(*) FROM finding f
+                WHERE f.run_id=(SELECT id FROM review_run rr
+                  WHERE rr.pr_id=p.id ORDER BY id DESC LIMIT 1)) AS finding_count,
              (SELECT MIN(CASE f.severity WHEN 'critical' THEN 0 WHEN 'high'
                 THEN 1 WHEN 'medium' THEN 2 ELSE 3 END)
-                FROM finding f JOIN review_run rr ON rr.id=f.run_id
-                WHERE rr.pr_id=p.id) AS sev_rank,
+                FROM finding f
+                WHERE f.run_id=(SELECT id FROM review_run rr
+                  WHERE rr.pr_id=p.id ORDER BY id DESC LIMIT 1)) AS sev_rank,
              (SELECT id FROM review_run rr WHERE rr.pr_id=p.id
                 ORDER BY id DESC LIMIT 1) AS run_id,
+             (SELECT head_sha FROM review_run rr WHERE rr.pr_id=p.id
+                ORDER BY id DESC LIMIT 1) AS run_head_sha,
              (SELECT status FROM review_run rr WHERE rr.pr_id=p.id
                 ORDER BY id DESC LIMIT 1) AS run_status,
              (SELECT started_at FROM review_run rr WHERE rr.pr_id=p.id
@@ -191,11 +392,14 @@ def overview(conn=Depends(get_conn)):
                 ORDER BY id DESC LIMIT 1) AS run_duration_ms,
              (SELECT error FROM review_run rr WHERE rr.pr_id=p.id
                 ORDER BY id DESC LIMIT 1) AS run_error,
-             (SELECT status FROM review_job j WHERE j.pr_id=p.id
+             (SELECT status FROM review_job j
+                WHERE j.pr_id=p.id AND j.head_sha=p.head_sha
                 ORDER BY id DESC LIMIT 1) AS job_status,
-             (SELECT error FROM review_job j WHERE j.pr_id=p.id
+             (SELECT error FROM review_job j
+                WHERE j.pr_id=p.id AND j.head_sha=p.head_sha
                 ORDER BY id DESC LIMIT 1) AS job_error,
-             (SELECT next_run_at FROM review_job j WHERE j.pr_id=p.id
+             (SELECT next_run_at FROM review_job j
+                WHERE j.pr_id=p.id AND j.head_sha=p.head_sha
                 ORDER BY id DESC LIMIT 1) AS job_next_run_at
       FROM pull_request p JOIN repo r ON r.id=p.repo_id
       WHERE p.state='open'
@@ -241,27 +445,57 @@ def refresh_wiki(rid: int, conn=Depends(get_conn)):
 
 @app.get("/api/learn")
 def learn(conn=Depends(get_conn)):
-    """레포별 팀 판단(수용·수정·기각) + Slack 반응 집계 — /learn 탭이 열람하는 학습 신호.
-    finding 사람 결정 또는 Slack 반응이 있는 레포만, 결정 수 많은 순으로 반환."""
-    repos = conn.execute("SELECT full_name FROM repo ORDER BY full_name").fetchall()
+    """레포별 사람 판단·Slack 반응·승인 가능한 리뷰 규칙을 반환한다."""
+    repos = conn.execute("SELECT id, full_name FROM repo ORDER BY full_name").fetchall()
     out = []
     for r in repos:
         stats = feedback_source.repo_feedback_stats(conn, r["full_name"])
         slack = feedback_source.slack_counts(conn, r["full_name"])
-        if not stats["total"] and not (slack["positive"] or slack["negative"]):
+        rules = review_rule_repo.list_for_repo(conn, r["id"])
+        if (
+            not stats["total"]
+            and not (slack["positive"] or slack["negative"])
+            and not rules
+        ):
             continue
         out.append(
             {
+                "repo_id": r["id"],
                 "repo": r["full_name"],
                 **stats,
                 "slack_reactions": slack,
                 "recent_decisions": feedback_source.recent_decisions(
                     conn, r["full_name"]
                 ),
+                "review_rules": rules,
             }
         )
     out.sort(key=lambda x: (-x["total"], x["repo"]))
     return out
+
+
+@app.post("/api/repos/{rid}/review-rules/propose")
+def propose_review_rules(rid: int, conn=Depends(get_conn)):
+    repo = repo_repo.get(conn, rid)
+    if repo is None:
+        raise HTTPException(404, "repo not found")
+    stats = feedback_source.repo_feedback_stats(conn, repo["full_name"])
+    return review_rule_repo.propose_rules(conn, rid, stats["categories"])
+
+
+class ReviewRulePatch(BaseModel):
+    status: str
+
+
+@app.patch("/api/review-rules/{rule_id}")
+def patch_review_rule(rule_id: int, body: ReviewRulePatch, conn=Depends(get_conn)):
+    try:
+        rule = review_rule_repo.set_status(conn, rule_id, body.status)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if rule is None:
+        raise HTTPException(404, "review rule not found")
+    return rule
 
 
 class RepoPatch(BaseModel):
@@ -282,13 +516,17 @@ class RepoPatch(BaseModel):
     context_db_schema_on: int | None = None
     context_graphify_on: int | None = None
     context_feedback_on: int | None = None
+    context_current_pr_reviews_on: int | None = None
     verify_singles_on: int | None = None
     incremental_review_on: int | None = None
     skip_draft_on: int | None = None
     static_context_path: str | None = None
     jira_project_keys: str | None = None
     db_schema_path: str | None = None
+    live_db_target_id: str | None = None
     graphify_path: str | None = None
+    review_scope_guard_mode: str | None = None
+    review_dedupe_mode: str | None = None
 
 
 @app.patch("/api/repos/{rid}")
@@ -312,8 +550,31 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
             raise HTTPException(409, "진행 중인 작업을 완료하거나 취소한 뒤 이름을 변경하세요")
     if body.local_path is not None:
         fields["local_path"] = body.local_path.strip() or None
+    if body.live_db_target_id is not None:
+        from server.context.live_mssql_source import valid_target_id
+
+        target_id = body.live_db_target_id.strip()
+        if target_id and not valid_target_id(target_id):
+            raise HTTPException(400, "live_db_target_id가 유효하지 않습니다")
+        fields["live_db_target_id"] = target_id or None
     if body.trigger_mode is not None and body.trigger_mode not in ("auto", "manual"):
         raise HTTPException(400, "trigger_mode는 auto 또는 manual이어야 합니다")
+    if body.claude_effort is not None and body.claude_effort not in config.CLAUDE_EFFORTS:
+        raise HTTPException(
+            400, f"claude_effort는 {'/'.join(config.CLAUDE_EFFORTS)} 중 하나여야 합니다"
+        )
+    if body.codex_effort is not None and body.codex_effort not in config.CODEX_EFFORTS:
+        raise HTTPException(
+            400, f"codex_effort는 {'/'.join(config.CODEX_EFFORTS)} 중 하나여야 합니다"
+        )
+    for key in ("review_scope_guard_mode", "review_dedupe_mode"):
+        value = getattr(body, key)
+        if value is None:
+            continue
+        normalized = value.strip().lower()
+        if normalized not in {"", "observe", "enforce"}:
+            raise HTTPException(400, f"{key}는 observe/enforce 또는 빈 값이어야 합니다")
+        fields[key] = normalized or None
     binary_fields = (
         "enabled",
         "vendor_claude_on",
@@ -324,6 +585,7 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         "context_db_schema_on",
         "context_graphify_on",
         "context_feedback_on",
+        "context_current_pr_reviews_on",
         "verify_singles_on",
         "incremental_review_on",
         "skip_draft_on",
@@ -346,6 +608,7 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         "context_db_schema_on",
         "context_graphify_on",
         "context_feedback_on",
+        "context_current_pr_reviews_on",
         "verify_singles_on",
         "incremental_review_on",
         "skip_draft_on",
@@ -360,7 +623,7 @@ def patch_repo(rid: int, body: RepoPatch, conn=Depends(get_conn)):
         repo_repo.update(conn, rid, **fields)
     except sqlite3.IntegrityError:
         raise HTTPException(409, "이미 등록된 레포입니다.")
-    return dict(repo_repo.get(conn, rid))
+    return _repo_payload(repo_repo.get(conn, rid))
 
 
 @app.delete("/api/repos/{rid}")
@@ -373,9 +636,29 @@ def delete_repo(rid: int, conn=Depends(get_conn)):
     return {"deleted": rid}
 
 
+def _settings_response(conn, request: Request) -> dict:
+    out = dict(settings_repo.get(conn))
+    applied = getattr(request.app.state, "runtime_concurrency_limit", None)
+    out["runtime_concurrency_limit"] = applied
+    out["runtime_worker_lanes"] = getattr(
+        request.app.state, "runtime_worker_lanes", None
+    )
+    out["concurrency_restart_required"] = (
+        None if applied is None else applied != out["concurrency_limit"]
+    )
+    return out
+
+
 @app.get("/api/settings")
-def get_settings(conn=Depends(get_conn)):
-    return dict(settings_repo.get(conn))
+def get_settings(request: Request, conn=Depends(get_conn)):
+    return _settings_response(conn, request)
+
+
+@app.get("/api/settings/context-status")
+def get_context_status(conn=Depends(get_conn)):
+    from server.context.status import context_source_status
+
+    return context_source_status(conn)
 
 
 class SettingsPatch(BaseModel):
@@ -393,13 +676,67 @@ class SettingsPatch(BaseModel):
     context_db_schema_on: int | None = None
     context_graphify_on: int | None = None
     context_feedback_on: int | None = None
+    context_current_pr_reviews_on: int | None = None
     verify_singles_on: int | None = None
     incremental_review_on: int | None = None
     skip_draft_on: int | None = None
 
 
 @app.patch("/api/settings")
-def patch_settings(body: SettingsPatch, conn=Depends(get_conn)):
+def patch_settings(
+    body: SettingsPatch, request: Request, conn=Depends(get_conn)
+):
+    if body.concurrency_limit is not None and not (
+        config.CONCURRENCY_MIN <= body.concurrency_limit <= config.CONCURRENCY_MAX
+    ):
+        raise HTTPException(
+            400,
+            f"concurrency_limit는 {config.CONCURRENCY_MIN} 이상 "
+            f"{config.CONCURRENCY_MAX} 이하여야 합니다",
+        )
+    if body.default_poll_interval is not None and not (
+        config.POLL_INTERVAL_MIN_SEC
+        <= body.default_poll_interval
+        <= config.POLL_INTERVAL_MAX_SEC
+    ):
+        raise HTTPException(
+            400,
+            "default_poll_interval은 "
+            f"{config.POLL_INTERVAL_MIN_SEC}초 이상 "
+            f"{config.POLL_INTERVAL_MAX_SEC}초 이하여야 합니다",
+        )
+    binary_fields = (
+        "context_static_on",
+        "context_jira_on",
+        "context_db_schema_on",
+        "context_graphify_on",
+        "context_feedback_on",
+        "context_current_pr_reviews_on",
+        "verify_singles_on",
+        "incremental_review_on",
+        "skip_draft_on",
+    )
+    for key in binary_fields:
+        value = getattr(body, key)
+        if value is not None and value not in (0, 1):
+            raise HTTPException(400, f"{key}는 0 또는 1이어야 합니다")
+    common_efforts = set(config.CLAUDE_EFFORTS) & set(config.CODEX_EFFORTS)
+    if body.default_effort is not None and body.default_effort not in common_efforts:
+        raise HTTPException(
+            400, "default_effort는 두 벤더가 모두 지원하는 effort여야 합니다"
+        )
+    if body.claude_effort is not None and body.claude_effort not in config.CLAUDE_EFFORTS:
+        raise HTTPException(
+            400, f"claude_effort는 {'/'.join(config.CLAUDE_EFFORTS)} 중 하나여야 합니다"
+        )
+    if body.codex_effort is not None and body.codex_effort not in config.CODEX_EFFORTS:
+        raise HTTPException(
+            400, f"codex_effort는 {'/'.join(config.CODEX_EFFORTS)} 중 하나여야 합니다"
+        )
+    if body.prescreen_model is not None and not is_valid_prescreen_model(
+        body.prescreen_model
+    ):
+        raise HTTPException(400, "사전 스크리닝에는 Claude 모델만 사용할 수 있습니다")
     # threshold는 decide()가 KeyError로 죽는 유일한 자유입력 — 경계에서 거른다
     # (수락하면 이후 모든 리뷰가 prescreen 직후 실패하는 브릭 상태가 된다).
     if (
@@ -410,47 +747,67 @@ def patch_settings(body: SettingsPatch, conn=Depends(get_conn)):
             400, f"prescreen_gate_threshold는 {'/'.join(THRESHOLDS)} 중 하나여야 합니다"
         )
     settings_repo.update(conn, **body.model_dump(exclude_none=True))
-    return dict(settings_repo.get(conn))
+    return _settings_response(conn, request)
 
 
 @app.get("/api/prs/{pid}/runs")
 def pr_runs(pid: int, conn=Depends(get_conn)):
     """PR의 리뷰 run 이력(최신 먼저) — 재리뷰 후에도 과거 run의 결과를 찾아볼 수 있게."""
+    if pr_repo.get(conn, pid) is None:
+        raise HTTPException(404, "pr not found")
     rows = conn.execute(
         """SELECT r.id, r.head_sha, r.trigger, r.status, r.error,
                   r.started_at, r.finished_at,
+                  r.scope_requested_mode, r.scope_effective_mode,
+                  r.scope_policy_reason, r.scope_selection_source,
+                  r.dedupe_requested_mode, r.dedupe_effective_mode,
+                  r.dedupe_policy_reason, r.dedupe_selection_source,
+                  r.policy_cohort_key, r.policy_decision_hash,
+                  r.policy_config_hash, r.benchmark_attestation_hash,
                   (SELECT COUNT(*) FROM finding f WHERE f.run_id = r.id)
                     AS finding_count
            FROM review_run r WHERE r.pr_id=? ORDER BY r.id DESC""",
         (pid,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    response = []
+    for row in rows:
+        item = dict(row)
+        item["policy_snapshot"] = _policy_snapshot_payload(
+            policy_snapshot_from_row(row)
+        )
+        for key in (
+            "scope_requested_mode", "scope_effective_mode", "scope_policy_reason",
+            "scope_selection_source", "dedupe_requested_mode",
+            "dedupe_effective_mode", "dedupe_policy_reason",
+            "dedupe_selection_source", "policy_cohort_key",
+            "policy_decision_hash", "policy_config_hash",
+            "benchmark_attestation_hash",
+        ):
+            item.pop(key, None)
+        response.append(item)
+    return response
 
 
 @app.get("/api/runs/{run_id}/findings")
 def run_findings(run_id: int, conn=Depends(get_conn)):
+    if review_repo.get_run(conn, run_id) is None:
+        raise HTTPException(404, "run not found")
     return [dict(f) for f in finding_repo.list_for_run(conn, run_id)]
 
 
 @app.get("/api/runs/{run_id}/vendor-results")
 def run_vendor_results(run_id: int, conn=Depends(get_conn)):
+    if review_repo.get_run(conn, run_id) is None:
+        raise HTTPException(404, "run not found")
     # ★개정 (codex v6 [MEDIUM]): 실패 벤더 노출용. 프론트 ReviewSection이
     # status='failed' 벤더에 배지를 띄워 부분 실패를 사용자에게 알린다.
     return [dict(v) for v in review_repo.list_vendor_results(conn, run_id)]
 
 
-@app.get("/api/vendor-results/{vr_id}/raw", response_class=PlainTextResponse)
+@app.get("/api/vendor-results/{vr_id}/raw")
 def vendor_result_raw(vr_id: int, conn=Depends(get_conn)):
-    """벤더 원문 stdout(파싱 전) 조회 — 파싱 실패·finding 왜곡 진단용."""
-    row = conn.execute(
-        "SELECT raw_path FROM vendor_result WHERE id=?", (vr_id,)
-    ).fetchone()
-    if row is None or not row["raw_path"]:
-        raise HTTPException(404, "원문 없음")
-    try:
-        return Path(row["raw_path"]).read_text(encoding="utf-8")
-    except OSError:
-        raise HTTPException(404, "원문 파일이 삭제됨") from None
+    """Raw model transcripts are disabled by default and never served normally."""
+    raise HTTPException(404, "원문 진단 비활성")
 
 
 @app.post("/api/runs/{run_id}/retry-vendors", status_code=202)
@@ -463,22 +820,35 @@ def retry_vendors(run_id: int, conn=Depends(get_conn)):
     pr = pr_repo.get(conn, run["pr_id"])
     if pr is None:
         raise HTTPException(404, "pr not found")
+    if pr["state"] != "open":
+        raise HTTPException(409, "닫힌 PR은 재시도할 수 없습니다")
     if pr["head_sha"] != run["head_sha"]:
         raise HTTPException(409, "PR가 갱신됨 — 전체 재리뷰를 사용하세요")
+    if not _is_latest_run(conn, run):
+        raise HTTPException(409, "과거 리뷰 run은 재시도할 수 없습니다")
     if run["status"] != "done":
         raise HTTPException(
             409, "부분 실패한 리뷰에만 사용 가능 — 전체 재리뷰를 사용하세요"
         )
-    # 실패했더라도 현재 비활성인 벤더는 재시도해도 worker가 걸러 무동작이므로 제외한다.
     repo = repo_repo.get(conn, pr["repo_id"])
+    if repo is None:
+        raise HTTPException(404, "repo not found")
+    if not repo["enabled"]:
+        raise HTTPException(409, "비활성화된 레포에서는 재시도할 수 없습니다")
     enabled = {"claude"} if repo["vendor_claude_on"] else set()
     if repo["vendor_codex_on"]:
         enabled.add("codex")
-    if not (set(review_repo.failed_vendors(conn, run_id)) & enabled):
+    failed = set(review_repo.failed_vendors(conn, run_id))
+    if not failed:
         raise HTTPException(409, "재시도할 실패 벤더가 없습니다")
-    job_id = job_repo.enqueue_retry(
-        conn, pr_id=run["pr_id"], head_sha=run["head_sha"], run_id=run_id
-    )
+    if failed - enabled:
+        raise HTTPException(409, "실패 벤더를 모두 활성화한 뒤 재시도하세요")
+    try:
+        job_id = job_repo.enqueue_retry(
+            conn, pr_id=run["pr_id"], head_sha=run["head_sha"], run_id=run_id
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {"job_id": job_id}
 
 
@@ -498,13 +868,45 @@ class FindingPatch(BaseModel):
 
 @app.patch("/api/findings/{fid}")
 def patch_finding(fid: int, body: FindingPatch, conn=Depends(get_conn)):
-    # edited_text 미제공(None) 시 set_status에 넘기지 않는다 — 넘기면 sentinel이
-    # 아니라 명시적 None으로 처리돼 기존 edited_text가 NULL로 덮인다(데이터 손실).
-    if body.edited_text is None:
-        finding_repo.set_status(conn, fid, body.status)
-    else:
-        finding_repo.set_status(conn, fid, body.status, body.edited_text)
-    return dict(finding_repo.get(conn, fid))
+    # 최신-run 확인과 상태 변경을 한 write transaction에서 수행한다. 둘 사이에 worker가
+    # 새 run을 INSERT하면 과거 finding을 변경할 수 있던 TOCTOU를 차단한다.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        finding = finding_repo.get(conn, fid)
+        if finding is None:
+            raise HTTPException(404, "finding not found")
+        if finding["posting_operation_id"] is not None:
+            raise HTTPException(409, "GitHub 포스팅 중인 finding은 변경할 수 없습니다")
+        latest = conn.execute(
+            """SELECT rr.id=(SELECT id FROM review_run latest
+                               WHERE latest.pr_id=rr.pr_id ORDER BY id DESC LIMIT 1) AS is_latest,
+                      rr.head_sha=(SELECT head_sha FROM pull_request p
+                                   WHERE p.id=rr.pr_id) AS is_current_head
+               FROM review_run rr WHERE rr.id=?""",
+            (finding["run_id"],),
+        ).fetchone()
+        if latest is None or not latest["is_latest"] or not latest["is_current_head"]:
+            raise HTTPException(409, "과거 리뷰 finding은 변경할 수 없습니다")
+        if body.status not in {"approved", "dismissed", "edited"}:
+            raise HTTPException(400, "status는 approved, dismissed, edited 중 하나여야 합니다")
+        if body.status == "edited":
+            edited_text = (body.edited_text or "").strip()
+            if not edited_text:
+                raise HTTPException(400, "edited 상태에는 비어 있지 않은 edited_text가 필요합니다")
+            finding_repo.set_status(
+                conn, fid, body.status, edited_text, commit=False
+            )
+        else:
+            if body.edited_text is not None:
+                raise HTTPException(400, "edited_text는 edited 상태에서만 변경할 수 있습니다")
+            # status-only PATCH는 기존 edited_text를 보존한다.
+            finding_repo.set_status(conn, fid, body.status, commit=False)
+        result = dict(finding_repo.get(conn, fid))
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
 
 
 _gh = None
@@ -531,13 +933,73 @@ def get_slack():
     return _slack
 
 
+@app.get("/api/telemetry")
+def telemetry(request: Request, conn=Depends(get_conn)):
+    job_counts = {
+        row["status"]: row["n"]
+        for row in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM review_job GROUP BY status"
+        ).fetchall()
+    }
+    vendor = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT vendor, status, COUNT(*) AS count,
+                      CAST(AVG(duration_ms) AS INTEGER) AS avg_duration_ms
+               FROM vendor_result
+               WHERE started_at >= datetime('now', '-1 day')
+               GROUP BY vendor, status"""
+        ).fetchall()
+    ]
+    applied = getattr(request.app.state, "runtime_concurrency_limit", None)
+    return {
+        "schema_version": 1,
+        "jobs": job_counts,
+        "vendors_24h": vendor,
+        "configured_concurrency": settings_repo.get(conn)["concurrency_limit"],
+        "applied_concurrency": applied,
+    }
+
+
 @app.get("/api/health/deep")
-def health_deep(conn=Depends(get_conn), gh=Depends(get_gh)) -> dict:
-    """gh 인증·벤더 CLI 존재·DB 접근 실측 점검. /api/health는 dev.sh readiness
-    폴링용 즉답으로 유지하고, 대시보드는 이 결과로 환경 이상을 표시한다."""
+def health_deep(
+    request: Request, conn=Depends(get_conn), gh=Depends(get_gh)
+) -> dict:
+    """환경 점검과 background task/queue 상태를 함께 노출한다."""
     from server.health import deep_health
 
-    return deep_health(conn, gh)
+    out = deep_health(conn, gh)
+    tasks = getattr(request.app.state, "background_tasks", None)
+    if tasks is None:
+        runtime = {"status": "unknown", "tasks": []}
+    else:
+        task_rows = [
+            {
+                "name": task.get_name(),
+                "done": task.done(),
+                "error": (
+                    str(task.exception())[:300]
+                    if task.done() and not task.cancelled() and task.exception()
+                    else None
+                ),
+            }
+            for task in tasks
+        ]
+        runtime = {
+            "status": "degraded" if any(row["done"] for row in task_rows) else "healthy",
+            "tasks": task_rows,
+        }
+        if runtime["status"] == "degraded":
+            out["ok"] = False
+    queue = conn.execute(
+        """SELECT COUNT(*) AS queued,
+                  CAST(MAX((julianday('now')-julianday(created_at))*86400) AS INTEGER)
+                    AS oldest_age_seconds
+           FROM review_job WHERE status='queued'"""
+    ).fetchone()
+    runtime["queue"] = dict(queue)
+    out["runtime"] = runtime
+    return out
 
 
 @app.get("/api/repos/{rid}/readiness")
@@ -553,15 +1015,10 @@ def repo_readiness(rid: int, conn=Depends(get_conn), gh=Depends(get_gh)) -> dict
 def _enqueue_polled_pr(conn, pr_id: int) -> bool:
     """자동 폴링 job이 새로 생성·복구됐으면 True, 기존 job이면 False."""
     pr = pr_repo.get(conn, pr_id)
-    before = conn.execute(
-        "SELECT status, error FROM review_job WHERE pr_id=? AND head_sha=?",
-        (pr_id, pr["head_sha"]),
-    ).fetchone()
-    job_repo.enqueue(conn, pr_id=pr_id, head_sha=pr["head_sha"], trigger="auto")
-    return before is None or (
-        before["status"] == "canceled"
-        and before["error"] == job_repo.CLOSED_PR_CANCEL_ERROR
+    _, changed = job_repo.enqueue_with_result(
+        conn, pr_id=pr_id, head_sha=pr["head_sha"], trigger="auto"
     )
+    return changed
 
 
 def _sync_repo_now(conn, repo, gh) -> dict:
@@ -687,6 +1144,14 @@ def _post_health(conn, pid: int, gh) -> dict:
     return health
 
 
+def _is_latest_run(conn, run) -> bool:
+    latest = conn.execute(
+        "SELECT id FROM review_run WHERE pr_id=? ORDER BY id DESC LIMIT 1",
+        (run["pr_id"],),
+    ).fetchone()
+    return latest is not None and latest["id"] == run["id"]
+
+
 POSTABLE_FINDING_STATUSES = {"approved", "edited"}
 # 코멘트 본문에 실을 상태 집합 — 이미 게시된(posted) finding도 포함해야 같은 run을
 # 증분 승인하며 재포스팅(in-place edit)할 때 앞서 게시한 지적이 사라지지 않는다.
@@ -711,8 +1176,18 @@ def _comments_to_post(conn, run_id: int):
     대상으로 하되, 본문은 이미 posted된 것까지 합쳐 구성한다(재포스팅 유실 방지).
     반환 항목: {vendor, body, new_ids(이번에 posted로 전환), all_ids(코멘트 전체)}."""
     rows = finding_repo.list_for_run(conn, run_id)
-    pending = [f for f in rows if f["status"] in POSTABLE_FINDING_STATUSES]
-    display = [f for f in rows if f["status"] in DISPLAYED_FINDING_STATUSES]
+    eligible = [
+        finding for finding in rows
+        if "posting_eligible" not in finding.keys() or finding["posting_eligible"]
+    ]
+    pending = [
+        finding for finding in eligible
+        if finding["status"] in POSTABLE_FINDING_STATUSES
+    ]
+    display = [
+        finding for finding in eligible
+        if finding["status"] in DISPLAYED_FINDING_STATUSES
+    ]
     order: list[str] = []
     for f in pending:  # 벤더 등장 순서 보존(부분 실패 응답의 posted 순서 안정성)
         if f["vendor"] not in order:
@@ -734,6 +1209,8 @@ def _comments_to_post(conn, run_id: int):
 
 @app.get("/api/runs/{run_id}/post-preview")
 def post_preview(run_id: int, conn=Depends(get_conn)):
+    if review_repo.get_run(conn, run_id) is None:
+        raise HTTPException(404, "run not found")
     return {
         "comments": [
             {"vendor": c["vendor"], "body": c["body"]}
@@ -769,6 +1246,106 @@ def _create_review(gh, repo, pr, run, body: str, findings) -> dict:
     return gh.create_review(
         repo["full_name"], pr["number"], run["head_sha"], body, comments
     )
+
+
+_TECH_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:/-]{2,}|\d{3,}")
+_DUPLICATE_STOP_TOKENS = {
+    "and", "api", "body", "code", "false", "for", "from", "http", "https",
+    "into", "line", "main", "null", "path", "request", "response", "review",
+    "service", "that", "the", "this", "true", "when", "with",
+}
+
+
+def _technical_tokens(text: str) -> set[str]:
+    return {
+        token.lower().rstrip(".")
+        for token in _TECH_TOKEN_RE.findall(text or "")
+        if token.lower().rstrip(".") not in _DUPLICATE_STOP_TOKENS
+    }
+
+
+def _looks_duplicate(finding, existing_body: str) -> bool:
+    """자동 억제보다 precision을 우선한 게시 전 중복 후보 판정.
+
+    자연어 전체 의미를 추측하지 않고, 정규화 claim 포함 또는 고유 기술 토큰 4개 이상이
+    새 finding 쪽의 절반 이상 겹칠 때만 막는다. 사용자는 finding을 기각/수정 후 재시도한다.
+    """
+    claim = (finding["edited_text"] or finding["claim"] or "").strip().lower()
+    normalized_body = " ".join((existing_body or "").lower().split())
+    normalized_claim = " ".join(claim.split())
+    if len(normalized_claim) >= 20 and normalized_claim in normalized_body:
+        return True
+    candidate = _technical_tokens(
+        f"{finding['edited_text'] or finding['claim']} {finding['rationale'] or ''}"
+    )
+    existing = _technical_tokens(existing_body)
+    if not candidate or not existing:
+        return False
+    shared = candidate & existing
+    distinctive = any(re.search(r"[\d_./:-]", token) for token in shared)
+    return (
+        len(shared) >= 4
+        and distinctive
+        and len(shared) / len(candidate) >= 0.45
+    )
+
+
+def _github_duplicate_findings(conn, run_id: int, gh, repo, pr) -> tuple[list[dict], str]:
+    context = gh.get_pr_review_context(repo["full_name"], pr["number"])
+    remote_head = context.get("head_sha") or ""
+    sources = (
+        ("review", context.get("reviews") or []),
+        ("inline", context.get("inline_comments") or []),
+        ("conversation", context.get("conversation_comments") or []),
+    )
+    existing = []
+    for kind, items in sources:
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+                continue
+            if kind == "inline" and item.get("is_resolved") is True:
+                continue
+            body = item["body"]
+            # 현재 Almighty review는 update 대상이지 외부 중복 근거가 아니다.
+            if "<!-- almighty-review [" in body:
+                continue
+            existing.append((kind, item, body))
+
+    duplicates = []
+    for finding in finding_repo.list_for_run(conn, run_id):
+        if finding["status"] not in POSTABLE_FINDING_STATUSES:
+            continue
+        for kind, item, body in existing:
+            if not _looks_duplicate(finding, body):
+                continue
+            author = item.get("author") or item.get("user") or {}
+            duplicates.append(
+                {
+                    "finding_id": finding["id"],
+                    "claim": finding["edited_text"] or finding["claim"],
+                    "source": kind,
+                    "github_id": item.get("id"),
+                    "author": author.get("login") if isinstance(author, dict) else None,
+                }
+            )
+            break
+    return duplicates, remote_head
+
+
+def _assert_post_fresh(conn, gh, repo, pr, run) -> None:
+    if not _is_latest_run(conn, run):
+        raise HTTPException(409, "포스팅 도중 더 최신 리뷰 run이 생성되었습니다")
+    current_pr = pr_repo.get(conn, pr["id"])
+    if current_pr is None or current_pr["head_sha"] != run["head_sha"]:
+        raise HTTPException(409, "포스팅 도중 PR head가 갱신되었습니다")
+    get_head = getattr(gh, "get_pr_head", None)
+    if callable(get_head):
+        try:
+            remote_head = get_head(repo["full_name"], pr["number"])
+        except GitHubCliError as exc:
+            raise HTTPException(502, _github_error_message(exc)) from exc
+        if remote_head and remote_head != run["head_sha"]:
+            raise HTTPException(409, "포스팅 도중 GitHub PR head가 갱신되었습니다")
 
 
 def _post_to_slack(conn, slack, repo, pr, run_id):
@@ -813,10 +1390,24 @@ def _post_to_slack(conn, slack, repo, pr, run_id):
 def post_run(
     run_id: int, conn=Depends(get_conn), gh=Depends(get_gh), slack=Depends(get_slack)
 ):
+    # 로컬 단일 프로세스 서버에서 같은 run의 동시 POST가 review를 두 번 create하는
+    # 것을 막는다. 네트워크 호출 동안 SQLite write lock은 잡지 않는다.
+    lock = _post_lock(run_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "같은 run의 포스팅이 이미 진행 중입니다")
+    try:
+        return _post_run_locked(run_id, conn=conn, gh=gh, slack=slack)
+    finally:
+        lock.release()
+
+
+def _post_run_locked(run_id: int, *, conn, gh, slack):
     run = review_repo.get_run(conn, run_id)
     if run is None:
         raise HTTPException(404, "run not found")
     pr = pr_repo.get(conn, run["pr_id"])
+    if not _is_latest_run(conn, run):
+        raise HTTPException(409, "과거 리뷰 run은 게시할 수 없습니다")
     # 구 head의 run을 게시하면 라인 앵커가 어긋나고, PR 단위 update-or-create가
     # 최신 게시 리뷰 본문을 구 내용으로 덮는다 — retry_vendors와 동일한 신선도 가드.
     if pr["head_sha"] != run["head_sha"]:
@@ -831,44 +1422,113 @@ def post_run(
             status_code=_health_status_code(health),
             content={"detail": health},
         )
+    try:
+        duplicates, remote_head = _github_duplicate_findings(
+            conn, run_id, gh, repo, pr
+        )
+    except Exception as exc:
+        # fresh scan 없이 게시하면 옵션이 꺼진 PR에서 같은 지적을 다시 쓸 수 있다.
+        message = redact_secrets(f"{type(exc).__name__}: {exc}")
+        return JSONResponse(
+            status_code=502,
+            content={"detail": {"message": f"기존 GitHub 리뷰 중복 검사 실패: {message}"}},
+        )
+    if remote_head and remote_head != run["head_sha"]:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": {
+                    "message": "GitHub의 PR head가 갱신되어 이 run은 게시할 수 없습니다. 동기화 후 최신 리뷰를 실행하세요.",
+                    "run_head_sha": run["head_sha"],
+                    "remote_head_sha": remote_head,
+                }
+            },
+        )
+    if duplicates:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": {
+                    "message": "기존 GitHub 리뷰와 중복 가능성이 있는 finding이 있습니다. 기각하거나 수정한 뒤 다시 포스팅하세요.",
+                    "duplicates": duplicates,
+                }
+            },
+        )
+
     posted = []
     for comment in _comments_to_post(conn, run_id):
+        _assert_post_fresh(conn, gh, repo, pr, run)
         vendor = comment["vendor"]
-        body = comment["body"]
-        # update-or-create를 PR review 프리미티브로: 같은 PR·벤더의 기존 review가 있으면
-        # 본문만 PUT(pull_request_review.edited → PR 봇 무시 → 재게시 무알림), 없으면
-        # create(첫 게시 → 리뷰+인라인 → PR 봇 Slack 알림). 레거시 issue comment 행은
-        # review로 이어받지 못하므로 supersede하고 review를 새로 생성한다.
+        try:
+            operation = post_operation_repo.prepare(
+                conn,
+                run_id=run_id,
+                vendor=vendor,
+                body=comment["body"],
+                all_ids=comment["all_ids"],
+                new_ids=comment["new_ids"],
+            )
+        except post_operation_repo.PostingConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        body = f"{operation['body']}\n\n{operation['marker']}"
+        operation_owner = uuid.uuid4().hex
+        if operation["status"] != "remote_applied" and not post_operation_repo.claim(
+            conn, operation["id"], operation_owner
+        ):
+            return JSONResponse(
+                status_code=409,
+                content={"detail": {
+                    "message": "같은 vendor의 포스팅 operation이 이미 진행 중입니다",
+                    "operation_id": operation["id"],
+                }},
+            )
         prev = posted_repo.latest_for_pr_vendor(conn, pr_id=pr["id"], vendor=vendor)
         reuse = (
             prev is not None and prev["kind"] == "review" and prev["github_comment_id"]
         )
         try:
-            if reuse:
-                try:
-                    res = gh.update_review(
-                        repo["full_name"],
-                        pr["number"],
-                        prev["github_comment_id"],
-                        body,
-                    )
-                except GitHubCliError as e:
-                    if e.http_status != 404:
-                        raise
-                    # review가 GitHub에서 사라짐(dismiss/삭제) → 새로 생성 폴백.
-                    res = _create_review(gh, repo, pr, run, body, comment["findings"])
-                posted_repo.supersede(conn, prev["id"])
+            if operation["status"] == "remote_applied":
+                res = {
+                    "id": operation["remote_review_id"],
+                    "html_url": operation["remote_url"],
+                }
             else:
-                res = _create_review(gh, repo, pr, run, body, comment["findings"])
-                if prev is not None:  # 레거시 issue comment 행 정리
-                    posted_repo.supersede(conn, prev["id"])
+                # create/update 성공 뒤 DB 기록 전에 죽었어도 exact marker로 원격 review를
+                # 다시 찾아 adopt한다. 애매한 실패에서 새 review를 만들지 않는다.
+                res = post_operation_repo.find_remote_review(
+                    gh, repo["full_name"], pr["number"], operation["marker"]
+                )
+                if res is None and reuse:
+                    try:
+                        res = gh.update_review(
+                            repo["full_name"], pr["number"],
+                            prev["github_comment_id"], body,
+                        )
+                    except GitHubCliError as e:
+                        if e.http_status != 404:
+                            raise
+                        res = _create_review(
+                            gh, repo, pr, run, body, comment["findings"]
+                        )
+                elif res is None:
+                    res = _create_review(
+                        gh, repo, pr, run, body, comment["findings"]
+                    )
+                post_operation_repo.mark_remote(
+                    conn, operation["id"], review_id=str(res["id"]),
+                    url=res["html_url"], owner_token=operation_owner,
+                )
         except GitHubCliError as e:
+            post_operation_repo.mark_error(
+                conn, operation["id"], str(e), owner_token=operation_owner
+            )
             return JSONResponse(
                 status_code=502,
                 content={
                     "detail": {
                         "message": _github_error_message(e),
                         "posted": posted,
+                        "operation_id": operation["id"],
                         "failed": {
                             "vendor": vendor,
                             "error": _github_error_message(e),
@@ -877,20 +1537,28 @@ def post_run(
                     }
                 },
             )
-        posted_repo.add(
-            conn,
-            run_id=run_id,
-            vendor=vendor,
-            github_comment_id=str(res["id"]),
-            url=res["html_url"],
-            marker=MARKER.format(vendor=vendor),
-            body=body,
-            head_sha=run["head_sha"],
-            finding_ids=comment["all_ids"],
-            kind="review",
-        )
-        for fid in comment["new_ids"]:  # 이번에 새로 게시한 것만 posted 전환
-            finding_repo.set_status(conn, fid, "posted")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if prev is not None:
+                posted_repo.supersede(conn, prev["id"], commit=False)
+            posted_repo.add(
+                conn,
+                run_id=run_id,
+                vendor=vendor,
+                github_comment_id=str(res["id"]),
+                url=res["html_url"],
+                marker=operation["marker"],
+                body=body,
+                head_sha=run["head_sha"],
+                finding_ids=comment["all_ids"],
+                kind="review",
+                commit=False,
+            )
+            post_operation_repo.finalize(conn, operation["id"])
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         posted.append({"vendor": vendor, "url": res["html_url"]})
     if (
         posted
@@ -904,7 +1572,19 @@ def trigger_review(pid: int, conn=Depends(get_conn)):
     pr = pr_repo.get(conn, pid)
     if pr is None:
         raise HTTPException(404, "pr not found")
-    job_id = job_repo.enqueue_manual(conn, pr_id=pid, head_sha=pr["head_sha"])
+    if pr["state"] != "open":
+        raise HTTPException(409, "닫힌 PR은 리뷰할 수 없습니다")
+    repo = repo_repo.get(conn, pr["repo_id"])
+    if repo is None:
+        raise HTTPException(404, "repo not found")
+    if not repo["enabled"]:
+        raise HTTPException(409, "비활성화된 레포는 리뷰할 수 없습니다")
+    if not (repo["vendor_claude_on"] or repo["vendor_codex_on"]):
+        raise HTTPException(409, "활성 리뷰 vendor가 최소 하나 필요합니다")
+    try:
+        job_id = job_repo.enqueue_manual(conn, pr_id=pid, head_sha=pr["head_sha"])
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {"job_id": job_id}
 
 
@@ -930,11 +1610,14 @@ async def github_webhook(request: Request, conn=Depends(get_conn)):
     HMAC 검증(env-only 시크릿) 후 auto 레포·벤더·needs_review 게이트를 그대로 적용한다."""
     from server.github.webhook import parse_pull_request_event, verify_signature
 
-    body = await request.body()
     if not config.GITHUB_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail="webhook secret not configured")
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not signature:
+        raise HTTPException(status_code=401, detail="invalid signature")
+    body = await _bounded_webhook_body(request)
     if not verify_signature(
-        config.GITHUB_WEBHOOK_SECRET, body, request.headers.get("X-Hub-Signature-256")
+        config.GITHUB_WEBHOOK_SECRET, body, signature
     ):
         raise HTTPException(status_code=401, detail="invalid signature")
     if request.headers.get("X-GitHub-Event") != "pull_request":
@@ -987,17 +1670,20 @@ async def slack_webhook(request: Request, conn=Depends(get_conn)):
         verify_signature,
     )
 
-    body = await request.body()
     ts = request.headers.get("X-Slack-Request-Timestamp")
     if not config.SLACK_SIGNING_SECRET:
         raise HTTPException(
             status_code=503, detail="slack signing secret not configured"
         )
+    signature = request.headers.get("X-Slack-Signature")
+    if not ts or not signature:
+        raise HTTPException(status_code=401, detail="invalid signature")
+    body = await _bounded_webhook_body(request)
     if not verify_signature(
         config.SLACK_SIGNING_SECRET,
         ts,
         body,
-        request.headers.get("X-Slack-Signature"),
+        signature,
     ):
         raise HTTPException(status_code=401, detail="invalid signature")
     if not is_fresh(ts):  # 서명은 유효해도 오래된(>5분) 요청은 재생 공격 → 거부
@@ -1028,52 +1714,3 @@ async def slack_webhook(request: Request, conn=Depends(get_conn)):
             conn, run_id=run_id, slack_user=event["user"], reaction=event["reaction"]
         )
     return {"status": "recorded", "verdict": verdict}
-
-
-@app.get("/api/harness")
-def list_harness():
-    return {"harnesses": list_harnesses()}
-
-
-def _valid_name_or_400(name: str) -> None:
-    try:
-        validate_harness_name(name)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid harness name")
-
-
-@app.get("/api/harness/{name}")
-def get_harness(name: str):
-    _valid_name_or_400(name)
-    if not (config.HARNESS_DIR / name).is_dir():
-        raise HTTPException(status_code=404, detail="harness not found")
-    hp = HarnessProfile.load(name)
-    return {
-        "name": hp.name,
-        "system_prompt": hp.system_prompt,
-        "vendor_prompts": hp.vendor_prompts,
-        "claude_allowed_tools": hp.claude_allowed_tools,
-        "codex_sandbox": hp.codex_sandbox,
-    }
-
-
-class HarnessPut(BaseModel):
-    system_prompt: str | None = None
-    vendor_prompts: dict[str, str] | None = None
-
-
-@app.put("/api/harness/{name}")
-def put_harness(name: str, body: HarnessPut):
-    _valid_name_or_400(name)
-    base = config.HARNESS_DIR / name
-    if not base.is_dir():
-        create_harness(name, system_prompt=body.system_prompt)
-    elif body.system_prompt is not None:
-        (base / "review-system-prompt.md").write_text(body.system_prompt)
-    if body.vendor_prompts is not None:
-        try:
-            for vendor, text in body.vendor_prompts.items():
-                set_vendor_prompt(name, vendor, text)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid vendor")
-    return get_harness(name)

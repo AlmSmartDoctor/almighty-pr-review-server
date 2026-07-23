@@ -26,7 +26,7 @@
 - 인터페이스: `DBSchemaProvider`는 `schema_source(req) -> str`를 주입받는다 — 변경 파일(`req.changed_files`)로부터 관련 테이블의 DDL을 돌려주는 함수다. 소스 미주입 시 `status="skipped"`; 주입된 소스가 실패/도달 불가하면 `status="empty"`, `text=""`로 degrade한다.
 - **소스 #1 — 정적 스키마 파일(구현됨).** 레포별 비밀-아님 컬럼 `db_schema_path`가 레포 안에 체크인된 DDL 덤프(예: `db/structure.sql`, pg_dump/mysqldump/수기 `CREATE TABLE …;`)를 가리킨다. 경로는 `static_context_path`와 동일하게 **레포 root 하위로 realpath 봉쇄**(임의 절대경로 exfil 차단, B-INV-9). 미설정이면 소스 미주입=skipped.
 - **"변경 파일 경로 → 관련 테이블" 매핑 규칙(확정):** 스키마 파일을 `CREATE TABLE` 문 단위로 파싱해 `{테이블명 → 전체 DDL}` 순서맵을 만든다. 변경 파일 경로를 소문자화 후 비영숫자로 토큰화하고 각 토큰을 trailing-`s` 단수화한다(`users`↔`user` 대칭 매칭). 테이블명(단수화)이 어떤 변경 파일의 토큰 집합에 whole-token으로 포함되면 그 테이블을 "관련"으로 본다. 관련 테이블의 DDL을 스키마 파일 순서로 이어붙이되 최대 `_MAX_TABLES`개까지(초과분 절단), 총량은 downstream per-source 캡(`MAX_CONTEXT_CHARS_PER_SOURCE`)이 처리한다. `changed_files`가 비면(신호 없음) 전체 스키마를 덤프하지 않고 `""`로 degrade한다.
-- **소스 #2 — 라이브 read-only introspection(유예).** `~/.claude/db-connections.yml`의 인라인 자격은 (a) 다수 커넥션이 SSM 터널 게이트 뒤, (b) 프로덕션 RDS 혼재, (c) provisioning 미확정 → 유예. 접근 시엔 db-inspector 계열 **read-only** 경로만, **프로덕션 RDS raw 접속 금지**, 터널 미가동 시 `""` degrade. 동일한 `schema_source` seam에 드롭인한다.
+- **소스 #2 — repository-local Safe-DB guarded MSSQL live metadata(구현됨).** 외부 `~/.pi` 경로에는 의존하지 않는다. 로컬 병원 DB 스킬에서 검증된 SQL Gateway read 경로 중 SELECT/WITH-only 분류, comment/literal masking, parameter/outer-TOP 검증, forbidden keyword, connection lock, v2 계약 검증, hash audit만 `server/safe_db/sql_gateway.py`로 이식했다. Gateway가 별도로 resolver routing·강제 read-only credential·SHOWPLAN·streaming cap·timeout/TDS cancellation을 집행한다. 레포에는 비밀이 아닌 `live_db_target_id`만 저장하고 Gateway URL/token/target field는 env-only다. 서버는 고정된 parameterized base-table `INFORMATION_SCHEMA` SELECT 한 개만 보내며 rows 1,000·plan rows 100,000·cost 2·5초·5 MiB를 강제한다. HTTPS(loopback 테스트 예외), redirect/proxy 차단, opaque request ID, exact `limitsApplied`, column/row shape를 fail-closed 검증하고 HTTP 실패 시 명시적 cancel을 시도한다. 결과는 canonical `CREATE TABLE`로 렌더한 뒤 기존 변경 파일→관련 테이블 seam에 합성한다. 실패는 live source만 `""`로 degrade한다. 상세: `docs/superpowers/specs/2026-07-20-live-mssql-introspection.md`.
 
 ## Graphify — 프로젝트 컨텍스트 애그리게이터 (B9+)
 
@@ -45,11 +45,18 @@
 - **학습 코퍼스는 이미 DB에 있다.** 사람 결정은 `finding.status`(`approved|dismissed|edited|posted`) + `finding.edited_text`로 durable하게 저장되므로 별도 이벤트 저장소를 만들지 않고 finding 테이블을 **읽어서** 요약한다. `server/seams.py`의 `NullMemoryStore`(write-side 스텁)는 finding.status로 포착 안 되는 신호(Slack 반응 등)를 위한 후속 증분까지 배선하지 않는다.
 - **2차 — `/learn` 웹 탭(구현됨).** `feedback_source.feedback_stats`(순수, 최소 결정 게이트 없음) + `repo_feedback_stats`가 레포별 수용/수정/기각 통계를 만들고 `GET /api/learn`이 노출한다(결정 있는 레포만, 결정 많은 순). 프런트 `LearnSection`이 레포 탭 + 카테고리 표 + 대표 예시로 렌더한다.
 - **3차 — 결정 이력 감사(구현됨).** append-only `finding_decision`(id, finding_id, from_status, to_status, decided_at) 테이블에 `finding_repo.set_status`가 **상태가 실제로 바뀔 때만** 1행 append한다(무변경·미존재 finding은 스킵—FK 안전). `feedback_source.recent_decisions(conn, full_name)`가 이 이력을 조인해 레포별 **최근 사람 판단 이벤트**(`approved|dismissed|edited`만, `posted`·`pending` 제외, `fd.id DESC` 최근순, `LIMIT 10`)로 반환하고 `/api/learn`이 `recent_decisions`로 실어 `/learn` 탭 "최근 결정 활동" 타임라인에 표시한다. `decided_by`는 단일 계정 배포에서 가치가 낮아 미기록(team-mode 재개 시 추가).
+- **4차 — 승인형 리뷰 규칙(구현됨).** `/learn`에서 카테고리별 판단이 3건 이상, 기각 3건 이상, 기각률 2/3 이상인 경우 `review_rule(status='proposed')`을 제안한다. 재제안은 근거 수만 갱신하고 기존 `active|disabled` 상태를 바꾸지 않는다. 사람의 명시적 승인으로 `active`가 된 규칙만 `review_rules` 소스로 렌더하며, `context_feedback_on`이 꺼지면 함께 비활성화된다. 레포별 최대 20개·4,000자이며 공통 nonce 펜스 안에서 외부 데이터로 취급한다.
 - **인터페이스:** `FeedbackContextProvider`(`name="team_feedback"`)는 `feedback_source(req) -> str`를 주입받는다. 소스 미주입=`skipped`, 실패=`empty`, 요약 텍스트 있으면 `ok`. NEVER raises.
 - **소스 #1 — 앱 DB 조회(구현됨).** `db_feedback_source(*, db_path=config.DB_PATH)`가 `finding → review_run → pull_request → repo`를 조인해 `repo.full_name = req.repo COLLATE NOCASE`로 **현재 레포 결정만** 집계한다(레포 간 격리). 판단 매핑: 기각=`dismissed`, 수정수용=`edited` 또는 `edited_text` 존재, 승인=그 외. `pending`(미결정) 제외. read-only SELECT + short-lived 커넥션(worker 진행 중에도 WAL 하 안전).
 - **캡·플로어:** `_MAX_DECISIONS=400`(최근순 스캔), `_MIN_DECISIONS=3`(미만이면 미주입), `_MAX_EXAMPLES=5`(기각/수정 대표 예시, claim 중복 제거), `_MAX_CLAIM_CHARS=160`. per-source·총합 캡과 nonce 펜스는 downstream `render_context`가 처리.
 - **비밀 표면 0.** 읽는 건 같은 레포의 비밀-아님 finding 컬럼(claim/rationale/edited_text)뿐이며 이미 대시보드 `/api/runs/{id}/findings`로 공개된 데이터다. 자기 레포 데이터가 자기 리뷰에 머무르므로 exfiltration이 아니다.
 - **per-repo 경로 컬럼 없음.** 소스가 앱 DB를 읽으므로 토글(`context_feedback_on`)만으로 켜고 끈다. 결정이 없으면 소스가 `""`를 반환해 자동 미주입.
+
+## Semantic block과 청크별 렌더링
+
+프로바이더는 안정적인 `ContextBlock` 목록을 반환할 수 있다. 각 block은 source/id, priority, 레포에서 다시 찾을 수 있는지, trust/sensitivity/retention class, 관련 파일을 선언한다. 기존 프로바이더 결과는 보수적인 단일 block으로 정규화한다.
+
+Diff 청크 ownership이 확정된 다음, 파이프라인은 청크마다 완전한 block 단위로 컨텍스트를 선택한다. 사람 승인 규칙·현재 PR 토론처럼 레포에서 복구할 수 없는 근거를 레포 요약보다 우선하며 관련 파일은 deterministic tie-breaker다. source/total cap과 명시적인 truncation/omission reason을 적용하고 nonce fence 안에 넣는다. DB에는 diff chunk hash, context hash, content-free manifest를 저장한다. `sensitive` 또는 `manifest_only` block이 선택된 청크의 본문은 prompt에만 사용하고 저장하지 않으므로 그 청크는 부분 재시도 대신 전체 재리뷰가 필요하다. 그 밖의 안전한 재시도용 text도 일반 API에는 청크 원문으로 노출하지 않고 `ALMIGHTY_CONTEXT_PAYLOAD_RETENTION_DAYS`(기본 7일) 뒤 지우며 hash/manifest는 유지한다.
 
 ## 비밀 처리 규약 (전 소스 공통 — 보안 불변식)
 

@@ -15,13 +15,25 @@ def add(
     consensus_group_id=None,
     verify_status=None,
     verify_rationale=None,
+    verify_independent=None,
+    verify_evidence_status=None,
+    source_chunk_index=None,
+    owner_chunk_index=None,
+    scope_status=None,
+    posting_eligible=True,
+    duplicate_group_id=None,
+    duplicate_suggested=False,
+    commit=True,
 ) -> int:
     cur = conn.execute(
         """INSERT INTO finding
            (run_id, vendor_result_id, vendor, file, line, severity, category,
             claim, rationale, confidence, consensus, consensus_group_id,
-            verify_status, verify_rationale, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))""",
+            verify_status, verify_rationale, verify_independent,
+            verify_evidence_status, source_chunk_index, owner_chunk_index,
+            scope_status, posting_eligible, duplicate_group_id,
+            duplicate_suggested, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))""",
         (
             run_id,
             vendor_result_id,
@@ -37,9 +49,18 @@ def add(
             consensus_group_id,
             verify_status,
             verify_rationale,
+            None if verify_independent is None else int(bool(verify_independent)),
+            verify_evidence_status,
+            source_chunk_index,
+            owner_chunk_index,
+            scope_status,
+            int(bool(posting_eligible)),
+            duplicate_group_id,
+            int(bool(duplicate_suggested)),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -65,7 +86,7 @@ def list_for_run(conn, run_id):
 _UNSET = object()
 
 
-def set_status(conn, fid, status, edited_text=_UNSET):
+def set_status(conn, fid, status, edited_text=_UNSET, *, commit=True):
     prev = conn.execute("SELECT status FROM finding WHERE id=?", (fid,)).fetchone()
     if edited_text is _UNSET:
         conn.execute("UPDATE finding SET status=? WHERE id=?", (status, fid))
@@ -81,4 +102,5 @@ def set_status(conn, fid, status, edited_text=_UNSET):
             "VALUES (?, ?, ?, datetime('now'))",
             (fid, prev["status"], status),
         )
-    conn.commit()
+    if commit:
+        conn.commit()

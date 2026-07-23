@@ -1,4 +1,10 @@
-from server.review.prescreen import MAX_INLINE_DIFF_CHARS, prescreen, PreScreenResult
+from server.review.prescreen import (
+    MAX_INLINE_DIFF_CHARS,
+    PreScreenResult,
+    is_valid_prescreen_model,
+    normalize_prescreen_model,
+    prescreen,
+)
 
 
 FAKE = (
@@ -7,9 +13,35 @@ FAKE = (
 )
 
 
+def test_prescreen_model_normalization_rejects_non_claude_models():
+    assert normalize_prescreen_model("gpt-5.6-terra") == (
+        "haiku",
+        "non_claude_model_fallback",
+    )
+    assert normalize_prescreen_model("") == ("haiku", "empty_model_fallback")
+    assert normalize_prescreen_model("claude-future-1") == ("claude-future-1", None)
+    assert normalize_prescreen_model("gemini-2.5-pro") == (
+        "haiku",
+        "non_claude_model_fallback",
+    )
+    assert normalize_prescreen_model("claude-haiku") == (
+        "haiku",
+        "non_claude_model_fallback",
+    )
+    assert is_valid_prescreen_model("sonnet") is True
+    assert is_valid_prescreen_model("gpt-5.6-sol") is False
+    assert is_valid_prescreen_model("llama-3") is False
+    assert is_valid_prescreen_model("claude-haiku") is False
+
+
 def test_prescreen_parses(tmp_path):
-    def runner(args, env=None, cwd=None):
+    def runner(args, env=None, cwd=None, input_text=None):
         assert "--model" in args  # 가벼운 모델 지정
+        assert "--permission-mode" in args
+        assert args[args.index("--tools") + 1] == ""
+        assert "--disable-slash-commands" in args
+        assert "diff..." not in " ".join(args)
+        assert "diff..." in input_text
         return FAKE
 
     res = prescreen(diff="diff...", model="haiku", runner=runner)
@@ -21,7 +53,7 @@ def test_prescreen_parses(tmp_path):
 def test_prescreen_confines_runner_cwd():
     captured = {}
 
-    def runner(args, env=None, cwd=None):
+    def runner(args, env=None, cwd=None, input_text=None):
         captured["cwd"] = cwd
         return FAKE
 

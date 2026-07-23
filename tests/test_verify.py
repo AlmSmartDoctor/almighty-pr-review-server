@@ -1,7 +1,9 @@
 import asyncio
+from contextlib import contextmanager
 
 import pytest
 
+from server.review.harness import RuntimeCredentialError
 from server.review.verify import (
     Verdict,
     VerdictError,
@@ -104,7 +106,17 @@ def test_debate_confirmed_skips_author_when_no_refute():
     author = _FakeVerifier("claude", [])  # 호출되면 IndexError → 미호출을 증명
     v = _run_debate(refuter, author)
     assert v.refuted is False and v.contested is False
+    assert v.independent is True
+    assert v.evidence_status == "independent_model_support"
     assert author.calls == []
+
+
+def test_debate_same_vendor_support_is_not_independent():
+    only = _FakeVerifier("claude", [Verdict(refuted=False, rationale="자체 확인")])
+    v = _run_debate(only, only)
+    assert v.refuted is False
+    assert v.independent is False
+    assert v.evidence_status == "supported_self"
 
 
 def test_debate_refuted_when_author_concedes():
@@ -143,6 +155,53 @@ def test_debate_marks_degraded_when_round1_raises():
     assert v.refuted is False and v.contested is False
     assert v.degraded is True
     assert author.calls == []
+
+
+def test_debate_propagates_runtime_cleanup_failure():
+    class Harness:
+        @contextmanager
+        def runtime_credentials(self, **kwargs):
+            yield
+            raise RuntimeCredentialError("runtime_cleanup_failed")
+
+    with pytest.raises(RuntimeCredentialError, match="runtime_cleanup_failed"):
+        asyncio.run(
+            _debate(
+                _Finding(),
+                refuter=_FakeVerifier(
+                    "codex", [Verdict(refuted=False, rationale="valid")]
+                ),
+                author=None,
+                diff="some diff",
+                harness=Harness(),
+                workdir="wd",
+                runtime_dir="rt",
+            )
+        )
+
+
+def test_debate_does_not_degrade_exception_with_cleanup_failure_note():
+    class Harness:
+        @contextmanager
+        def runtime_credentials(self, **kwargs):
+            try:
+                yield
+            except BaseException as exc:
+                exc.add_note("runtime_cleanup_failed")
+                raise
+
+    with pytest.raises(RuntimeCredentialError, match="runtime_cleanup_failed"):
+        asyncio.run(
+            _debate(
+                _Finding(),
+                refuter=_FakeVerifier("codex", [RuntimeError("verify failed")]),
+                author=None,
+                diff="some diff",
+                harness=Harness(),
+                workdir="wd",
+                runtime_dir="rt",
+            )
+        )
 
 
 def test_debate_keeps_refute_when_rebuttal_raises():

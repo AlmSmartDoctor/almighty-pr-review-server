@@ -29,6 +29,7 @@ def test_composite_renders_and_records():
     c = CompositeContextProvider([_Fake(text="hello")])
     out = c.gather(req=_req())
     assert "hello" in out and [r.status for r in c.results] == ["ok"]
+    assert isinstance(c.results[0].meta["duration_ms"], int)
 
 
 def test_composite_degrades_and_redacts():
@@ -40,6 +41,55 @@ def test_composite_degrades_and_redacts():
     assert c.results[0].status == "error" and "SECRETXYZ" not in (
         c.results[0].error or ""
     )
+
+
+def test_composite_preserves_fast_source_when_another_times_out():
+    import time
+
+    class Slow:
+        name = "slow"
+
+        def fetch(self, req):
+            time.sleep(0.2)
+            return ContextResult(provider=self.name, status="ok", text="too late")
+
+    c = CompositeContextProvider(
+        [Slow(), _Fake(name="fast", text="useful context")], provider_timeout=0.02
+    )
+    started_at = time.monotonic()
+    rendered = c.gather(req=_req())
+
+    assert time.monotonic() - started_at < 0.15
+    assert "useful context" in rendered and "too late" not in rendered
+    assert [result.status for result in c.results] == ["error", "ok"]
+    assert c.results[0].error == "context source timed out"
+
+
+def test_composite_timeout_threads_stay_globally_bounded():
+    import threading
+
+    release = threading.Event()
+
+    class Blocking:
+        name = "blocking"
+
+        def fetch(self, req):
+            release.wait(timeout=1)
+            return ContextResult(provider=self.name, status="empty")
+
+    try:
+        for _ in range(12):
+            CompositeContextProvider(
+                [Blocking()], provider_timeout=0.001
+            ).gather(req=_req())
+        workers = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name.startswith("review-context")
+        ]
+        assert len(workers) <= 8
+    finally:
+        release.set()
 
 
 def test_composite_redacts_returned_text_and_error(monkeypatch):
@@ -189,8 +239,12 @@ def test_static_discovers_reference_documents_for_changed_file_ancestors(tmp_pat
 
 def test_static_uses_base_revision_and_warns_when_instructions_change(tmp_path):
     import subprocess
-    from server.context.static_provider import StaticContextProvider
+    from server.context.static_provider import (
+        StaticContextProvider,
+        _clear_git_document_cache,
+    )
 
+    _clear_git_document_cache()
     (tmp_path / "AGENTS.md").write_text("trusted base rules")
     subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
     subprocess.run(
@@ -230,6 +284,18 @@ def test_static_uses_base_revision_and_warns_when_instructions_change(tmp_path):
     assert "trusted base-branch versions" in r.text
     assert "- AGENTS.md" in r.text
     assert r.meta["revision"] != "worktree"
+    assert r.meta["cache_hit"] is False
+
+    cached = StaticContextProvider(path=None, root=str(tmp_path)).fetch(
+        _req(
+            workdir=str(tmp_path),
+            base_ref="main",
+            base_sha=base_sha,
+            changed_files=("AGENTS.md", "src/app.py"),
+        )
+    )
+    assert cached.meta["cache_hit"] is True
+    assert cached.text == r.text
 
 
 def test_static_warns_when_pr_adds_instruction_absent_from_base(tmp_path):
@@ -311,6 +377,33 @@ def test_static_deduplicates_shared_ancestor_documents(tmp_path):
     assert "- src/a.py" in r.text and "- src/b.py" in r.text
 
 
+def test_static_caps_instruction_discovery_fanout_for_large_pr(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    changed = tuple(
+        f"modules/m{index}/feature/deep/src/File{index}.kt" for index in range(1_000)
+    )
+    candidates = StaticContextProvider(path=None, root=str(tmp_path))._candidate_paths(
+        changed
+    )
+
+    # root 3개 + 선택 디렉터리 40개 × 표준 문서 3개
+    assert len(candidates) <= 123
+
+
+def test_static_limits_rendered_scope_paths(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    (tmp_path / "AGENTS.md").write_text("root rules")
+    changed = tuple(f"src/feature_{index}/very_long_name.py" for index in range(8))
+    r = StaticContextProvider(path=None, root=str(tmp_path)).fetch(
+        _req(changed_files=changed)
+    )
+
+    assert sum(path in r.text for path in changed) == 3
+    assert "… and 5 more" in r.text
+
+
 def test_static_discovers_root_documents_without_changed_files(tmp_path):
     from server.context.static_provider import StaticContextProvider
 
@@ -318,6 +411,24 @@ def test_static_discovers_root_documents_without_changed_files(tmp_path):
     r = StaticContextProvider(path=None, root=str(tmp_path)).fetch(_req())
 
     assert r.status == "ok" and "repository rules" in r.text
+
+
+def test_static_caps_general_root_docs_but_preserves_scoped_doc_budget(tmp_path):
+    from server.context.static_provider import StaticContextProvider
+
+    root_tail = "ROOT_TAIL"
+    scoped_tail = "SCOPED_TAIL"
+    (tmp_path / "AGENTS.md").write_text("r" * 2_500 + root_tail)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "AGENTS.md").write_text("s" * 2_500 + scoped_tail)
+
+    r = StaticContextProvider(path=None, root=str(tmp_path)).fetch(
+        _req(changed_files=("src/app.py",))
+    )
+
+    assert root_tail not in r.text
+    assert scoped_tail in r.text
+    assert r.meta["content_chars_read"] > r.meta["content_chars_selected"]
 
 
 def test_static_combines_configured_document_with_discovered_documents(tmp_path):
@@ -407,6 +518,18 @@ def test_render_truncates_per_source(monkeypatch):
     assert "…[truncated]" in out and out.count("A") <= 60
 
 
+def test_render_honors_smaller_request_budget_without_cutting_closing_fence():
+    from server.context.base import render_context, ContextResult
+
+    out = render_context(
+        [ContextResult(provider="x", status="ok", text="A" * 5_000)],
+        max_total_chars=1_000,
+    )
+
+    assert out.count("A") <= 1_010
+    assert "===== END EXTERNAL CONTEXT DATA" in out
+
+
 def test_render_caps_total(monkeypatch):
     from server import config
     from server.context.base import render_context, ContextResult
@@ -415,6 +538,77 @@ def test_render_caps_total(monkeypatch):
     monkeypatch.setattr(config, "MAX_CONTEXT_CHARS_TOTAL", 100)
     out = render_context([ContextResult(provider="x", status="ok", text="B" * 5000)])
     assert out.count("B") <= 100  # body가 총합 캡으로 잘림
+
+
+def test_render_context_blocks_preserves_whole_high_priority_external_block():
+    from server.context.base import ContextBlock, ContextResult, render_context_blocks
+
+    results = [
+        ContextResult(
+            provider="jira", status="ok", text="jira",
+            blocks=(ContextBlock(
+                source="jira", block_id="J-1:acceptance", text="ACCEPTANCE",
+                priority=10, recoverable_from_repo=False,
+                sensitivity="sensitive", retention="short",
+            ),),
+        ),
+        ContextResult(
+            provider="static", status="ok", text="static",
+            blocks=(ContextBlock(
+                source="static", block_id="AGENTS.md", text="S" * 200,
+                priority=50, recoverable_from_repo=True,
+                trust_class="trusted_base_repo", retention="manifest_only",
+            ),),
+        ),
+    ]
+
+    rendered = render_context_blocks(results, max_total_chars=250)
+
+    assert "ACCEPTANCE" in rendered.text
+    assert "S" * 20 not in rendered.text
+    manifest = {item["block_id"]: item for item in rendered.manifest}
+    assert manifest["J-1:acceptance"]["selected"] is True
+    assert manifest["AGENTS.md"]["selected"] is False
+    assert manifest["AGENTS.md"]["reason"] == "total_budget"
+    assert "END EXTERNAL CONTEXT DATA" in rendered.text
+    assert len(rendered.text) <= 250
+
+
+def test_render_context_blocks_never_middle_truncates_semantic_block(monkeypatch):
+    from server.context.base import ContextBlock, ContextResult, render_context_blocks
+
+    monkeypatch.setattr("server.config.MAX_CONTEXT_CHARS_PER_SOURCE", 40)
+    block_text = "BEGIN-AC\n" + ("requirement\n" * 20) + "END-AC"
+    result = ContextResult(
+        provider="jira",
+        status="ok",
+        text=block_text,
+        blocks=(ContextBlock("jira", "J-1:acceptance", block_text, 10, False),),
+    )
+
+    rendered = render_context_blocks([result], max_total_chars=2_000)
+
+    assert rendered.text == ""
+    assert rendered.manifest[0]["selected"] is False
+    assert rendered.manifest[0]["reason"] == "source_budget"
+
+
+def test_render_context_blocks_uses_relevant_file_as_tiebreaker():
+    from server.context.base import ContextBlock, ContextResult, render_context_blocks
+
+    results = [ContextResult(
+        provider="static", status="ok", text="all", blocks=(
+            ContextBlock("static", "unrelated", "U" * 40, 50, True, relevant_files=("b.py",)),
+            ContextBlock("static", "related", "R" * 40, 50, True, relevant_files=("a.py",)),
+        )
+    )]
+
+    rendered = render_context_blocks(
+        results, max_total_chars=250, relevant_files=("a.py",)
+    )
+
+    assert "related" in rendered.text
+    assert next(item for item in rendered.manifest if item["block_id"] == "related")["selected"]
 
 
 def test_render_fence_nonce_is_unpredictable():
@@ -761,6 +955,35 @@ def test_registry_db_schema_source_wired_from_path(tmp_path):
     assert dbp.fetch(_req(changed_files=("unrelated/thing.py",))).status == "empty"
 
 
+def test_registry_composes_static_and_live_schema_sources(tmp_path, monkeypatch):
+    from server.context import live_mssql_source
+    from server.context.registry import build_context_provider
+
+    (tmp_path / "schema.sql").write_text(
+        "CREATE TABLE users (id BIGINT);", encoding="utf-8"
+    )
+
+    class FakeClient:
+        def fetch_schema(self, target_id):
+            assert target_id == "tenant-7"
+            return "CREATE TABLE orders (id BIGINT);"
+
+    monkeypatch.setattr(live_mssql_source, "configured_client", lambda: FakeClient())
+    repo = {
+        "context_db_schema_on": 1,
+        "db_schema_path": "schema.sql",
+        "live_db_target_id": "tenant-7",
+        "local_path": str(tmp_path),
+    }
+    provider = build_context_provider(repo, {"context_db_schema_on": 0})
+    dbp = next(p for p in provider.providers if p.name == "db_schema")
+
+    result = dbp.fetch(_req(changed_files=("models/user.py", "models/order.py")))
+    assert result.status == "ok"
+    assert "CREATE TABLE users" in result.text
+    assert "CREATE TABLE orders" in result.text
+
+
 def test_file_schema_source_resolves_relative_to_root(tmp_path):
     from server.context.db_schema_source import file_schema_source
 
@@ -950,6 +1173,250 @@ def test_registry_graphify_source_wired_from_path(tmp_path, monkeypatch):
     gp = next(p for p in c.providers if p.name == "graphify")
     assert (
         gp.fetch(_req()).status == "ok" and "프로젝트 현황 X" in gp.fetch(_req()).text
+    )
+
+
+# ── 현재 PR의 기존 GitHub 리뷰/댓글 ────────────────────────────────────
+
+
+def test_current_pr_reviews_source_renders_review_inline_and_conversation():
+    from server.context.current_pr_reviews_source import current_pr_reviews_source
+
+    class Gh:
+        def list_pr_reviews(self, repo, number):
+            return [{
+                "id": 1,
+                "state": "CHANGES_REQUESTED",
+                "body": "null 처리를 확인해 주세요",
+                "submitted_at": "2026-07-20T10:00:00Z",
+                "user": {"login": "reviewer"},
+            }]
+
+        def list_pr_review_comments(self, repo, number):
+            return [{
+                "id": 2,
+                "path": "src/a.py",
+                "line": 12,
+                "body": "이 분기는 이미 지적했습니다",
+                "created_at": "2026-07-20T11:00:00Z",
+                "user": {"login": "inline-reviewer"},
+            }]
+
+        def list_pr_conversation_comments(self, repo, number):
+            return [{
+                "id": 3,
+                "body": "수정 커밋을 올렸습니다",
+                "created_at": "2026-07-20T12:00:00Z",
+                "user": {"login": "author"},
+            }]
+
+    out = current_pr_reviews_source(Gh())(_req())
+
+    assert "현재 PR에 이미 남은 리뷰와 댓글" in out
+    assert "src/a.py:12" in out
+    assert "null 처리를 확인" in out
+    assert "수정 커밋" in out
+
+
+def test_current_pr_reviews_prioritizes_unresolved_and_filters_bot_noise():
+    from server.context.current_pr_reviews_source import (
+        CurrentPRReviewsProvider,
+        summarize_current_pr_reviews,
+    )
+
+    text = summarize_current_pr_reviews(
+        reviews=[],
+        inline_comments=[
+            {
+                "id": "human",
+                "body": "아직 반영되지 않은 오류",
+                "path": "a.py",
+                "line": 3,
+                "is_resolved": False,
+                "author": {"login": "kim", "__typename": "User"},
+            },
+            {
+                "id": "bot",
+                "body": "<!-- auto-generated comment --> walkthrough",
+                "path": "b.py",
+                "is_resolved": False,
+                "author": {"login": "coderabbitai", "__typename": "Bot"},
+            },
+        ],
+        conversation_comments=[
+            {
+                "id": "slack",
+                "body": "Slack 쓰레드: https://example.test",
+                "author": {"login": "monkb", "__typename": "User"},
+            },
+            {
+                "id": "long-bot",
+                "body": "자동 분석 " + ("x" * 700) + " auto-generated comment",
+                "author": {"login": "review-helper", "__typename": "Bot"},
+            },
+        ],
+    )
+    assert "미해결" in text and "아직 반영되지 않은 오류" in text
+    assert "walkthrough" not in text and "Slack 쓰레드" not in text
+    assert "자동 분석" not in text
+
+    class Gh:
+        def get_pr_review_context(self, repo, number):
+            return {
+                "reviews": [],
+                "inline_comments": [{
+                    "id": "1", "body": "확인 필요", "is_resolved": False,
+                    "author": {"login": "kim"},
+                }],
+                "conversation_comments": [],
+            }
+
+    result = CurrentPRReviewsProvider(Gh()).fetch(_req())
+    assert result.meta == {
+        "items_read": 1,
+        "items_selected": 1,
+        "automated_items_selected": 0,
+        "failed_sources": [],
+    }
+
+
+def test_current_pr_reviews_labels_automated_markers_and_keeps_unresolved_threads():
+    from server.context.current_pr_reviews_source import CurrentPRReviewsProvider
+
+    class Gh:
+        def get_pr_review_context(self, repo, number):
+            return {
+                "reviews": [{
+                    "id": "summary",
+                    "state": "COMMENTED",
+                    "body": "<!-- almighty-review [codex] -->\n이전 자동 요약",
+                    "author": {"login": "human-shaped-login"},
+                }],
+                "inline_comments": [
+                    {
+                        "id": "legacy",
+                        "body": "<!-- codex-auto-review --> auto-generated comment 실제 미해결 오류",
+                        "path": "a.py",
+                        "line": 3,
+                        "is_resolved": False,
+                        "author": {"login": "human-shaped-login"},
+                    },
+                    {
+                        "id": "human",
+                        "body": "auto-generated comment라는 문자열을 포함한 사람 의견",
+                        "path": "b.py",
+                        "line": 4,
+                        "is_resolved": False,
+                        "author": {"login": "kim"},
+                    },
+                ],
+                "conversation_comments": [],
+            }
+
+    result = CurrentPRReviewsProvider(Gh()).fetch(_req())
+
+    assert "자동 리뷰 codex commented" in result.text
+    assert "자동 리뷰 codex 인라인 · 미해결" in result.text
+    assert "사람 의견" in result.text
+    assert "<!-- codex-auto-review -->" not in result.text
+    assert "<!-- almighty-review" not in result.text
+    assert result.meta["items_selected"] == 3
+    assert result.meta["automated_items_selected"] == 2
+
+
+def test_current_pr_reviews_source_keeps_partial_results_when_one_endpoint_fails():
+    from server.context.current_pr_reviews_source import current_pr_reviews_source
+
+    class Gh:
+        def list_pr_reviews(self, repo, number):
+            raise RuntimeError("reviews unavailable")
+
+        def list_pr_review_comments(self, repo, number):
+            return []
+
+        def list_pr_conversation_comments(self, repo, number):
+            return [{"id": 3, "body": "남은 대화", "user": {"login": "kim"}}]
+
+    assert "남은 대화" in current_pr_reviews_source(Gh())(_req())
+
+
+def test_current_pr_reviews_falls_back_to_rest_after_graphql_failure():
+    import threading
+
+    from server.context.current_pr_reviews_source import CurrentPRReviewsProvider
+
+    calls = []
+    barrier = threading.Barrier(3)
+
+    def rest_result(name, value):
+        barrier.wait(timeout=1)
+        calls.append(name)
+        return value
+
+    class Gh:
+        def get_pr_review_context(self, repo, number):
+            raise TimeoutError("graphql timeout")
+
+        def list_pr_reviews(self, repo, number):
+            return rest_result(
+                "reviews",
+                [{"id": 1, "body": "REST 리뷰", "user": {"login": "kim"}}],
+            )
+
+        def list_pr_review_comments(self, repo, number):
+            return rest_result("inline", [])
+
+        def list_pr_conversation_comments(self, repo, number):
+            return rest_result("conversation", [])
+
+    result = CurrentPRReviewsProvider(Gh()).fetch(_req())
+
+    assert result.status == "ok"
+    assert "REST 리뷰" in result.text
+    assert set(calls) == {"reviews", "inline", "conversation"}
+    assert result.meta["failed_sources"] == ["graphql"]
+
+
+def test_current_pr_reviews_reports_error_when_graphql_and_rest_all_fail():
+    from server.context.current_pr_reviews_source import CurrentPRReviewsProvider
+
+    class Gh:
+        def get_pr_review_context(self, repo, number):
+            raise RuntimeError("tok-secret")
+
+        def __getattr__(self, name):
+            if name.startswith("list_pr_"):
+                return lambda *args: (_ for _ in ()).throw(RuntimeError("tok-secret"))
+            raise AttributeError(name)
+
+    result = CurrentPRReviewsProvider(Gh()).fetch(_req())
+
+    assert result.status == "error"
+    assert result.text == ""
+    assert "tok-secret" not in (result.error or "")
+    assert result.meta["items_read"] == 0
+    assert set(result.meta["failed_sources"]) == {
+        "graphql",
+        "reviews",
+        "inline_comments",
+        "conversation_comments",
+    }
+
+
+def test_registry_includes_current_pr_reviews_only_with_github_client():
+    from server.context.registry import build_context_provider
+
+    class Gh:
+        pass
+
+    enabled = {"context_current_pr_reviews_on": 1}
+    assert any(
+        p.name == "current_pr_reviews"
+        for p in build_context_provider(enabled, {}, gh=Gh()).providers
+    )
+    assert not any(
+        p.name == "current_pr_reviews"
+        for p in build_context_provider(enabled, {}).providers
     )
 
 

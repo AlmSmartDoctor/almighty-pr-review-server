@@ -13,6 +13,7 @@ def add(
     head_sha=None,
     finding_ids=None,
     kind="issue",
+    commit=True,
 ) -> int:
     cur = conn.execute(
         """INSERT INTO posted_comment
@@ -31,7 +32,8 @@ def add(
             kind,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -46,9 +48,10 @@ def latest_for_pr_vendor(conn, *, pr_id, vendor):
     ).fetchone()
 
 
-def supersede(conn, posted_id):
+def supersede(conn, posted_id, *, commit=True):
     conn.execute(
         "UPDATE posted_comment SET superseded_at=datetime('now') WHERE id=?",
         (posted_id,),
     )
-    conn.commit()
+    if commit:
+        conn.commit()

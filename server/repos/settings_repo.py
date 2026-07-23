@@ -13,6 +13,7 @@ ALLOWED = {
     "context_db_schema_on",
     "context_graphify_on",
     "context_feedback_on",
+    "context_current_pr_reviews_on",
     "verify_singles_on",
     "incremental_review_on",
     "skip_draft_on",

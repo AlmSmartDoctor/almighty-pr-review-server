@@ -1,7 +1,9 @@
 import subprocess
 from dataclasses import dataclass
 
+from server import config
 from server.review.json_block import last_json_block
+from server.review.vendors import run_bounded_process_sync
 
 _ORDER = {"trivial": 0, "moderate": 1, "complex": 2}
 THRESHOLDS = tuple(_ORDER)  # 설정 API 검증용 — 밖의 값은 decide()에서 KeyError
@@ -16,9 +18,7 @@ PRESCREEN_CLI_FAILURE_REASON = "사전평가 CLI 실패→기본 리뷰"
 
 def is_nondeterministic_reason(reason: str) -> bool:
     """캐시에 등록하면 안 되는 실패 사유(다음 런이 CLI를 재시도해 self-heal)."""
-    return reason == PRESCREEN_FALLBACK_REASON or reason.startswith(
-        PRESCREEN_CLI_FAILURE_REASON
-    )
+    return PRESCREEN_FALLBACK_REASON in reason or PRESCREEN_CLI_FAILURE_REASON in reason
 
 
 @dataclass
@@ -33,21 +33,49 @@ class PreScreenResult:
 
 
 PRESCREEN_TIMEOUT_SEC = 120  # ★개정: 사전평가도 subprocess → 상한 필수
+PRESCREEN_STREAM_LIMIT_BYTES = 256 * 1024
 MAX_INLINE_DIFF_CHARS = 100_000
 
 
-def _default_runner(args, env=None, cwd=None) -> str:
-    # ★개정: 벤더 계약과 동일하게 stdin 닫기 + timeout + (격리)env 적용.
-    return subprocess.run(
+def is_valid_prescreen_model(model: str | None) -> bool:
+    """Claude CLI가 해석할 수 있는 제안 별칭 또는 정식 Claude 모델 ID만 허용한다."""
+    value = (model or "").strip()
+    lowered = value.lower()
+    return bool(value) and (
+        value in config.CLAUDE_MODELS
+        or (
+            lowered.startswith("claude-")
+            and any(character.isdigit() for character in lowered[len("claude-") :])
+        )
+    )
+
+
+def normalize_prescreen_model(model: str | None) -> tuple[str, str | None]:
+    """사전평가는 Claude CLI 전용이다. 비어 있거나 타 벤더/임의 모델이면 안전한
+    기본값으로 폴백하고, 호출자가 감사 메타데이터에 남길 사유를 함께 반환한다.
+    미래 Claude 정식 ID는 claude- 접두사로 허용한다."""
+    value = (model or "").strip()
+    if not value:
+        return config.DEFAULT_PRESCREEN_MODEL, "empty_model_fallback"
+    if not is_valid_prescreen_model(value):
+        return config.DEFAULT_PRESCREEN_MODEL, "non_claude_model_fallback"
+    return value, None
+
+
+def _default_runner(args, env=None, cwd=None, input_text=None) -> str:
+    result = run_bounded_process_sync(
         args,
         env=env,
         cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
         timeout=PRESCREEN_TIMEOUT_SEC,
-    ).stdout
+        stream_limit=PRESCREEN_STREAM_LIMIT_BYTES,
+        input_text=input_text,
+    )
+    if result.stdout_truncated or result.stderr_truncated:
+        raise RuntimeError("prescreen output limit exceeded")
+    if result.exit_code != 0:
+        raise subprocess.CalledProcessError(result.exit_code, args)
+    return result.stdout
 
 
 PROMPT = (
@@ -64,7 +92,15 @@ def prescreen(
     프롬프트에 diff가 인라인이라 파일 접근 불필요 → cwd를 빈 runtime dir로 가둔다."""
     if len(diff) > MAX_INLINE_DIFF_CHARS:
         return PreScreenResult("complex", 1.0, diff_too_large_reason(diff))
-    out = runner(["claude", "-p", PROMPT + diff, "--model", model], env=env, cwd=cwd)
+    out = runner(
+        [
+            "claude", "-p", "--permission-mode", "plan",
+            "--tools", "", "--disable-slash-commands", "--model", model,
+        ],
+        env=env,
+        cwd=cwd,
+        input_text=PROMPT + diff,
+    )
     try:
         d = last_json_block(out)
         complexity = d.get("complexity", "moderate")

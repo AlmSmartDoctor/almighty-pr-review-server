@@ -61,6 +61,21 @@ def _parse_tables(ddl: str):
     return tables
 
 
+def related_schema(ddl: str, changed_files) -> str:
+    """DDL에서 변경 파일과 관련된 테이블만 고른다. 정적·라이브 소스가 공유한다."""
+    file_tokens = [_tokens(str(f)) for f in changed_files or ()]
+    if not ddl or not file_tokens:
+        return ""
+    picked = []
+    for name, stmt in _parse_tables(ddl):
+        tname = _tokens(name)
+        # 테이블 토큰이 어떤 변경 파일 한 곳의 토큰집합에 모두 포함되면 관련
+        # (order_items ⊆ {order,item,rb} 매칭; 파일 간 교차 매칭은 배제).
+        if tname and any(tname <= ft for ft in file_tokens):
+            picked.append(stmt)
+    return "\n\n".join(picked[:_MAX_TABLES])
+
+
 def file_schema_source(*, path: str, root: str):
     """레포에 체크인된 DDL 덤프에서 변경 파일 관련 테이블의 DDL만 골라주는
     schema_source(req)->str 콜백을 만든다. 실패/무매칭/무신호는 ""로 degrade."""
@@ -70,18 +85,6 @@ def file_schema_source(*, path: str, root: str):
             getattr(req, "workdir", "") or root
         )  # PR-head worktree 우선, local_path 폴백
         ddl = read_confined(path, root_eff, _MAX_SCHEMA_BYTES)
-        if not ddl:
-            return ""
-        file_tokens = [_tokens(str(f)) for f in getattr(req, "changed_files", ()) or ()]
-        if not file_tokens:
-            return ""
-        picked = []
-        for name, stmt in _parse_tables(ddl):
-            tname = _tokens(name)
-            # 테이블 토큰이 어떤 변경 파일 한 곳의 토큰집합에 모두 포함되면 관련
-            # (order_items ⊆ {order,item,rb} 매칭; 파일 간 교차 매칭은 배제).
-            if tname and any(tname <= ft for ft in file_tokens):
-                picked.append(stmt)
-        return "\n\n".join(picked[:_MAX_TABLES])
+        return related_schema(ddl or "", getattr(req, "changed_files", ()) or ())
 
     return source

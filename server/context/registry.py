@@ -6,11 +6,13 @@ from server.context.static_provider import StaticContextProvider
 
 # 컨텍스트 렌더/잘림 우선순위(작을수록 먼저 렌더 → 총량 상한 초과 시 나중에 잘림).
 _CONTEXT_ORDER = {
-    "team_feedback": 0,
-    "db_schema": 1,
-    "jira": 2,
-    "static": 3,
-    "graphify": 4,
+    "current_pr_reviews": 0,
+    "review_rules": 1,
+    "team_feedback": 2,
+    "db_schema": 3,
+    "jira": 4,
+    "static": 5,
+    "graphify": 6,
 }
 
 
@@ -48,9 +50,19 @@ def _compose_sources(*sources):
     return combined
 
 
-def build_context_provider(repo, settings):
+def build_context_provider(repo, settings, *, gh=None):
     """활성 프로바이더 조립. 생성은 절대 예외를 밖으로 던지지 않는다(B-INV-4/D6)."""
     providers = []
+    if _effective(repo, settings, "context_current_pr_reviews_on") and gh is not None:
+        try:
+            from server.context.current_pr_reviews_source import CurrentPRReviewsProvider
+
+            providers.append(CurrentPRReviewsProvider(gh))
+        except Exception as e:
+            print(
+                "[context] current_pr_reviews provider skipped: "
+                + redact_secrets(str(e))
+            )
     if _effective(repo, settings, "context_static_on"):
         try:
             providers.append(
@@ -82,14 +94,18 @@ def build_context_provider(repo, settings):
     if _effective(repo, settings, "context_db_schema_on"):
         try:
             from server.context.db_schema_source import file_schema_source
+            from server.context.live_mssql_source import live_schema_source
             from server.context.source_provider import SourceBackedProvider
 
             db_schema_path = _ref(repo, "db_schema_path")
-            source = (
+            file_source = (
                 file_schema_source(path=db_schema_path, root=_ref(repo, "local_path"))
                 if db_schema_path
                 else None
             )
+            target_id = _ref(repo, "live_db_target_id")
+            live_source = live_schema_source(target_id=target_id) if target_id else None
+            source = _compose_sources(file_source, live_source)
             providers.append(SourceBackedProvider("db_schema", source=source))
         except Exception as e:  # never raise
             print(f"[context] db_schema provider skipped: {redact_secrets(str(e))}")
@@ -115,8 +131,15 @@ def build_context_provider(repo, settings):
     if _effective(repo, settings, "context_feedback_on"):
         try:
             from server.context.feedback_source import db_feedback_source
+            from server.context.review_rules_source import active_review_rules_source
             from server.context.source_provider import SourceBackedProvider
 
+            # 사람이 승인한 규칙만 별도 고우선순위 소스로 주입한다. 제안/비활성 규칙은 제외한다.
+            providers.append(
+                SourceBackedProvider(
+                    "review_rules", source=active_review_rules_source()
+                )
+            )
             # per-repo 경로 없음 — 소스가 앱 DB에서 이 레포 결정을 읽는다.
             # 결정이 없으면 소스가 ""를 반환해 자동 미주입.
             providers.append(

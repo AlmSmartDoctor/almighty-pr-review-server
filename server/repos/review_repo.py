@@ -1,12 +1,51 @@
 import json
 
+from server.review.finding_policy import policy_snapshot_record
+from server.review.vendor_telemetry import (
+    append_execution_attempt,
+    validate_execution_envelope,
+)
 
-def create_run(conn, *, pr_id, head_sha, trigger, effort, merge_enabled=0) -> int:
+
+def create_run(
+    conn, *, pr_id, head_sha, trigger, effort, merge_enabled=0,
+    owner_process_id=None, owner_job_id=None, policy_snapshot=None
+) -> int:
+    policy = (
+        policy_snapshot_record(policy_snapshot)
+        if policy_snapshot is not None
+        else {
+            key: None
+            for key in (
+                "scope_requested_mode", "scope_effective_mode",
+                "scope_policy_reason", "scope_selection_source",
+                "dedupe_requested_mode", "dedupe_effective_mode",
+                "dedupe_policy_reason", "dedupe_selection_source",
+                "policy_cohort_key", "policy_decision_hash",
+                "policy_config_hash", "benchmark_attestation_hash",
+            )
+        }
+    )
     cur = conn.execute(
         """INSERT INTO review_run
-           (pr_id, head_sha, trigger, effort, merge_enabled, status, started_at)
-           VALUES (?,?,?,?,?, 'running', datetime('now'))""",
-        (pr_id, head_sha, trigger, effort, merge_enabled),
+           (pr_id, head_sha, trigger, effort, merge_enabled, status, started_at,
+            owner_process_id, owner_job_id,
+            scope_requested_mode, scope_effective_mode, scope_policy_reason,
+            scope_selection_source, dedupe_requested_mode, dedupe_effective_mode,
+            dedupe_policy_reason, dedupe_selection_source, policy_cohort_key,
+            policy_decision_hash, policy_config_hash, benchmark_attestation_hash)
+           VALUES (?,?,?,?,?, 'running', datetime('now'), ?, ?,
+                   ?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            pr_id, head_sha, trigger, effort, merge_enabled,
+            owner_process_id, owner_job_id,
+            policy["scope_requested_mode"], policy["scope_effective_mode"],
+            policy["scope_policy_reason"], policy["scope_selection_source"],
+            policy["dedupe_requested_mode"], policy["dedupe_effective_mode"],
+            policy["dedupe_policy_reason"], policy["dedupe_selection_source"],
+            policy["policy_cohort_key"], policy["policy_decision_hash"],
+            policy["policy_config_hash"], policy["benchmark_attestation_hash"],
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -29,13 +68,14 @@ def set_base_sha(conn, run_id, base_sha):
     conn.commit()
 
 
-def finish_run(conn, run_id, status, error=None):
+def finish_run(conn, run_id, status, error=None, *, commit=True):
     conn.execute(
         "UPDATE review_run SET status=?, error=?, finished_at=datetime('now') "
         "WHERE id=?",
         (status, error, run_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def recover_stale_running(conn) -> int:
@@ -65,6 +105,59 @@ def set_context(conn, run_id, *, text, meta):
     conn.commit()
 
 
+def _validate_context_chunks(chunks):
+    if not isinstance(chunks, list) or len(chunks) > 1_000:
+        raise ValueError("invalid context chunk list")
+    total_text = 0
+    for chunk in chunks:
+        if not isinstance(chunk, dict) or set(chunk) != {
+            "chunk_hash", "context_hash", "text", "manifest"
+        }:
+            raise ValueError("invalid context chunk")
+        for key in ("chunk_hash", "context_hash"):
+            if not isinstance(chunk[key], str) or len(chunk[key]) != 64:
+                raise ValueError("invalid context chunk hash")
+        if not isinstance(chunk["text"], str):
+            raise ValueError("invalid context chunk text")
+        total_text += len(chunk["text"])
+        if total_text > 2_000_000:
+            raise ValueError("context chunks exceed size cap")
+        if not isinstance(chunk["manifest"], list) or len(chunk["manifest"]) > 2_000:
+            raise ValueError("invalid context chunk manifest")
+
+
+def set_context_chunks(conn, run_id, *, chunks, meta_patch=None):
+    _validate_context_chunks(chunks)
+    row = conn.execute(
+        "SELECT context_meta FROM review_run WHERE id=?", (run_id,)
+    ).fetchone()
+    decoded = json.loads(row["context_meta"] or "{}") if row else {}
+    meta = decoded if isinstance(decoded, dict) else {}
+    if meta_patch:
+        meta.update(meta_patch)
+    conn.execute(
+        "UPDATE review_run SET context_chunks=?, context_meta=? WHERE id=?",
+        (
+            json.dumps(chunks, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(meta, ensure_ascii=False),
+            run_id,
+        ),
+    )
+    conn.commit()
+
+
+def get_context_chunks(run):
+    value = run["context_chunks"] if run is not None and "context_chunks" in run.keys() else None
+    if not value:
+        return None
+    try:
+        chunks = json.loads(value)
+        _validate_context_chunks(chunks)
+        return chunks
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def add_vendor_result(
     conn,
     *,
@@ -85,23 +178,44 @@ def add_vendor_result(
     return cur.lastrowid
 
 
-def finish_vendor_result(conn, vr_id, *, error=None, duration_ms=None, raw_path=None):
-    """벤더 실행 종료 반영: error가 있으면 failed, 없으면 done(+error=NULL —
-    부분 재시도 성공 시 이전 실패 흔적을 지운다; 첫 실행에선 이미 NULL이라 no-op).
-    raw_path는 값이 있을 때만 갱신(COALESCE — 저장 실패로 이전 원문을 지우지 않음)."""
-    if error is not None:
-        conn.execute(
-            "UPDATE vendor_result SET status='failed', error=?, duration_ms=?, "
-            "raw_path=COALESCE(?, raw_path) WHERE id=?",
-            (error, duration_ms, raw_path, vr_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE vendor_result SET status='done', error=NULL, duration_ms=?, "
-            "raw_path=COALESCE(?, raw_path) WHERE id=?",
-            (duration_ms, raw_path, vr_id),
-        )
-    conn.commit()
+def finish_vendor_result(
+    conn,
+    vr_id,
+    *,
+    status=None,
+    error=None,
+    duration_ms=None,
+    raw_path=None,
+    execution_meta=None,
+    commit=True,
+):
+    """Persist only explicit terminal status and validated execution metadata.
+
+    ``status`` remains optional for legacy callers: error implies failed, otherwise done.
+    New retry attempts are appended instead of overwriting prior telemetry.
+    """
+    terminal = status or ("failed" if error is not None else "done")
+    if terminal not in {"done", "partial", "failed", "timeout", "canceled"}:
+        raise ValueError("invalid vendor result status")
+    encoded = None
+    if execution_meta is not None:
+        validate_execution_envelope(execution_meta)
+        row = conn.execute(
+            "SELECT execution_meta FROM vendor_result WHERE id=?", (vr_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("vendor result not found")
+        existing = _decode_execution_meta(row["execution_meta"])
+        merged = append_execution_attempt(existing, execution_meta)
+        encoded = json.dumps(merged, separators=(",", ":"), sort_keys=True)
+    conn.execute(
+        "UPDATE vendor_result SET status=?, error=?, duration_ms=?, "
+        "raw_path=COALESCE(?, raw_path), "
+        "execution_meta=COALESCE(?, execution_meta) WHERE id=?",
+        (terminal, error, duration_ms, raw_path, encoded, vr_id),
+    )
+    if commit:
+        conn.commit()
 
 
 def get_run(conn, run_id):
@@ -112,31 +226,73 @@ def failed_vendors(conn, run_id):
     return [
         r["vendor"]
         for r in conn.execute(
-            "SELECT vendor FROM vendor_result WHERE run_id=? AND status='failed'",
+            "SELECT vendor FROM vendor_result "
+            "WHERE run_id=? AND status IN ('failed','partial','timeout')",
             (run_id,),
         ).fetchall()
     ]
 
 
+def next_execution_attempt(conn, vr_ids) -> int:
+    maximum = 0
+    for vr_id in vr_ids:
+        row = conn.execute(
+            "SELECT execution_meta FROM vendor_result WHERE id=?", (vr_id,)
+        ).fetchone()
+        meta = _decode_execution_meta(row["execution_meta"] if row else None)
+        if meta:
+            maximum = max(
+                maximum,
+                *(attempt["attempt"] for attempt in meta["attempts"]),
+            )
+    return maximum + 1
+
+
 def vendor_result_id(conn, *, run_id, vendor) -> int:
-    """부분 재시도용: 기존 vendor_result 행 id를 반환(상태는 건드리지 않음).
-    'running'으로 미리 바꾸지 않으므로 재시도 도중 크래시해도 행은 'failed'로 남아
-    다음 재시도가 self-heal한다(run당 벤더 1행 불변식 유지, 새 행 미생성)."""
+    """부분 재시도용: 기존 vendor_result 행 id를 반환(상태는 건드리지 않음)."""
     return conn.execute(
         "SELECT id FROM vendor_result WHERE run_id=? AND vendor=?", (run_id, vendor)
     ).fetchone()["id"]
 
 
+def vendor_execution_meta(conn, *, run_id, vendor):
+    row = conn.execute(
+        "SELECT execution_meta FROM vendor_result WHERE run_id=? AND vendor=?",
+        (run_id, vendor),
+    ).fetchone()
+    return _decode_execution_meta(row["execution_meta"] if row else None)
+
+
+def _decode_execution_meta(value):
+    if not value:
+        return None
+    try:
+        decoded = json.loads(value)
+        validate_execution_envelope(decoded)
+        return decoded
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def list_vendor_results(conn, run_id):
-    # ★개정 (codex v6 [MEDIUM]): 부분 실패 벤더를 대시보드가 노출할 수 있게
-    # run의 vendor_result 행을 반환(실패 벤더 배지 근거).
-    # running 벤더는 아직 duration_ms가 없으므로 서버가 경과시간을 실시간 계산해
-    # 반환한다(run_duration_ms와 동일 공식) → 상세 트레이스가 폴링만으로 틱업.
-    return conn.execute(
-        """SELECT id, vendor, status, error, started_at, raw_path,
+    # raw_path is deliberately excluded from normal API/repository output.
+    rows = conn.execute(
+        """SELECT id, vendor, status, error, started_at, execution_meta,
                   CASE WHEN status='running' AND started_at IS NOT NULL
                        THEN (strftime('%s','now') - strftime('%s', started_at)) * 1000
                        ELSE duration_ms END AS duration_ms
            FROM vendor_result WHERE run_id=? ORDER BY vendor""",
         (run_id,),
     ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "vendor": row["vendor"],
+            "status": row["status"],
+            "error": row["error"],
+            "started_at": row["started_at"],
+            "duration_ms": row["duration_ms"],
+            "execution_meta": _decode_execution_meta(row["execution_meta"]),
+        }
+        for row in rows
+    ]

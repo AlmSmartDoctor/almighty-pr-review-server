@@ -42,11 +42,32 @@ def test_repo_has_local_path_and_job_columns(tmp_path):  # ★개정
     conn = connect(tmp_path / "test.db")
     init_schema(conn)
     repo_cols = {r[1] for r in conn.execute("PRAGMA table_info(repo)")}
-    assert {"local_path", "last_polled_at", "last_poll_error"} <= repo_cols
+    assert {
+        "local_path", "last_polled_at", "last_poll_error", "live_db_target_id",
+        "review_scope_guard_mode", "review_dedupe_mode",
+    } <= repo_cols
     job_cols = {r[1] for r in conn.execute("PRAGMA table_info(review_job)")}
     assert {"status", "attempts", "locked_by", "next_run_at"} <= job_cols
     pr_cols = {r[1] for r in conn.execute("PRAGMA table_info(pull_request)")}
     assert "created_at" in pr_cols
+    vendor_cols = {r[1] for r in conn.execute("PRAGMA table_info(vendor_result)")}
+    assert "execution_meta" in vendor_cols
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(review_run)")}
+    assert {
+        "context_chunks", "scope_requested_mode", "scope_effective_mode",
+        "scope_policy_reason", "scope_selection_source",
+        "dedupe_requested_mode", "dedupe_effective_mode",
+        "dedupe_policy_reason", "dedupe_selection_source",
+        "policy_cohort_key", "policy_decision_hash", "policy_config_hash",
+        "benchmark_attestation_hash",
+    } <= run_cols
+    finding_cols = {r[1] for r in conn.execute("PRAGMA table_info(finding)")}
+    assert {"verify_independent", "verify_evidence_status"} <= finding_cols
+    finding_cols = {r[1] for r in conn.execute("PRAGMA table_info(finding)")}
+    assert {
+        "source_chunk_index", "owner_chunk_index", "scope_status",
+        "posting_eligible", "duplicate_group_id", "duplicate_suggested",
+    } <= finding_cols
 
 
 def test_init_schema_migrates_repo_poll_error_column(tmp_path):
@@ -66,6 +87,35 @@ def test_init_schema_migrates_repo_poll_error_column(tmp_path):
     assert "last_poll_error" in columns
 
 
+def test_policy_snapshot_migration_keeps_legacy_run_unknown(tmp_path):
+    conn = connect(tmp_path / "test.db")
+    conn.execute(
+        """CREATE TABLE review_run (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pr_id INTEGER NOT NULL,
+          head_sha TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued'
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO review_run (pr_id, head_sha, status) VALUES (1, 'old', 'done')"
+    )
+
+    init_schema(conn)
+    init_schema(conn)
+
+    row = conn.execute("SELECT * FROM review_run WHERE head_sha='old'").fetchone()
+    for key in (
+        "scope_requested_mode", "scope_effective_mode", "scope_policy_reason",
+        "scope_selection_source", "dedupe_requested_mode",
+        "dedupe_effective_mode", "dedupe_policy_reason",
+        "dedupe_selection_source", "policy_cohort_key",
+        "policy_decision_hash", "policy_config_hash",
+        "benchmark_attestation_hash",
+    ):
+        assert row[key] is None
+
+
 def test_init_schema_migrates_app_settings_review_model(tmp_path):
     conn = connect(tmp_path / "test.db")
     conn.execute(
@@ -83,6 +133,19 @@ def test_init_schema_migrates_app_settings_review_model(tmp_path):
     assert row["codex_model"] == ""
     # 레거시 'claude-haiku'(유효하지 않은 별칭) → 'haiku'로 정규화
     assert row["prescreen_model"] == "haiku"
+
+
+def test_init_schema_repairs_non_claude_legacy_prescreen_model(tmp_path):
+    conn = connect(tmp_path / "invalid-model.db")
+    init_schema(conn)
+    conn.execute("UPDATE app_settings SET prescreen_model='gpt-5.6-terra' WHERE id=1")
+    conn.commit()
+
+    init_schema(conn)
+
+    assert conn.execute(
+        "SELECT prescreen_model FROM app_settings WHERE id=1"
+    ).fetchone()[0] == "haiku"
 
 
 def test_init_schema_migrates_pull_request_created_at(tmp_path):

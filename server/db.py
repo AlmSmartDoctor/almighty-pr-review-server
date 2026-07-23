@@ -39,14 +39,29 @@ CREATE TABLE IF NOT EXISTS review_run (
   head_sha TEXT NOT NULL, trigger TEXT, effort TEXT,
   merge_enabled INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'queued',           -- queued|running|done|failed|canceled
-  started_at TEXT, finished_at TEXT, error TEXT
+  started_at TEXT, finished_at TEXT, error TEXT,
+  owner_process_id TEXT,
+  owner_job_id INTEGER,
+  scope_requested_mode TEXT,
+  scope_effective_mode TEXT,
+  scope_policy_reason TEXT,
+  scope_selection_source TEXT,
+  dedupe_requested_mode TEXT,
+  dedupe_effective_mode TEXT,
+  dedupe_policy_reason TEXT,
+  dedupe_selection_source TEXT,
+  policy_cohort_key TEXT,
+  policy_decision_hash TEXT,
+  policy_config_hash TEXT,
+  benchmark_attestation_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS vendor_result (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER NOT NULL REFERENCES review_run(id),
   vendor TEXT NOT NULL,                            -- claude|codex
   status TEXT, duration_ms INTEGER,
-  raw_path TEXT, error TEXT
+  raw_path TEXT, error TEXT,
+  execution_meta TEXT
 );
 CREATE TABLE IF NOT EXISTS finding (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +72,14 @@ CREATE TABLE IF NOT EXISTS finding (
   confidence REAL, consensus TEXT DEFAULT 'single',
   consensus_group_id INTEGER,
   status TEXT NOT NULL DEFAULT 'pending',          -- pending|approved|dismissed|edited|posted
-  edited_text TEXT, created_at TEXT
+  edited_text TEXT, created_at TEXT,
+  posting_operation_id INTEGER,
+  source_chunk_index INTEGER,
+  owner_chunk_index INTEGER,
+  scope_status TEXT,
+  posting_eligible INTEGER NOT NULL DEFAULT 1,
+  duplicate_group_id INTEGER,
+  duplicate_suggested INTEGER NOT NULL DEFAULT 0
 );
 -- 서브프로젝트 C: finding 사람 판단 이력(append-only 감사). set_status가 상태 변경 시 1행 append.
 CREATE TABLE IF NOT EXISTS finding_decision (
@@ -65,6 +87,19 @@ CREATE TABLE IF NOT EXISTS finding_decision (
   finding_id INTEGER NOT NULL REFERENCES finding(id),
   from_status TEXT, to_status TEXT NOT NULL,
   decided_at TEXT NOT NULL
+);
+-- 사람이 승인한 레포별 리뷰 규칙. 제안은 자동 적용하지 않고 active 상태만 프롬프트에 주입한다.
+CREATE TABLE IF NOT EXISTS review_rule (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_id INTEGER NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+  category TEXT NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'proposed',          -- proposed|active|disabled
+  evidence_total INTEGER NOT NULL DEFAULT 0,
+  evidence_rejected INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(repo_id, category)
 );
 CREATE TABLE IF NOT EXISTS posted_comment (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +148,7 @@ CREATE TABLE IF NOT EXISTS wiki_page (
   next_run_at TEXT,
   locked_by TEXT,
   locked_at TEXT,
+  owner_process_id TEXT,
   updated_at TEXT NOT NULL
 );
 -- ★개정: 스케줄링 상태(review_job)와 실행 이력(review_run) 분리.
@@ -126,11 +162,37 @@ CREATE TABLE IF NOT EXISTS review_job (
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   locked_by TEXT, locked_at TEXT,
+  owner_process_id TEXT,
   next_run_at TEXT,                                -- backoff/rate-limit 지연
   run_id INTEGER REFERENCES review_run(id),
   retry_run_id INTEGER REFERENCES review_run(id),  -- trigger='retry'가 이어받을 대상 run
   error TEXT, created_at TEXT,
   UNIQUE(pr_id, head_sha)                          -- 같은 sha 중복 잡 방지(idempotency)
+);
+CREATE TABLE IF NOT EXISTS process_lease (
+  process_id TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS github_post_operation (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_key TEXT NOT NULL UNIQUE,
+  run_id INTEGER NOT NULL REFERENCES review_run(id),
+  vendor TEXT NOT NULL,
+  marker TEXT NOT NULL UNIQUE,
+  body TEXT NOT NULL,
+  finding_ids TEXT NOT NULL,
+  new_finding_ids TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  owner_token TEXT,
+  locked_at TEXT,
+  remote_review_id TEXT,
+  remote_url TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS app_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -180,6 +242,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "app_settings", "codex_model", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "review_run", "context_text", "TEXT")
     _ensure_column(conn, "review_run", "context_meta", "TEXT")
+    _ensure_column(conn, "review_run", "context_chunks", "TEXT")
     # v2-B 프로바이더 토글 — 전역 기본(app_settings). NOT NULL DEFAULT 0.
     _ensure_column(
         conn, "app_settings", "context_static_on", "INTEGER NOT NULL DEFAULT 0"
@@ -197,16 +260,23 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(
         conn, "app_settings", "context_feedback_on", "INTEGER NOT NULL DEFAULT 0"
     )
+    # 현재 PR에 이미 남은 GitHub review/inline/conversation 댓글 참조 토글.
+    _ensure_column(
+        conn, "app_settings", "context_current_pr_reviews_on", "INTEGER NOT NULL DEFAULT 0"
+    )
     # per-repo override — nullable(NULL이면 global 상속). 비밀 아님.
     _ensure_column(conn, "repo", "context_static_on", "INTEGER")
     _ensure_column(conn, "repo", "context_jira_on", "INTEGER")
     _ensure_column(conn, "repo", "context_db_schema_on", "INTEGER")
     _ensure_column(conn, "repo", "context_graphify_on", "INTEGER")
     _ensure_column(conn, "repo", "context_feedback_on", "INTEGER")
+    _ensure_column(conn, "repo", "context_current_pr_reviews_on", "INTEGER")
     _ensure_column(conn, "repo", "static_context_path", "TEXT")
     _ensure_column(conn, "repo", "jira_project_keys", "TEXT")
     # DBSchema 정적 소스: 레포에 체크인된 DDL 덤프 경로(비밀 아님, root 하위 봉쇄).
     _ensure_column(conn, "repo", "db_schema_path", "TEXT")
+    # Resolver-backed MSSQL Gateway scope ID(비밀 아님). DB 주소·자격증명은 env/Gateway에만 존재.
+    _ensure_column(conn, "repo", "live_db_target_id", "TEXT")
     # Graphify 애그리게이터 1차 소스: 레포에 체크인된 프로젝트 문서 경로(root 하위 봉쇄).
     _ensure_column(conn, "repo", "graphify_path", "TEXT")
     # 레포별·벤더별 모델/effort — NULL/''이면 전역 기본(app_settings) 상속, 전역도 없으면 코드 기본값.
@@ -226,8 +296,23 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # 반박 패스 결과(감사·트리아지) — finding당 verdict + 근거.
     _ensure_column(conn, "finding", "verify_status", "TEXT")
     _ensure_column(conn, "finding", "verify_rationale", "TEXT")
+    _ensure_column(conn, "finding", "verify_independent", "INTEGER")
+    _ensure_column(conn, "finding", "verify_evidence_status", "TEXT")
+    # 청크 ownership/scope와 non-destructive duplicate shadow grouping.
+    _ensure_column(conn, "finding", "source_chunk_index", "INTEGER")
+    _ensure_column(conn, "finding", "owner_chunk_index", "INTEGER")
+    _ensure_column(conn, "finding", "scope_status", "TEXT")
+    _ensure_column(
+        conn, "finding", "posting_eligible", "INTEGER NOT NULL DEFAULT 1"
+    )
+    _ensure_column(conn, "finding", "duplicate_group_id", "INTEGER")
+    _ensure_column(
+        conn, "finding", "duplicate_suggested", "INTEGER NOT NULL DEFAULT 0"
+    )
     # 벤더 리뷰 시작 시각 — running 중 상세 트레이스의 실시간 경과시간 계산용.
     _ensure_column(conn, "vendor_result", "started_at", "TEXT")
+    # 원문 transcript 없이 attempt/phase/chunk별 숫자·상태 telemetry만 저장.
+    _ensure_column(conn, "vendor_result", "execution_meta", "TEXT")
     # 증분 리뷰 토글 — 전역 기본 ON + per-repo override(NULL=상속). 켜면 재리뷰가
     # 직전 완료(done) 런 이후의 델타만 리뷰. review_run.base_sha=델타 기준 sha(NULL=전체).
     _ensure_column(
@@ -244,6 +329,25 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # 수동 트리거는 게이트 밖(사람이 draft를 알고 누른 것).
     _ensure_column(conn, "app_settings", "skip_draft_on", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "repo", "skip_draft_on", "INTEGER")
+    # repo별 scope/dedupe canary override(NULL=env global mode).
+    _ensure_column(conn, "repo", "review_scope_guard_mode", "TEXT")
+    _ensure_column(conn, "repo", "review_dedupe_mode", "TEXT")
+    _ensure_column(conn, "review_job", "owner_process_id", "TEXT")
+    _ensure_column(conn, "review_run", "owner_process_id", "TEXT")
+    _ensure_column(conn, "review_run", "owner_job_id", "INTEGER")
+    # 최초 실행 시점의 immutable policy decision. 레거시 row는 NULL=unknown이며
+    # 현재 env/repo 설정으로 backfill하지 않는다.
+    for column in (
+        "scope_requested_mode", "scope_effective_mode", "scope_policy_reason",
+        "scope_selection_source", "dedupe_requested_mode", "dedupe_effective_mode",
+        "dedupe_policy_reason", "dedupe_selection_source", "policy_cohort_key",
+        "policy_decision_hash", "policy_config_hash", "benchmark_attestation_hash",
+    ):
+        _ensure_column(conn, "review_run", column, "TEXT")
+    _ensure_column(conn, "wiki_page", "owner_process_id", "TEXT")
+    _ensure_column(conn, "finding", "posting_operation_id", "INTEGER")
+    _ensure_column(conn, "github_post_operation", "owner_token", "TEXT")
+    _ensure_column(conn, "github_post_operation", "locked_at", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(
@@ -251,6 +355,29 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "WHERE prescreen_model='claude-haiku'"
     )
     conn.execute("INSERT OR IGNORE INTO app_settings (id) VALUES (1)")
+    # 과거 UI가 허용했던 Codex/타사 모델 값은 런타임마다 조용히 haiku로 폴백해
+    # 설정 표시와 실제 실행이 달랐다. 시작 migration에서 실제 유효값으로 일치시킨다.
+    from server.review.prescreen import is_valid_prescreen_model
+
+    current = conn.execute(
+        "SELECT prescreen_model FROM app_settings WHERE id=1"
+    ).fetchone()[0]
+    if not is_valid_prescreen_model(current):
+        conn.execute("UPDATE app_settings SET prescreen_model='haiku' WHERE id=1")
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_review_job_claim
+          ON review_job(status, next_run_at, priority DESC, id);
+        CREATE INDEX IF NOT EXISTS idx_review_run_pr_status
+          ON review_run(pr_id, status, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_pre_screen_reuse
+          ON pre_screen(pr_id, diff_hash, model, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_finding_run_status
+          ON finding(run_id, status, vendor, id);
+        CREATE INDEX IF NOT EXISTS idx_pull_request_repo_open
+          ON pull_request(repo_id, number) WHERE state='open';
+        """
+    )
     conn.commit()
 
 

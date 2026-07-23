@@ -1,5 +1,7 @@
 from server.review.diff_filter import (
+    changed_lines,
     chunk_by_budget,
+    chunk_records_by_budget,
     commentable_lines,
     filter_reviewable,
     split_file_blocks,
@@ -94,6 +96,95 @@ def test_commentable_lines_ignores_file_header_plusminus_and_empty():
     assert commentable_lines("") == {}
 
 
+def test_changed_lines_excludes_context_and_deletions():
+    diff = _block(
+        "a.py",
+        body="@@ -10,3 +10,3 @@\n context\n-old\n+new\n tail\n",
+    )
+
+    assert commentable_lines(diff)["a.py"] == {10, 11, 12}
+    assert changed_lines(diff)["a.py"] == {11}
+
+
+def test_split_file_blocks_decodes_quoted_git_paths():
+    diff = (
+        'diff --git "a/caf\\303\\251 file.py" "b/caf\\303\\251 file.py"\n'
+        "@@ -0,0 +1 @@\n+x\n"
+    )
+
+    assert changed_lines(diff) == {"café file.py": {1}}
+
+
+def test_chunk_records_preserve_all_oversized_hunk_ownership_once():
+    body = "@@ -1,1 +1,80 @@\n-old\n" + "".join(
+        f"+line-{index}\n" for index in range(1, 81)
+    )
+    diff = _block("huge.py", body=body)
+
+    chunks = chunk_records_by_budget(diff, budget=180)
+
+    owned = [
+        (path, line)
+        for chunk in chunks
+        for path, lines in chunk.owned_changed_lines.items()
+        for line in lines
+    ]
+    assert len(chunks) > 2
+    assert all(len(chunk.text) <= 180 for chunk in chunks)
+    assert len(owned) == len(set(owned)) == 80
+    assert set(owned) == {("huge.py", line) for line in range(1, 81)}
+    for chunk in chunks:
+        assert changed_lines(chunk.text) == {
+            path: set(lines) for path, lines in chunk.owned_changed_lines.items()
+        }
+        assert chunk.text.startswith("diff --git ")
+        assert "@@ " in chunk.text
+
+
+def test_chunk_records_preserve_discontinuous_multi_hunk_coordinates():
+    diff = _block(
+        "huge.py",
+        body=(
+            "@@ -0,0 +1,2 @@\n+one\n+two\n"
+            "@@ -99,0 +100,1 @@\n+hundred\n"
+            + ("@@ -199,0 +200,1 @@\n+" + ("x" * 200) + "\n")
+        ),
+    )
+
+    chunks = chunk_records_by_budget(diff, budget=180)
+    parsed = {
+        (path, line)
+        for chunk in chunks
+        for path, lines in changed_lines(chunk.text).items()
+        for line in lines
+    }
+    owned = {
+        (path, line)
+        for chunk in chunks
+        for path, lines in chunk.owned_changed_lines.items()
+        for line in lines
+    }
+
+    assert parsed == owned == {
+        ("huge.py", 1), ("huge.py", 2), ("huge.py", 100), ("huge.py", 200)
+    }
+
+
+def test_chunk_records_truncate_pathological_added_line_without_breaking_diff():
+    diff = _block(
+        "huge.py",
+        body="@@ -0,0 +1 @@\n+" + ("x" * 2_000) + "\n",
+    )
+
+    chunks = chunk_records_by_budget(diff, budget=180)
+
+    assert len(chunks) == 1
+    assert len(chunks[0].text) <= 180
+    assert changed_lines(chunks[0].text) == {"huge.py": {1}}
+    assert chunks[0].owned_changed_lines == {"huge.py": frozenset({1})}
+    assert "truncated" in chunks[0].text
+
+
 def test_chunk_small_diff_is_single_fast_path():
     diff = _block("a.py")
     assert chunk_by_budget(diff, budget=100_000) == [diff]
@@ -111,10 +202,20 @@ def test_chunk_splits_on_file_boundary_within_budget():
         assert ch.count("diff --git") >= 1  # 각 청크는 온전한 파일 블록(들)
 
 
-def test_chunk_oversized_single_block_becomes_own_chunk():
+def test_chunk_oversized_single_block_obeys_hard_cap():
     big = _block("huge.py", body="@@ -1 +1 @@\n" + ("+x\n" * 1000))
     small = _block("small.py")
-    diff = big + small
-    chunks = chunk_by_budget(diff, budget=len(small) + 10)
-    assert big in chunks  # 예산 초과 단일 블록도 통째로 한 청크
-    assert "".join(chunks) == diff
+    budget = 256
+    chunks = chunk_by_budget(big + small, budget=budget)
+    assert len(chunks) > 2
+    assert all(len(chunk) <= budget for chunk in chunks)
+    assert all("huge.py" in chunk for chunk in chunks[:-1])
+
+
+def test_chunk_hard_caps_single_extremely_long_line():
+    big = _block("huge.py", body="@@ -1 +1 @@\n+" + ("x" * 2000) + "\n")
+    chunks = chunk_by_budget(big, budget=256)
+    assert len(chunks) == 1
+    assert all(len(chunk) <= 256 for chunk in chunks)
+    assert all("huge.py" in chunk for chunk in chunks)
+    assert "truncated; inspect snapshot" in chunks[0]

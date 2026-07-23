@@ -1,6 +1,8 @@
 import json
 import subprocess
 
+import pytest
+
 from server.github import gh
 
 
@@ -59,6 +61,63 @@ def test_list_open_prs_parses_json():
     assert any("isDraft" in arg for arg in runner.calls[0][0])
     assert any("body" in arg for arg in runner.calls[0][0])
     assert "--limit" in runner.calls[0][0]  # 재조정용 완전 오픈 셋 확보
+
+
+def test_gets_current_pr_review_context_with_one_graphql_call():
+    payload = {
+        "data": {"repository": {"pullRequest": {
+            "reviews": {"nodes": [{"id": "r1", "body": "summary"}]},
+            "reviewThreads": {"nodes": [{
+                "is_resolved": False,
+                "comments": {"nodes": [{"id": "c1", "body": "inline"}]},
+            }]},
+            "comments": {"nodes": [{"id": "i1", "body": "conversation"}]},
+        }}}
+    }
+    calls = []
+
+    def runner(args, **kw):
+        calls.append((args, kw))
+        return json.dumps(payload)
+
+    result = gh.GhClient(runner=runner).get_pr_review_context("acme/api", 7)
+
+    assert len(calls) == 1 and calls[0][0][2] == "graphql"
+    assert calls[0][1]["timeout"] == 5
+    assert result["inline_comments"][0]["is_resolved"] is False
+    assert result["conversation_comments"][0]["body"] == "conversation"
+
+
+def test_current_pr_review_context_rejects_graphql_errors_for_rest_fallback():
+    client = gh.GhClient(
+        runner=lambda args, **kwargs: json.dumps(
+            {"data": {"repository": None}, "errors": [{"message": "rate limited"}]}
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="GraphQL review context query failed"):
+        client.get_pr_review_context("acme/api", 7)
+
+
+def test_lists_current_pr_review_context_from_bounded_read_endpoints():
+    payloads = {
+        "/issues/7/comments?per_page=100": [{"id": 3, "body": "conversation"}],
+        "/reviews?per_page=100": [{"id": 1, "body": "summary"}],
+        "/comments?per_page=100": [{"id": 2, "body": "inline"}],
+    }
+
+    def runner(args, **kw):
+        endpoint = args[2]
+        for suffix, payload in payloads.items():
+            if endpoint.endswith(suffix):
+                return json.dumps(payload)
+        raise AssertionError(endpoint)
+
+    client = gh.GhClient(runner=runner)
+
+    assert client.list_pr_reviews("acme/api", 7)[0]["body"] == "summary"
+    assert client.list_pr_review_comments("acme/api", 7)[0]["body"] == "inline"
+    assert client.list_pr_conversation_comments("acme/api", 7)[0]["body"] == "conversation"
 
 
 def test_diff_returns_text():

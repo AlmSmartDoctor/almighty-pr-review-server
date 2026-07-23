@@ -35,6 +35,8 @@ def sync_repo(conn, repo, *, list_prs, enqueue) -> dict:
             conn, repo, settings, list_prs=list_prs, enqueue=enqueue
         )
     except Exception as exc:
+        if conn.in_transaction:
+            conn.rollback()
         message = _poll_error(exc)
         repo_repo.update(conn, repo["id"], last_poll_error=message)
         raise
@@ -64,6 +66,7 @@ def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> dict:
     open_prs = list_prs(repo["full_name"])
     open_numbers = []
     enqueued_jobs = 0
+    conn.execute("BEGIN IMMEDIATE")
     for pr in open_prs:
         pid = pr_repo.upsert(
             conn,
@@ -80,6 +83,7 @@ def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> dict:
             head_ref=pr.head_ref,
             body=pr.body,
             is_draft=pr.is_draft,
+            commit=False,
         )
         open_numbers.append(pr.number)
         if (
@@ -94,11 +98,15 @@ def _poll_repo(conn, repo, settings, *, list_prs, enqueue) -> dict:
     # 병합/닫힌 PR 재조정: 이 폴 이전에 열려 있었으나 gh 오픈 목록에서 사라진 것만
     # closed로. 목록이 상한에 걸려 잘렸으면(len==limit) 불완전한 셋이라 skip.
     if len(open_prs) < config.POLL_OPEN_PR_LIMIT:
-        pr_repo.mark_closed(conn, repo["id"], prev_open - set(open_numbers))
+        pr_repo.mark_closed(
+            conn, repo["id"], prev_open - set(open_numbers), commit=False
+        )
     polled_at = _now(conn)
     repo_repo.update(
-        conn, repo["id"], last_polled_at=polled_at, last_poll_error=None
+        conn, repo["id"], commit=False,
+        last_polled_at=polled_at, last_poll_error=None
     )
+    conn.commit()
     return {
         "repo_id": repo["id"],
         "repo": repo["full_name"],
@@ -114,6 +122,16 @@ def _now(conn):
     return conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
 
 
+def _safe_poll_interval(value, *, fallback: int = 60) -> int:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and config.POLL_INTERVAL_MIN_SEC <= value <= config.POLL_INTERVAL_MAX_SEC
+    ):
+        return value
+    return fallback
+
+
 async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
     """★개정: 폴러는 매 틱 자기 커넥션을 열고, 새 head sha면 review_job enqueue.
     대기 간격은 매 틱 app_settings.default_poll_interval을 읽어 반영(웹 UI 수정이
@@ -124,13 +142,14 @@ async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
     client = GhClient()
     while stop_event is None or not stop_event.is_set():
         conn = connect(db_path)
-        interval = interval_sec
+        interval = _safe_poll_interval(interval_sec)
         try:
 
             def enqueue(pid):
                 pr = pr_repo.get(conn, pid)
                 job_repo.enqueue(
-                    conn, pr_id=pid, head_sha=pr["head_sha"], trigger="auto"
+                    conn, pr_id=pid, head_sha=pr["head_sha"], trigger="auto",
+                    commit=False,
                 )
 
             try:
@@ -138,8 +157,10 @@ async def poll_loop(db_path, *, interval_sec: int = 60, stop_event=None):
                     poll_once, conn, list_prs=client.list_open_prs, enqueue=enqueue
                 )
                 row = settings_repo.get(conn)
-                if row and row["default_poll_interval"]:
-                    interval = row["default_poll_interval"]
+                if row:
+                    interval = _safe_poll_interval(
+                        row["default_poll_interval"], fallback=interval
+                    )
             except Exception as e:  # 한 틱의 실패가 폴러를 영구히 죽이지 않게
                 print(f"[poller] tick failed: {e!r}")
         finally:

@@ -2,7 +2,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,6 +14,25 @@ from server import config
 _HARNESS_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _HARNESS_FILES = ("config.json", "tools-allowlist.json", "review-system-prompt.md")
 VENDORS = ("claude", "codex")
+_KEYCHAIN_MAX_BYTES = 64 * 1024
+_KEYCHAIN_TIMEOUT_SEC = 15
+
+
+class RuntimeCredentialError(RuntimeError):
+    def __init__(self, safe_error_code: str):
+        self.safe_error_code = safe_error_code
+        super().__init__(safe_error_code)
+
+
+def cleanup_failure_code(exc: BaseException) -> str | None:
+    codes = {"runtime_cleanup_failed", "snapshot_cleanup_failed"}
+    direct = getattr(exc, "safe_error_code", None)
+    if direct in codes:
+        return direct
+    for note in getattr(exc, "__notes__", ()):
+        if note in codes:
+            return note
+    return None
 
 
 def validate_harness_name(name: str) -> str:
@@ -130,30 +152,122 @@ class HarnessProfile:
         )
         return env
 
-    def prepare_runtime(self, *, runtime_dir: str) -> None:
-        """runtime config dir 생성 + 인증 자격만 주입(전역 rules/skills/MCP는 안 함).
-        부모 프로세스(실제 HOME)에서 review/prescreen 호출 전 1회 호출한다."""
+    def prepare_runtime(self, *, runtime_dir: str, vendor: str) -> None:
+        """선택 vendor의 runtime/auth만 준비한다.
+
+        전역 rules/skills/MCP는 복사하지 않으며, 한 vendor 실행이 다른 vendor의
+        credential을 materialize하거나 keychain을 읽지 않도록 fail-closed한다.
+        """
+        if vendor not in VENDORS:
+            raise ValueError(f"invalid vendor: {vendor!r}")
         rt = Path(runtime_dir)
-        for sub in ("claude", "codex", "config"):
-            (rt / sub).mkdir(parents=True, exist_ok=True)
-        _link_codex_auth(rt / "codex", Path.home() / ".codex" / "auth.json")
-        _write_claude_credentials(rt / "claude", _read_claude_keychain())
+        (rt / "config").mkdir(parents=True, exist_ok=True)
+        vendor_dir = rt / vendor
+        vendor_dir.mkdir(parents=True, exist_ok=True)
+        if vendor == "codex":
+            _link_codex_auth(vendor_dir, Path.home() / ".codex" / "auth.json")
+        else:
+            _write_claude_credentials(vendor_dir, _read_claude_keychain())
+
+    def cleanup_runtime(self, *, runtime_dir: str, vendor: str) -> None:
+        if vendor not in VENDORS:
+            raise ValueError(f"invalid vendor: {vendor!r}")
+        credential = Path(runtime_dir) / vendor / (
+            ".credentials.json" if vendor == "claude" else "auth.json"
+        )
+        try:
+            credential.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeCredentialError("runtime_cleanup_failed") from exc
+        if credential.exists() or credential.is_symlink():
+            raise RuntimeCredentialError("runtime_cleanup_failed")
+
+    @contextmanager
+    def runtime_credentials(self, *, runtime_dir: str, vendor: str):
+        """Prepare one vendor credential and prove its removal on every exit path."""
+        if vendor not in VENDORS:
+            raise ValueError(f"invalid vendor: {vendor!r}")
+        try:
+            self.prepare_runtime(runtime_dir=runtime_dir, vendor=vendor)
+        except Exception:
+            try:
+                self.cleanup_runtime(runtime_dir=runtime_dir, vendor=vendor)
+            except RuntimeCredentialError:
+                raise
+            raise RuntimeCredentialError("runtime_setup_failed") from None
+        active_error = None
+        try:
+            yield
+        except BaseException as exc:
+            active_error = exc
+            raise
+        finally:
+            try:
+                self.cleanup_runtime(runtime_dir=runtime_dir, vendor=vendor)
+            except RuntimeCredentialError as cleanup_error:
+                if active_error is None:
+                    raise
+                active_error.add_note(cleanup_error.safe_error_code)
+                print(f"[runtime] {cleanup_error.safe_error_code}")
 
 
 def _read_claude_keychain() -> str:
-    """macOS 키체인에서 'Claude Code-credentials' 원본 JSON을 반환(부모 프로세스, 실제 HOME).
-    실패 시 secret 미노출로 명확히 raise."""
-    proc = subprocess.run(
+    """Read a bounded keychain payload without exposing provider stderr or secret bytes."""
+    limit = _KEYCHAIN_MAX_BYTES
+    proc = subprocess.Popen(
         ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        capture_output=True,
-        text=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=(os.name == "posix"),
     )
-    if proc.returncode != 0 or not proc.stdout.strip():
-        raise RuntimeError(
-            "claude keychain read failed — locked keychain or item "
-            "'Claude Code-credentials' not found"
-        )
-    return proc.stdout
+    kept = bytearray()
+    truncated = False
+
+    def drain():
+        nonlocal truncated
+        try:
+            while True:
+                chunk = proc.stdout.read(16 * 1024)
+                if not chunk:
+                    break
+                remaining = limit - len(kept)
+                if remaining > 0:
+                    kept.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated = True
+        except (OSError, ValueError):
+            truncated = True
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=_KEYCHAIN_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        else:
+            proc.kill()
+        proc.wait()
+        raise RuntimeError("claude keychain read failed") from None
+    finally:
+        reader.join(timeout=1)
+        if reader.is_alive():
+            truncated = True
+            if os.name == "posix":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+            proc.stdout.close()
+            reader.join(timeout=1)
+    value = bytes(kept).decode("utf-8", "replace")
+    if proc.returncode != 0 or truncated or not value.strip():
+        raise RuntimeError("claude keychain read failed")
+    return value
 
 
 def _write_claude_credentials(claude_dir: Path, keychain_json: str) -> None:

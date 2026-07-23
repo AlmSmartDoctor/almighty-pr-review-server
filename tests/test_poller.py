@@ -1,8 +1,16 @@
 import asyncio
 
-from server.poller import poll_loop, poll_once
+from server.poller import _safe_poll_interval, poll_loop, poll_once
 from server.repos import repo_repo, pr_repo
 from server.github.gh import PrInfo
+
+
+def test_safe_poll_interval_rejects_legacy_values_that_stall_or_flood_poller():
+    assert _safe_poll_interval(15) == 15
+    assert _safe_poll_interval(86_400) == 86_400
+    assert _safe_poll_interval(14) == 60
+    assert _safe_poll_interval(86_401) == 60
+    assert _safe_poll_interval(True) == 60
 
 
 def test_poll_once_upserts_new_prs(db):

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -192,6 +194,90 @@ def test_get_settings(tmp_path):
     assert s["concurrency_limit"] == 2
 
 
+def test_context_status_reports_readiness_without_secret_values(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path)
+    first = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    client.post("/api/repos", json={"full_name": "acme/web"})
+    client.patch(
+        "/api/settings",
+        json={"context_static_on": 1, "context_jira_on": 1, "context_db_schema_on": 1},
+    )
+    # target은 DB가 꺼진 레포에만 있고, 실제 DB-on 레포에는 없다. configured count가
+    # 전체 레포 target 수가 아니라 effective-on 교집합인지 검증한다.
+    client.patch(
+        f"/api/repos/{first['id']}",
+        json={
+            "context_static_on": 0,
+            "context_db_schema_on": 0,
+            "db_schema_path": "db/schema.sql",
+        },
+    )
+    monkeypatch.setattr("server.config.JIRA_BASE_URL", "https://private-jira.example")
+    monkeypatch.setattr("server.config.JIRA_EMAIL", "private@example.com")
+    monkeypatch.setattr("server.config.JIRA_API_TOKEN", "")
+    monkeypatch.setattr("server.config.MSSQL_GATEWAY_URL", "https://private-gateway.example")
+    monkeypatch.setattr("server.config.MSSQL_GATEWAY_TOKEN", "")
+
+    response = client.get("/api/settings/context-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_repos"] == 2
+    static = body["sources"]["context_static_on"]
+    assert static["enabled_repos"] == 1
+    assert static["configured_repos"] == 1  # 기본 지침 자동 탐색은 별도 path 불필요
+    assert static["explicit_path_repos"] == 0
+    db_schema = body["sources"]["context_db_schema_on"]
+    assert db_schema["enabled_repos"] == 1
+    assert db_schema["configured_repos"] == 0
+    jira = body["sources"]["context_jira_on"]
+    assert jira["available"] is False
+    assert jira["configured_repos"] == 0
+    assert jira["missing"] == ["ALMIGHTY_JIRA_API_TOKEN"]
+    live_db = body["sources"]["context_db_schema_on"]["capabilities"]["live_db"]
+    assert live_db["available"] is False
+    assert live_db["missing"] == ["ALMIGHTY_MSSQL_GATEWAY_TOKEN"]
+    serialized = response.text
+    assert "private-jira.example" not in serialized
+    assert "private@example.com" not in serialized
+    assert "private-gateway.example" not in serialized
+
+
+def test_context_status_configured_counts_follow_effective_repo_overrides(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path)
+    first = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+    client.post("/api/repos", json={"full_name": "acme/web"})
+    client.patch(
+        "/api/settings",
+        json={
+            "context_jira_on": 1,
+            "context_feedback_on": 1,
+            "context_current_pr_reviews_on": 1,
+        },
+    )
+    client.patch(
+        f"/api/repos/{first['id']}",
+        json={
+            "context_jira_on": 0,
+            "context_feedback_on": 0,
+            "context_current_pr_reviews_on": 0,
+        },
+    )
+    monkeypatch.setattr("server.config.JIRA_BASE_URL", "https://jira.example")
+    monkeypatch.setattr("server.config.JIRA_EMAIL", "bot@example.com")
+    monkeypatch.setattr("server.config.JIRA_API_TOKEN", "secret")
+
+    sources = client.get("/api/settings/context-status").json()["sources"]
+
+    for key in (
+        "context_jira_on",
+        "context_feedback_on",
+        "context_current_pr_reviews_on",
+    ):
+        assert sources[key]["enabled_repos"] == 1
+        assert sources[key]["configured_repos"] == 1
+
+
 def test_patch_settings_context_toggles(tmp_path):
     client, _ = _client(tmp_path)
     r = client.patch(
@@ -200,6 +286,36 @@ def test_patch_settings_context_toggles(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["context_static_on"] == 1 and body["context_jira_on"] == 1
+
+
+def test_patch_current_pr_reviews_context_globally_and_per_repo(tmp_path):
+    client, _ = _client(tmp_path)
+    repo = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+
+    settings = client.patch(
+        "/api/settings", json={"context_current_pr_reviews_on": 1}
+    )
+    override = client.patch(
+        f"/api/repos/{repo['id']}", json={"context_current_pr_reviews_on": 0}
+    )
+
+    assert settings.status_code == 200
+    assert settings.json()["context_current_pr_reviews_on"] == 1
+    assert override.status_code == 200
+    assert override.json()["context_current_pr_reviews_on"] == 0
+
+
+def test_patch_settings_rejects_non_claude_prescreen_model(tmp_path):
+    client, _ = _client(tmp_path)
+
+    for model in ("gpt-5.6-terra", "gemini-2.5-pro", "llama-3", "claude-haiku"):
+        invalid = client.patch("/api/settings", json={"prescreen_model": model})
+        assert invalid.status_code == 400
+        assert "Claude 모델" in invalid.json()["detail"]
+
+    valid = client.patch("/api/settings", json={"prescreen_model": "claude-future-1"})
+    assert valid.status_code == 200
+    assert valid.json()["prescreen_model"] == "claude-future-1"
 
 
 def test_patch_settings_rejects_invalid_threshold(tmp_path):
@@ -211,6 +327,58 @@ def test_patch_settings_rejects_invalid_threshold(tmp_path):
     ok = client.patch("/api/settings", json={"prescreen_gate_threshold": "complex"})
     assert ok.status_code == 200
     assert ok.json()["prescreen_gate_threshold"] == "complex"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"concurrency_limit": 0},
+        {"concurrency_limit": 9},
+        {"default_poll_interval": 14},
+        {"default_poll_interval": 86_401},
+        {"context_static_on": 2},
+        {"verify_singles_on": -1},
+        {"default_effort": "max"},
+        {"claude_effort": "minimal"},
+        {"codex_effort": "max"},
+    ],
+)
+def test_patch_settings_rejects_values_that_can_break_background_work(tmp_path, patch):
+    client, _ = _client(tmp_path)
+    before = client.get("/api/settings").json()
+
+    response = client.patch("/api/settings", json=patch)
+
+    assert response.status_code == 400
+    assert client.get("/api/settings").json() == before
+
+
+def test_patch_settings_accepts_safe_boundaries_and_vendor_efforts(tmp_path):
+    client, _ = _client(tmp_path)
+
+    response = client.patch(
+        "/api/settings",
+        json={
+            "concurrency_limit": 1,
+            "default_poll_interval": 15,
+            "context_static_on": 1,
+            "verify_singles_on": 0,
+            "default_effort": "xhigh",
+            "claude_effort": "max",
+            "codex_effort": "minimal",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["concurrency_limit"] == 1
+    assert body["default_poll_interval"] == 15
+    assert body["claude_effort"] == "max"
+    assert body["codex_effort"] == "minimal"
+
+    maximum = client.patch("/api/settings", json={"default_poll_interval": 86_400})
+    assert maximum.status_code == 200
+    assert maximum.json()["default_poll_interval"] == 86_400
 
 
 def test_add_repo_duplicate_returns_409(tmp_path):
@@ -237,6 +405,34 @@ def test_patch_repo_renames_and_validates_repository(tmp_path):
     assert client.patch(f"/api/repos/{first['id']}", json={"enabled": 2}).status_code == 400
 
 
+def test_patch_repo_rejects_invalid_vendor_efforts_without_mutating_repo(tmp_path):
+    client, _ = _client(tmp_path)
+    repo = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+
+    invalid_claude = client.patch(
+        f"/api/repos/{repo['id']}", json={"claude_effort": "minimal"}
+    )
+    invalid_codex = client.patch(
+        f"/api/repos/{repo['id']}", json={"codex_effort": "max"}
+    )
+
+    assert invalid_claude.status_code == 400
+    assert invalid_codex.status_code == 400
+    current = next(
+        item for item in client.get("/api/repos").json() if item["id"] == repo["id"]
+    )
+    assert current["claude_effort"] is None
+    assert current["codex_effort"] is None
+
+    valid = client.patch(
+        f"/api/repos/{repo['id']}",
+        json={"claude_effort": "max", "codex_effort": "minimal"},
+    )
+    assert valid.status_code == 200
+    assert valid.json()["claude_effort"] == "max"
+    assert valid.json()["codex_effort"] == "minimal"
+
+
 def test_delete_repo_removes_all_dependent_data(tmp_path):
     client, conn = _client(tmp_path)
     rid = client.post("/api/repos", json={"full_name": "acme/api"}).json()["id"]
@@ -260,6 +456,18 @@ def test_delete_repo_removes_all_dependent_data(tmp_path):
         "INSERT INTO finding (run_id, vendor_result_id, vendor, status) VALUES (?, ?, 'claude', 'approved')",
         (run_id, vendor_id),
     ).lastrowid
+    operation_id = conn.execute(
+        """INSERT INTO github_post_operation
+           (operation_key, run_id, vendor, marker, body, finding_ids,
+            new_finding_ids, status, created_at, updated_at)
+           VALUES ('op-key', ?, 'claude', 'marker', 'body', ?, ?,
+                   'completed', datetime('now'), datetime('now'))""",
+        (run_id, f"[{finding_id}]", f"[{finding_id}]"),
+    ).lastrowid
+    conn.execute(
+        "UPDATE finding SET posting_operation_id=? WHERE id=?",
+        (operation_id, finding_id),
+    )
     conn.execute(
         "INSERT INTO finding_decision (finding_id, to_status, decided_at) VALUES (?, 'approved', datetime('now'))",
         (finding_id,),
@@ -292,7 +500,7 @@ def test_delete_repo_removes_all_dependent_data(tmp_path):
     for table in (
         "pull_request", "pre_screen", "review_run", "vendor_result", "finding",
         "finding_decision", "posted_comment", "slack_post", "feedback_signal",
-        "review_job", "wiki_page",
+        "review_job", "wiki_page", "github_post_operation",
     ):
         assert conn.execute(f"SELECT COUNT(*) n FROM {table}").fetchone()["n"] == 0
 
@@ -343,6 +551,7 @@ def test_patch_repo_context_settings(tmp_path):
             "static_context_path": "/x/ctx.md",
             "jira_project_keys": "PROJ",
             "db_schema_path": "db/structure.sql",
+            "live_db_target_id": " tenant-7 ",
             "graphify_path": "docs/PROJECT.md",
         },
     )
@@ -353,7 +562,20 @@ def test_patch_repo_context_settings(tmp_path):
     assert body["static_context_path"] == "/x/ctx.md"
     assert body["jira_project_keys"] == "PROJ"
     assert body["db_schema_path"] == "db/structure.sql"
+    assert body["live_db_target_id"] == "tenant-7"
     assert body["graphify_path"] == "docs/PROJECT.md"
+
+
+def test_patch_repo_rejects_unsafe_live_db_target_id(tmp_path):
+    client, _ = _client(tmp_path)
+    created = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+
+    response = client.patch(
+        f"/api/repos/{created['id']}",
+        json={"live_db_target_id": "tenant/7?secret=x"},
+    )
+
+    assert response.status_code == 400
 
 
 def _seed_learn_decisions(conn, full_name, decisions):
@@ -452,6 +674,53 @@ def test_learn_includes_recent_decisions(tmp_path):
 def test_learn_empty_without_decisions(tmp_path):
     client, _ = _client(tmp_path)
     assert client.get("/api/learn").json() == []
+
+
+def test_review_rule_proposal_requires_approval_and_is_exposed_by_learn(tmp_path):
+    client, conn = _client(tmp_path)
+    _seed_learn_decisions(
+        conn,
+        "acme/api",
+        [
+            ("style", "dismissed", "nit A"),
+            ("style", "dismissed", "nit B"),
+            ("style", "dismissed", "nit C"),
+        ],
+    )
+    rid = conn.execute(
+        "SELECT id FROM repo WHERE full_name='acme/api'"
+    ).fetchone()["id"]
+
+    proposed = client.post(f"/api/repos/{rid}/review-rules/propose")
+    assert proposed.status_code == 200
+    rule = proposed.json()[0]
+    assert rule["status"] == "proposed"
+
+    learn_entry = client.get("/api/learn").json()[0]
+    assert learn_entry["repo_id"] == rid
+    assert learn_entry["review_rules"][0]["id"] == rule["id"]
+
+    activated = client.patch(
+        f"/api/review-rules/{rule['id']}", json={"status": "active"}
+    )
+    assert activated.status_code == 200
+    assert activated.json()["status"] == "active"
+
+    disabled = client.patch(
+        f"/api/review-rules/{rule['id']}", json={"status": "disabled"}
+    )
+    assert disabled.json()["status"] == "disabled"
+
+
+def test_review_rule_endpoints_validate_repo_rule_and_status(tmp_path):
+    client, _ = _client(tmp_path)
+    assert client.post("/api/repos/999/review-rules/propose").status_code == 404
+    assert client.patch(
+        "/api/review-rules/999", json={"status": "active"}
+    ).status_code == 404
+    assert client.patch(
+        "/api/review-rules/999", json={"status": "proposed"}
+    ).status_code == 400
 
 
 def test_patch_verify_singles_toggle(tmp_path):
@@ -572,6 +841,75 @@ def test_update_finding_status(tmp_path):
     assert finding_repo.get(conn, fid)["status"] == "approved"
 
 
+def test_update_finding_rejects_invalid_contracts_without_mutation(tmp_path):
+    client, conn = _client(tmp_path)
+    from server.repos import finding_repo, pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=3,
+        title="t",
+        author="a",
+        head_sha="s",
+        base_ref="main",
+        url="u",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
+    )
+    fid = finding_repo.add(
+        conn,
+        run_id=run_id,
+        vendor="claude",
+        file="a",
+        line=1,
+        severity="high",
+        category="bug",
+        claim="c",
+        rationale="r",
+        confidence=0.8,
+    )
+
+    invalid_requests = [
+        {"status": "garbage"},
+        {"status": "edited"},
+        {"status": "edited", "edited_text": "   "},
+        {"status": "approved", "edited_text": "unexpected rewrite"},
+    ]
+    for payload in invalid_requests:
+        response = client.patch(f"/api/findings/{fid}", json=payload)
+        assert response.status_code == 400
+        assert finding_repo.get(conn, fid)["status"] == "pending"
+
+    assert client.patch(
+        "/api/findings/999999", json={"status": "approved"}
+    ).status_code == 404
+
+    edited = client.patch(
+        f"/api/findings/{fid}",
+        json={"status": "edited", "edited_text": "  fixed wording  "},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["edited_text"] == "fixed wording"
+
+    conn.execute("UPDATE pull_request SET head_sha='new' WHERE id=?", (pid,))
+    conn.commit()
+    before_new_run = client.patch(
+        f"/api/findings/{fid}", json={"status": "approved"}
+    )
+    assert before_new_run.status_code == 409
+    assert finding_repo.get(conn, fid)["status"] == "edited"
+
+    review_repo.create_run(
+        conn, pr_id=pid, head_sha="new", trigger="manual", effort="medium"
+    )
+    stale = client.patch(f"/api/findings/{fid}", json={"status": "approved"})
+    assert stale.status_code == 409
+    assert finding_repo.get(conn, fid)["status"] == "edited"
+
+
 def test_run_context_returns_text_and_meta(tmp_path):
     client, conn = _client(tmp_path)
     from server.repos import repo_repo, pr_repo, review_repo
@@ -595,6 +933,24 @@ def test_run_context_returns_text_and_meta(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["text"] == "ctx" and body["meta"] == {"sources": []}
+
+
+def test_pr_runs_404_for_missing_pr(tmp_path):
+    client, _ = _client(tmp_path)
+    assert client.get("/api/prs/99999/runs").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/runs/99999/findings",
+        "/api/runs/99999/vendor-results",
+        "/api/runs/99999/post-preview",
+    ],
+)
+def test_run_subresources_404_for_missing_run(tmp_path, path):
+    client, _ = _client(tmp_path)
+    assert client.get(path).status_code == 404
 
 
 def test_run_context_404_for_missing_run(tmp_path):
@@ -782,6 +1138,51 @@ def test_retry_vendors_enqueues_retry_job(tmp_path):
     assert job["retry_run_id"] == run_id  # 검증된 바로 그 run이 대상으로 전파됨
 
 
+def test_retry_vendors_rejects_past_run_even_when_head_is_unchanged(tmp_path):
+    from server.repos import review_repo
+
+    client, conn = _client(tmp_path)
+    pid, old_run = _seed_partial_fail_run(conn, number=78)
+    newer = review_repo.create_run(
+        conn, pr_id=pid, head_sha="S", trigger="manual", effort="medium"
+    )
+    review_repo.finish_run(conn, newer, "done")
+
+    response = client.post(f"/api/runs/{old_run}/retry-vendors")
+
+    assert response.status_code == 409
+    assert "과거 리뷰 run" in response.json()["detail"]
+    assert conn.execute("SELECT COUNT(*) FROM review_job").fetchone()[0] == 0
+
+
+def test_retry_vendors_rejects_different_run_when_same_head_job_is_active(tmp_path):
+    from server.repos import review_repo
+
+    client, conn = _client(tmp_path)
+    pid, first_run = _seed_partial_fail_run(conn, number=76)
+    first = client.post(f"/api/runs/{first_run}/retry-vendors")
+    assert first.status_code == 202
+
+    second_run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="S", trigger="manual", effort="medium"
+    )
+    review_repo.add_vendor_result(
+        conn, run_id=second_run, vendor="claude", status="done"
+    )
+    review_repo.add_vendor_result(
+        conn, run_id=second_run, vendor="codex", status="failed", error="boom"
+    )
+    review_repo.finish_run(conn, second_run, "done")
+
+    second = client.post(f"/api/runs/{second_run}/retry-vendors")
+
+    assert second.status_code == 409
+    job = conn.execute(
+        "SELECT retry_run_id FROM review_job WHERE id=?", (first.json()["job_id"],)
+    ).fetchone()
+    assert job["retry_run_id"] == first_run
+
+
 def test_retry_vendors_409_when_failed_vendor_disabled(tmp_path):
     client, conn = _client(tmp_path)
     pid, run_id = _seed_partial_fail_run(conn, number=73)
@@ -793,6 +1194,24 @@ def test_retry_vendors_409_when_failed_vendor_disabled(tmp_path):
     conn.commit()
     r = client.post(f"/api/runs/{run_id}/retry-vendors")
     assert r.status_code == 409 and "실패 벤더" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("blocked", ["closed", "disabled"])
+def test_retry_vendors_rejects_unreviewable_repo_without_job(tmp_path, blocked):
+    from server.repos import pr_repo, repo_repo
+
+    client, conn = _client(tmp_path)
+    pid, run_id = _seed_partial_fail_run(conn, number=74)
+    repo_id = pr_repo.get(conn, pid)["repo_id"]
+    if blocked == "closed":
+        pr_repo.mark_closed(conn, repo_id, {74})
+    else:
+        repo_repo.update(conn, repo_id, enabled=0)
+
+    response = client.post(f"/api/runs/{run_id}/retry-vendors")
+
+    assert response.status_code == 409
+    assert conn.execute("SELECT COUNT(*) FROM review_job").fetchone()[0] == 0
 
 
 def test_retry_vendors_404_when_run_missing(tmp_path):
@@ -859,6 +1278,33 @@ def test_retry_vendors_409_when_run_not_done(tmp_path):
     assert r.status_code == 409
 
 
+def test_polled_enqueue_reports_all_system_cancel_revivals(tmp_path):
+    from server.api import _enqueue_polled_pr
+    from server.repos import job_repo, pr_repo, repo_repo
+
+    _, conn = _client(tmp_path)
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=75,
+        title="t",
+        author="a",
+        head_sha="S",
+        base_ref="main",
+        url="u",
+    )
+    jid = job_repo.enqueue(conn, pr_id=pid, head_sha="S", trigger="auto")
+    job_repo.mark_canceled(
+        conn, jid, error=job_repo.DISABLED_REPO_CANCEL_ERROR
+    )
+
+    assert _enqueue_polled_pr(conn, pid) is True
+    assert conn.execute(
+        "SELECT status FROM review_job WHERE id=?", (jid,)
+    ).fetchone()["status"] == "queued"
+
+
 def test_patch_skip_draft_toggle(tmp_path):
     client, _ = _client(tmp_path)
     assert client.get("/api/settings").json()["skip_draft_on"] == 1  # 기본 skip
@@ -876,7 +1322,38 @@ def test_patch_skip_draft_toggle(tmp_path):
     )
 
 
-def test_vendor_result_raw_endpoint(tmp_path):
+def test_repo_review_policy_modes_validate_and_allow_inherit(tmp_path):
+    client, _ = _client(tmp_path)
+    repo = client.post("/api/repos", json={"full_name": "acme/api"}).json()
+
+    updated = client.patch(
+        f"/api/repos/{repo['id']}",
+        json={"review_scope_guard_mode": "enforce", "review_dedupe_mode": "observe"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["review_scope_guard_mode"] == "enforce"
+    assert updated.json()["review_dedupe_mode"] == "observe"
+    assert updated.json()["requested_review_scope_mode"] == "enforce"
+    assert updated.json()["effective_review_scope_mode"] == "observe"
+    assert updated.json()["effective_review_scope_reason"] == "benchmark_gate_locked"
+    assert updated.json()["review_scope_selection_source"] == "repo_override"
+    assert updated.json()["policy_decision"]["scope"] == {
+        "requested_mode": "enforce",
+        "effective_mode": "observe",
+        "reason": "benchmark_gate_locked",
+        "selection_source": "repo_override",
+    }
+    assert client.patch(
+        f"/api/repos/{repo['id']}", json={"review_scope_guard_mode": "invalid"}
+    ).status_code == 400
+    inherited = client.patch(
+        f"/api/repos/{repo['id']}", json={"review_scope_guard_mode": ""}
+    )
+    assert inherited.status_code == 200
+    assert inherited.json()["review_scope_guard_mode"] is None
+
+
+def test_vendor_result_raw_endpoint_is_disabled(tmp_path):
     client, conn = _client(tmp_path)
     raw_file = tmp_path / "vr7.txt"
     raw_file.write_text("벤더 원문 출력입니다", encoding="utf-8")
@@ -892,15 +1369,67 @@ def test_vendor_result_raw_endpoint(tmp_path):
         "INSERT INTO vendor_result (run_id, vendor, raw_path) VALUES (?, 'claude', ?)",
         (run_id, str(raw_file)),
     ).lastrowid
-    vr_without = conn.execute(
-        "INSERT INTO vendor_result (run_id, vendor) VALUES (?, 'codex')", (run_id,)
-    ).lastrowid
     conn.commit()
 
-    ok = client.get(f"/api/vendor-results/{vr_with}/raw")
-    assert ok.status_code == 200 and "벤더 원문 출력입니다" in ok.text
-    assert client.get(f"/api/vendor-results/{vr_without}/raw").status_code == 404
+    response = client.get(f"/api/vendor-results/{vr_with}/raw")
+    assert response.status_code == 404
+    assert "원문" not in response.text or "비활성" in response.text
     assert client.get("/api/vendor-results/99999/raw").status_code == 404
+
+
+def test_vendor_results_expose_sanitized_execution_meta_without_raw_path(tmp_path):
+    from server.review.vendor_telemetry import build_execution_envelope
+    from server.repos import review_repo
+
+    client, conn = _client(tmp_path)
+    rid = conn.execute("INSERT INTO repo (full_name) VALUES ('acme/api')").lastrowid
+    pid = conn.execute(
+        "INSERT INTO pull_request (repo_id, number, head_sha) VALUES (?, 8, 's1')",
+        (rid,),
+    ).lastrowid
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s1", trigger="manual", effort="high"
+    )
+    vr_id = review_repo.add_vendor_result(
+        conn, run_id=run_id, vendor="codex", status="running", raw_path="/private/raw"
+    )
+    chunk = {
+        "index": 0, "status": "done", "safe_error_code": None,
+        "duration_ms": 12, "input_tokens": 10, "cached_input_tokens": 3,
+        "output_tokens": 4, "reasoning_output_tokens": 1, "total_tokens": 14,
+        "tool_calls": 2, "event_count": 5, "stream_truncated": False,
+        "telemetry_status": "ok", "cli_name": "codex",
+        "cli_version": "codex-cli 0.144.5",
+        "event_schema": "codex-jsonl-v0.144.5",
+        "chunk_hash": "a" * 64, "context_hash": "b" * 64,
+        "chunker_version": "char-v1", "prompt_nonce": "1234abcd",
+        "scope_reassigned": 0,
+        "scope_rejected": 0, "duplicate_groups": 0,
+    }
+    review_repo.finish_vendor_result(
+        conn, vr_id, status="done", execution_meta=build_execution_envelope(
+            identity={
+                "protocol_version": "legacy-v0", "vendor": "codex",
+                "model": "gpt", "effort": "high", "prompt_hash": "1" * 64,
+                "harness_config_hash": "2" * 64, "adapter_name": "adapter",
+                "adapter_version": "v1", "adapter_config_hash": "3" * 64,
+                "cli_version": "codex-cli 0.144.5",
+                "event_schema_version": "codex-jsonl-v0.144.5",
+                "diff_hash": "4" * 64, "context_hash": "5" * 64,
+                "chunker_version": "char-v1", "scope_policy_mode": "observe",
+                "dedupe_policy_mode": "observe",
+                "policy_decision_hash": "6" * 64,
+                "policy_config_hash": "7" * 64,
+            },
+            attempt=1, phase="review", chunks=[chunk],
+        )
+    )
+
+    result = client.get(f"/api/runs/{run_id}/vendor-results").json()[0]
+
+    assert "raw_path" not in result
+    assert result["execution_meta"]["attempts"][0]["chunks"][0]["total_tokens"] == 14
+    assert "/private" not in json.dumps(result)
 
 
 def test_cancel_queued_review(tmp_path):
@@ -934,6 +1463,7 @@ def test_cancel_queued_review(tmp_path):
 
 def test_pr_run_history(tmp_path):
     from server.repos import pr_repo, repo_repo, review_repo
+    from server.review.finding_policy import resolve_policy_snapshot
 
     client, conn = _client(tmp_path)
     rid = repo_repo.add(conn, full_name="acme/api")
@@ -955,7 +1485,8 @@ def test_pr_run_history(tmp_path):
         "INSERT INTO finding (run_id, vendor, claim) VALUES (?, 'claude', 'c')", (r1,)
     )
     r2 = review_repo.create_run(
-        conn, pr_id=pid, head_sha="s2", trigger="manual", effort="medium"
+        conn, pr_id=pid, head_sha="s2", trigger="manual", effort="medium",
+        policy_snapshot=resolve_policy_snapshot(repo_repo.get(conn, rid)),
     )
     review_repo.finish_run(conn, r2, "failed", error="boom")
     conn.commit()
@@ -964,8 +1495,11 @@ def test_pr_run_history(tmp_path):
     assert [r["id"] for r in rows] == [r2, r1]  # 최신 먼저
     by_id = {r["id"]: r for r in rows}
     assert by_id[r1]["finding_count"] == 1 and by_id[r1]["status"] == "done"
+    assert by_id[r1]["policy_snapshot"]["snapshot_status"] == "unknown"
     assert by_id[r2]["finding_count"] == 0 and by_id[r2]["head_sha"] == "s2"
-    assert client.get("/api/prs/999/runs").json() == []
+    assert by_id[r2]["policy_snapshot"]["snapshot_status"] == "known"
+    assert by_id[r2]["policy_snapshot"]["scope"]["effective_mode"] == "observe"
+    assert client.get("/api/prs/999/runs").status_code == 404
 
 
 def test_cancel_review_cancels_all_queued_jobs(tmp_path):

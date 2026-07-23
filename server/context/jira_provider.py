@@ -1,6 +1,6 @@
 import time
 
-from server.context.base import ContextRequest, ContextResult
+from server.context.base import ContextBlock, ContextRequest, ContextResult
 from server.context.jira_keys import extract_keys
 
 _MAX_ISSUES = (
@@ -25,6 +25,7 @@ class JiraContextProvider:
         if not keys:
             return ContextResult(provider=self.name, status="empty", text="")
         blocks = []
+        semantic_blocks = []
         deadline = time.monotonic() + _TOTAL_BUDGET_SEC
         for key in keys[:_MAX_ISSUES]:
             if time.monotonic() > deadline:  # 예산 초과 → 남은 키 스킵(부분 결과)
@@ -37,6 +38,46 @@ class JiraContextProvider:
                 if acceptance:
                     block += f"\n\n**Acceptance criteria**\n\n{acceptance}"
                 blocks.append(block.rstrip())
+                summary = str(issue.get("summary") or "")
+                if summary:
+                    semantic_blocks.append(
+                        ContextBlock(
+                            source=self.name,
+                            block_id=f"{issue['key']}:summary",
+                            text=f"**{issue['key']}** {summary}",
+                            priority=10,
+                            recoverable_from_repo=False,
+                            trust_class="untrusted_external",
+                            sensitivity="internal",
+                            retention="short",
+                        )
+                    )
+                if acceptance:
+                    semantic_blocks.append(
+                        ContextBlock(
+                            source=self.name,
+                            block_id=f"{issue['key']}:acceptance",
+                            text=str(acceptance),
+                            priority=10,
+                            recoverable_from_repo=False,
+                            trust_class="untrusted_external",
+                            sensitivity="internal",
+                            retention="short",
+                        )
+                    )
+                if body:
+                    semantic_blocks.append(
+                        ContextBlock(
+                            source=self.name,
+                            block_id=f"{issue['key']}:description",
+                            text=str(body),
+                            priority=20,
+                            recoverable_from_repo=False,
+                            trust_class="untrusted_external",
+                            sensitivity="sensitive",
+                            retention="short",
+                        )
+                    )
             except Exception:  # per-key degrade; error 세부는 노출 안 함(B-INV-4)
                 continue
         if not blocks:
@@ -48,5 +89,8 @@ class JiraContextProvider:
                 error=f"jira fetch failed for {len(keys)} key(s)",
             )
         return ContextResult(
-            provider=self.name, status="ok", text="\n\n---\n\n".join(blocks)
+            provider=self.name,
+            status="ok",
+            text="\n\n---\n\n".join(blocks),
+            blocks=tuple(semantic_blocks),
         )

@@ -23,11 +23,206 @@ def test_enqueue_is_idempotent_per_sha(db):
     assert j1 == j2  # UNIQUE(pr_id, head_sha) → 같은 잡
 
 
+def test_cancel_stale_job_atomically_enqueues_current_head(db):
+    pid = _seed(db, sha="old")
+    old_id = job_repo.enqueue(db, pr_id=pid, head_sha="old", trigger="manual")
+    assert job_repo.claim_next(db, worker_id="w1")["id"] == old_id
+    db.execute("UPDATE pull_request SET head_sha='new' WHERE id=?", (pid,))
+    db.commit()
+
+    new_id = job_repo.cancel_stale_and_enqueue_latest(db, old_id)
+
+    old = db.execute("SELECT * FROM review_job WHERE id=?", (old_id,)).fetchone()
+    new = db.execute("SELECT * FROM review_job WHERE id=?", (new_id,)).fetchone()
+    assert old["status"] == "canceled" and old["error"] == job_repo.STALE_HEAD_CANCEL_ERROR
+    assert new["head_sha"] == "new" and new["status"] == "queued"
+    assert new["trigger"] == "manual" and new["retry_run_id"] is None
+
+
+def test_cancel_stale_retry_requeues_latest_as_manual(db):
+    from server.repos import review_repo
+
+    pid = _seed(db, sha="old")
+    run_id = review_repo.create_run(
+        db, pr_id=pid, head_sha="old", trigger="manual", effort="medium"
+    )
+    review_repo.finish_run(db, run_id, "done")
+    old_id = job_repo.enqueue_retry(
+        db, pr_id=pid, head_sha="old", run_id=run_id
+    )
+    assert job_repo.claim_next(db, worker_id="w1")["id"] == old_id
+    db.execute("UPDATE pull_request SET head_sha='new' WHERE id=?", (pid,))
+    db.commit()
+
+    new_id = job_repo.cancel_stale_and_enqueue_latest(db, old_id)
+    new = db.execute("SELECT * FROM review_job WHERE id=?", (new_id,)).fetchone()
+    assert new["trigger"] == "manual" and new["retry_run_id"] is None
+
+
+def test_system_cancel_revive_does_not_overwrite_concurrent_worker_claim(tmp_path):
+    from server.db import connect, init_schema
+
+    path = tmp_path / "revive-race.db"
+    primary = connect(path)
+    init_schema(primary)
+    pid = _seed(primary)
+    jid = job_repo.enqueue(primary, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.mark_canceled(
+        primary, jid, error=job_repo.DISABLED_REPO_CANCEL_ERROR
+    )
+    other = connect(path)
+
+    class RacingConnection:
+        def __init__(self, conn):
+            self._conn = conn
+            self.triggered = False
+
+        def execute(self, sql, params=()):
+            if not self.triggered and "UPDATE review_job SET status='queued'" in sql:
+                self.triggered = True
+                other.execute(
+                    "UPDATE review_job SET status='queued' WHERE id=?", (jid,)
+                )
+                other.commit()
+                claimed = job_repo.claim_next(other, worker_id="winner")
+                assert claimed is not None
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    result = job_repo.enqueue_with_result(
+        RacingConnection(primary), pr_id=pid, head_sha="s1", trigger="auto"
+    )
+    assert result == (jid, False)  # 다른 요청이 revive/claim했으므로 이 호출은 미집계
+    row = primary.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert row["status"] == "running"
+    assert row["locked_by"] == "winner"
+    assert row["attempts"] == 1
+    other.close()
+    primary.close()
+
+
+def test_manual_revive_conflicts_without_overwriting_concurrent_worker_claim(tmp_path):
+    import pytest
+
+    from server.db import connect, init_schema
+
+    path = tmp_path / "manual-race.db"
+    primary = connect(path)
+    init_schema(primary)
+    pid = _seed(primary)
+    jid = job_repo.enqueue(primary, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.claim_next(primary, worker_id="initial")
+    job_repo.mark_done(primary, jid, run_id=None)
+    other = connect(path)
+
+    class RacingConnection:
+        def __init__(self, conn):
+            self._conn = conn
+            self.triggered = False
+
+        def execute(self, sql, params=()):
+            if not self.triggered and "UPDATE review_job SET status='queued'" in sql:
+                self.triggered = True
+                other.execute(
+                    "UPDATE review_job SET status='queued' WHERE id=?", (jid,)
+                )
+                other.commit()
+                assert job_repo.claim_next(other, worker_id="winner") is not None
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    with pytest.raises(ValueError, match="다른 리뷰 작업"):
+        job_repo.enqueue_manual(
+            RacingConnection(primary), pr_id=pid, head_sha="s1"
+        )
+    row = primary.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
+    assert row["status"] == "running"
+    assert row["locked_by"] == "winner"
+    assert row["attempts"] == 2
+    other.close()
+    primary.close()
+
+
+def test_enqueue_manual_upgrades_queued_auto_but_rejects_running_auto(db):
+    import pytest
+
+    pid = _seed(db)
+    running_id = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
+    job_repo.claim_next(db, worker_id="winner")
+    with pytest.raises(ValueError, match="다른 리뷰 작업"):
+        job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
+    running = db.execute(
+        "SELECT status, trigger FROM review_job WHERE id=?", (running_id,)
+    ).fetchone()
+    assert running["status"] == "running"
+    assert running["trigger"] == "auto"
+
+    queued_id = job_repo.enqueue(db, pr_id=pid, head_sha="s2", trigger="auto")
+    assert job_repo.enqueue_manual(db, pr_id=pid, head_sha="s2") == queued_id
+    queued = db.execute(
+        "SELECT status, trigger FROM review_job WHERE id=?", (queued_id,)
+    ).fetchone()
+    assert queued["status"] == "queued"
+    assert queued["trigger"] == "manual"
+
+
 def test_enqueue_manual_inserts_when_absent(db):
     pid = _seed(db)
     jid = job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
     row = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
     assert row["status"] == "queued" and row["trigger"] == "manual"
+
+
+def test_concurrent_first_retry_insert_returns_conflict_instead_of_integrity_error(tmp_path):
+    import pytest
+
+    from server.db import connect, init_schema
+    from server.repos import review_repo
+
+    path = tmp_path / "retry-insert-race.db"
+    primary = connect(path)
+    init_schema(primary)
+    pid = _seed(primary)
+    run1 = review_repo.create_run(
+        primary, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    run2 = review_repo.create_run(
+        primary, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    other = connect(path)
+
+    class RacingConnection:
+        def __init__(self, conn):
+            self._conn = conn
+            self.triggered = False
+
+        def execute(self, sql, params=()):
+            if not self.triggered and "INSERT INTO review_job" in sql:
+                self.triggered = True
+                other.execute(
+                    """INSERT INTO review_job
+                       (pr_id, head_sha, trigger, retry_run_id, created_at)
+                       VALUES (?, ?, 'retry', ?, datetime('now'))""",
+                    (pid, "s1", run2),
+                )
+                other.commit()
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    with pytest.raises(ValueError, match="다른 리뷰 작업"):
+        job_repo.enqueue_retry(
+            RacingConnection(primary), pr_id=pid, head_sha="s1", run_id=run1
+        )
+    row = primary.execute("SELECT retry_run_id FROM review_job").fetchone()
+    assert row["retry_run_id"] == run2
+    other.close()
+    primary.close()
 
 
 def test_enqueue_manual_reopens_terminal_job(db):
@@ -42,14 +237,17 @@ def test_enqueue_manual_reopens_terminal_job(db):
     assert row["attempts"] == 0  # attempts 리셋
 
 
-def test_enqueue_manual_leaves_running_job(db):
+def test_enqueue_manual_rejects_running_auto_job(db):
+    import pytest
+
     pid = _seed(db)
     jid = job_repo.enqueue(db, pr_id=pid, head_sha="s1", trigger="auto")
     job_repo.claim_next(db, worker_id="w1")  # running
-    again = job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
-    assert again == jid
+    with pytest.raises(ValueError, match="다른 리뷰 작업"):
+        job_repo.enqueue_manual(db, pr_id=pid, head_sha="s1")
     row = db.execute("SELECT * FROM review_job WHERE id=?", (jid,)).fetchone()
     assert row["status"] == "running"  # 진행 중 잡은 안 건드림
+    assert row["trigger"] == "auto"
 
 
 def test_claim_next_locks_one_job(db):

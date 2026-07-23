@@ -1,8 +1,10 @@
 import json
 import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
+from server.review.harness import RuntimeCredentialError, cleanup_failure_code
 from server.review.json_block import last_json_block
 
 VERIFY_SCHEMA_HINT = (
@@ -20,7 +22,10 @@ class Verdict:
     refuted: bool
     rationale: str = ""
     contested: bool = False  # 반박당했으나 저자가 방어 → 견해 대립(반감하지 않음)
-    degraded: bool = False  # 검증이 실제로 실행되지 못함 → 라벨 부착 금지(오노출 방지)
+    degraded: bool = False
+    independent: bool = False
+    evidence_status: str = "unverified"
+    execution_attempts: tuple = ()
 
 
 @dataclass
@@ -85,32 +90,120 @@ async def _debate(finding, *, refuter, author, diff, harness, workdir, runtime_d
     검증/디베이트 실패는 리뷰 결과를 삭제하지 않도록 보수적으로 degrade한다(B-INV-4/8)."""
 
     async def ask(ad, prompt):
-        return await ad.verify(
-            prompt=prompt, workdir=workdir, harness=harness, runtime_dir=runtime_dir
-        )
+        vendor_runtime = str(Path(runtime_dir) / ad.vendor)
+        if harness is not None and hasattr(harness, "runtime_credentials"):
+            with harness.runtime_credentials(
+                runtime_dir=vendor_runtime, vendor=ad.vendor
+            ):
+                result = await ad.verify(
+                    prompt=prompt,
+                    workdir=workdir,
+                    harness=harness,
+                    runtime_dir=vendor_runtime,
+                )
+        else:
+            result = await ad.verify(
+                prompt=prompt,
+                workdir=workdir,
+                harness=harness,
+                runtime_dir=vendor_runtime,
+            )
+        if hasattr(result, "verdict") and hasattr(result, "execution"):
+            return result.verdict, ((ad.vendor, result.execution),)
+        return result, ()
 
+    def failed_attempt(ad, exc):
+        execution = getattr(exc, "execution", None)
+        return ((ad.vendor, execution),) if execution is not None else ()
+
+    independent = bool(
+        refuter is not None
+        and author is not None
+        and refuter is not author
+        and getattr(refuter, "vendor", None) != getattr(author, "vendor", None)
+    )
     if refuter is None:
         return Verdict(
-            refuted=False, degraded=True
-        )  # 검증 미실행 — confirmed 오라벨 방지
+            refuted=False, degraded=True, evidence_status="degraded"
+        )
     try:
-        r1 = await ask(refuter, build_verify_prompt(finding, diff))
-    except Exception:
-        return Verdict(refuted=False, degraded=True)  # degrade: 라벨 없이 원본 유지
+        r1, attempts = await ask(refuter, build_verify_prompt(finding, diff))
+    except RuntimeCredentialError as exc:
+        if exc.safe_error_code == "runtime_cleanup_failed":
+            raise
+        return Verdict(
+            refuted=False,
+            degraded=True,
+            evidence_status="degraded",
+        )
+    except Exception as exc:
+        cleanup_code = cleanup_failure_code(exc)
+        if cleanup_code is not None:
+            raise RuntimeCredentialError(cleanup_code) from exc
+        return Verdict(
+            refuted=False,
+            degraded=True,
+            evidence_status="degraded",
+            execution_attempts=failed_attempt(refuter, exc),
+        )
     if not r1.refuted:
-        return Verdict(refuted=False, rationale=r1.rationale)  # 반대 의견 없음
+        return Verdict(
+            refuted=False,
+            rationale=r1.rationale,
+            independent=independent,
+            evidence_status=(
+                "independent_model_support" if independent else "supported_self"
+            ),
+            execution_attempts=attempts,
+        )
     if author is None or author is refuter:
-        return Verdict(refuted=True, rationale=r1.rationale)  # 변호할 저자 없음
+        return Verdict(
+            refuted=True,
+            rationale=r1.rationale,
+            independent=independent,
+            evidence_status="refuted",
+            execution_attempts=attempts,
+        )
     try:
-        r2 = await ask(author, build_rebuttal_prompt(finding, diff, r1.rationale))
-    except Exception:
-        return Verdict(refuted=True, rationale=r1.rationale)  # 변호 실패 → 반박 유지
-    if r2.refuted:  # 저자도 오탐 인정 → 반박 확정
-        return Verdict(refuted=True, rationale=r1.rationale)
-    return Verdict(  # 저자가 방어 → 견해 대립(반감하지 않음), 양측 근거 보존
+        r2, rebuttal_attempts = await ask(
+            author, build_rebuttal_prompt(finding, diff, r1.rationale)
+        )
+    except RuntimeCredentialError as exc:
+        if exc.safe_error_code == "runtime_cleanup_failed":
+            raise
+        return Verdict(
+            refuted=True,
+            rationale=r1.rationale,
+            independent=independent,
+            evidence_status="refuted",
+            execution_attempts=attempts,
+        )
+    except Exception as exc:
+        cleanup_code = cleanup_failure_code(exc)
+        if cleanup_code is not None:
+            raise RuntimeCredentialError(cleanup_code) from exc
+        return Verdict(
+            refuted=True,
+            rationale=r1.rationale,
+            independent=independent,
+            evidence_status="refuted",
+            execution_attempts=attempts + failed_attempt(author, exc),
+        )
+    if r2.refuted:
+        return Verdict(
+            refuted=True,
+            rationale=r1.rationale,
+            independent=independent,
+            evidence_status="refuted",
+            execution_attempts=attempts + rebuttal_attempts,
+        )
+    return Verdict(
         refuted=False,
         contested=True,
         rationale=f"반박: {r1.rationale} / 저자 변호: {r2.rationale}",
+        independent=independent,
+        evidence_status="contested",
+        execution_attempts=attempts + rebuttal_attempts,
     )
 
 
@@ -122,7 +215,7 @@ def _pick_verifier(by_vendor: dict, author_vendor: str):
     return by_vendor.get(author_vendor)
 
 
-def make_verifier(adapters, worktree, clone=None):
+def make_verifier(adapters, worktree, clone=None, *, snapshot=None):
     """gh_deps 배선용 실 검증기. 리뷰 블록과 독립된 자체 worktree/runtime을 열어
     고위험 SINGLE finding을 다른 벤더로 반박 검증한다. 실패는 degraded verdict로
     (검증이 리뷰 결과를 삭제하지도, confirmed로 오라벨하지도 않는다).
@@ -140,20 +233,21 @@ def make_verifier(adapters, worktree, clone=None):
             sha=ctx.head_sha,
             pr_number=ctx.pr_number,
         ) as wt:
-            with tempfile.TemporaryDirectory(prefix="almighty-vf-") as rt:
-                ctx.harness.prepare_runtime(runtime_dir=rt)
-                for m in targets:
-                    verdicts.append(
-                        await _debate(
-                            m,
-                            refuter=_pick_verifier(by_vendor, m.vendor),
-                            author=by_vendor.get(m.vendor),
-                            diff=ctx.diff,
-                            harness=ctx.harness,
-                            workdir=Path(str(wt)),
-                            runtime_dir=rt,
+            snapshot_cm = snapshot(wt) if snapshot else nullcontext(wt)
+            with snapshot_cm as review_wt:
+                with tempfile.TemporaryDirectory(prefix="almighty-vf-") as rt:
+                    for m in targets:
+                        verdicts.append(
+                            await _debate(
+                                m,
+                                refuter=_pick_verifier(by_vendor, m.vendor),
+                                author=by_vendor.get(m.vendor),
+                                diff=ctx.diff,
+                                harness=ctx.harness,
+                                workdir=Path(str(review_wt)),
+                                runtime_dir=rt,
+                            )
                         )
-                    )
         return verdicts
 
     return verify

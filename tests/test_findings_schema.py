@@ -1,6 +1,6 @@
 import pytest
 
-from server.review.findings_schema import parse_findings, SchemaError
+from server.review.findings_schema import PROMPT_SCHEMA_HINT, SchemaError, parse_findings
 
 
 VALID = """
@@ -77,6 +77,11 @@ def test_parse_multiple_findings_not_truncated():
     fs = parse_findings(raw, vendor="claude")
     assert len(fs) == 2
     assert [f.file for f in fs] == ["a.py", "b.py"]
+
+
+def test_prompt_schema_requires_an_exact_added_line_location():
+    assert "허용되는 실제 추가 라인 목록과 정확히 일치" in PROMPT_SCHEMA_HINT
+    assert "목록 밖 위치" in PROMPT_SCHEMA_HINT
 
 
 def test_parse_empty_findings_returns_empty():

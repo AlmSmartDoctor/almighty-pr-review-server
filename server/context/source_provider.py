@@ -1,4 +1,12 @@
-from server.context.base import ContextRequest, ContextResult
+from server.context.base import ContextBlock, ContextRequest, ContextResult
+
+
+_BLOCK_POLICY = {
+    "review_rules": (10, False, "authorized_human", "internal", "review_history"),
+    "team_feedback": (20, False, "internal", "internal", "review_history"),
+    "db_schema": (30, False, "internal", "sensitive", "manifest_only"),
+    "graphify": (60, True, "trusted_repo", "internal", "manifest_only"),
+}
 
 
 class SourceBackedProvider:
@@ -18,4 +26,25 @@ class SourceBackedProvider:
         except Exception:  # 소스 미도달/오류 → best-effort degrade
             return ContextResult(provider=self.name, status="empty", text="")
         status = "ok" if text.strip() else "empty"
-        return ContextResult(provider=self.name, status=status, text=text)
+        priority, recoverable, trust, sensitivity, retention = _BLOCK_POLICY.get(
+            self.name,
+            (99, False, "untrusted_external", "sensitive", "short"),
+        )
+        return ContextResult(
+            provider=self.name,
+            status=status,
+            text=text,
+            blocks=(
+                ContextBlock(
+                    source=self.name,
+                    block_id=f"{self.name}:0",
+                    text=text,
+                    priority=priority,
+                    recoverable_from_repo=recoverable,
+                    trust_class=trust,
+                    sensitivity=sensitivity,
+                    retention=retention,
+                    relevant_files=tuple(req.changed_files),
+                ),
+            ) if text.strip() else (),
+        )

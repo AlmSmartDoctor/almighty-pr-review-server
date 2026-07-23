@@ -71,5 +71,7 @@ PROMPT_SCHEMA_HINT = (
     "반드시 마지막에 ```json 블록으로 다음 형식만 출력:\n"
     '{"findings":[{"file","line","severity"(critical|high|medium|low),'
     '"category"(bug|security|perf|style|other),"claim","rationale",'
-    '"confidence"(0~1)}]}. 이슈 없으면 빈 배열.'
+    '"confidence"(0~1)}]}. file/line은 Diff 블록의 허용되는 실제 추가 라인 목록과 '
+    "정확히 일치해야 한다. 목록 밖 위치만 문제라면 finding으로 내지 말고, 이슈가 없으면 "
+    "빈 배열."
 )

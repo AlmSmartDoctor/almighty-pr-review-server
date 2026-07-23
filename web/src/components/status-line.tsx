@@ -10,17 +10,27 @@ const toneClass = {
 export function StatusLine({
   tone = "muted",
   inline = false,
+  announce = tone !== "muted",
   className,
   children,
 }: {
   tone?: keyof typeof toneClass;
   inline?: boolean;
+  announce?: boolean;
   className?: string;
   children: ReactNode;
 }) {
   const Tag: ElementType = inline ? "span" : "p";
+  const liveProps = announce
+    ? tone === "error"
+      ? { role: "alert" }
+      : { role: "status", "aria-live": "polite" as const }
+    : {};
   return (
-    <Tag className={cn("text-[12.5px] leading-relaxed", toneClass[tone], className)}>
+    <Tag
+      {...liveProps}
+      className={cn("text-[12.5px] leading-relaxed", toneClass[tone], className)}
+    >
       {children}
     </Tag>
   );

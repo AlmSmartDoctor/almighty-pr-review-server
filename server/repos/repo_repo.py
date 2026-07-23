@@ -47,13 +47,17 @@ ALLOWED = {
     "context_db_schema_on",
     "context_graphify_on",
     "context_feedback_on",
+    "context_current_pr_reviews_on",
     "static_context_path",
     "jira_project_keys",
     "db_schema_path",
+    "live_db_target_id",
     "graphify_path",
     "verify_singles_on",
     "incremental_review_on",
     "skip_draft_on",
+    "review_scope_guard_mode",
+    "review_dedupe_mode",
 }
 
 
@@ -88,8 +92,19 @@ def remove(conn: sqlite3.Connection, rid: int) -> bool:
         conn.execute(
             f"DELETE FROM finding_decision WHERE finding_id IN ({finding_ids})", params
         )
-        for table in ("feedback_signal", "slack_post", "posted_comment", "finding", "vendor_result"):
+        for table in (
+            "feedback_signal",
+            "slack_post",
+            "posted_comment",
+            "finding",
+            "vendor_result",
+        ):
             conn.execute(f"DELETE FROM {table} WHERE run_id IN ({run_ids})", params)
+        # finding.posting_operation_id points back to this table, so findings must be
+        # removed first; the operation itself must be removed before review_run.
+        conn.execute(
+            f"DELETE FROM github_post_operation WHERE run_id IN ({run_ids})", params
+        )
         conn.execute(f"DELETE FROM review_job WHERE pr_id IN ({pr_ids})", params)
         conn.execute(f"DELETE FROM review_run WHERE id IN ({run_ids})", params)
         conn.execute(f"DELETE FROM pre_screen WHERE pr_id IN ({pr_ids})", params)
@@ -103,7 +118,9 @@ def remove(conn: sqlite3.Connection, rid: int) -> bool:
         raise
 
 
-def update(conn: sqlite3.Connection, rid: int, **fields) -> None:
+def update(
+    conn: sqlite3.Connection, rid: int, *, commit=True, **fields
+) -> None:
     cols = [c for c in fields if c in ALLOWED]
     if not cols:
         return
@@ -112,4 +129,5 @@ def update(conn: sqlite3.Connection, rid: int, **fields) -> None:
         f"UPDATE repo SET {sets} WHERE id = ?",
         [fields[c] for c in cols] + [rid],
     )
-    conn.commit()
+    if commit:
+        conn.commit()

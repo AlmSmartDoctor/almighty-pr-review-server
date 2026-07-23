@@ -142,6 +142,106 @@ def test_overview_no_findings_defaults_low(tmp_path):
     assert rows[0]["run_id"] == run_id
 
 
+def test_overview_prescreen_matches_current_pr_head(tmp_path):
+    conn = connect(tmp_path / "api.db")
+    init_schema(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    client = TestClient(app)
+
+    from server.repos import prescreen_repo, pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=9,
+        title="New head running",
+        author="a",
+        head_sha="old",
+        base_ref="main",
+        url="u",
+    )
+    prescreen_repo.add(
+        conn,
+        pr_id=pid,
+        head_sha="old",
+        model="haiku",
+        complexity="complex",
+        score=0.9,
+        reason="old result",
+        duration_ms=7,
+        decided="review",
+    )
+    pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=9,
+        title="New head running",
+        author="a",
+        head_sha="new",
+        base_ref="main",
+        url="u",
+    )
+    latest_run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="new", trigger="manual", effort="medium"
+    )
+
+    row = client.get("/api/overview").json()[0]
+
+    assert row["run_id"] == latest_run
+    assert row["run_status"] == "running"
+    assert row["prescreen"] is None
+    assert row["prescreen_duration_ms"] is None
+
+
+def test_overview_finding_summary_uses_latest_run_only(tmp_path):
+    conn = connect(tmp_path / "api.db")
+    init_schema(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    client = TestClient(app)
+
+    from server.repos import finding_repo, pr_repo, repo_repo, review_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn,
+        repo_id=rid,
+        number=8,
+        title="Clean after re-review",
+        author="a",
+        head_sha="new",
+        base_ref="main",
+        url="u",
+    )
+    old_run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="old", trigger="manual", effort="medium"
+    )
+    finding_repo.add(
+        conn,
+        run_id=old_run,
+        vendor="claude",
+        file="a.py",
+        line=1,
+        severity="critical",
+        category="bug",
+        claim="old issue",
+        rationale="fixed later",
+        confidence=0.9,
+    )
+    review_repo.finish_run(conn, old_run, "done")
+    latest_run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="new", trigger="manual", effort="medium"
+    )
+    review_repo.finish_run(conn, latest_run, "done")
+
+    row = client.get("/api/overview").json()[0]
+
+    assert row["run_id"] == latest_run
+    assert row["finding_count"] == 0
+    assert row["sev_rank"] is None
+    assert row["severity"] == "low"
+
+
 def test_overview_exposes_latest_run_status_and_error(tmp_path):
     conn = connect(tmp_path / "api.db")
     init_schema(conn)
@@ -207,6 +307,45 @@ def test_overview_exposes_latest_job_status_for_prerun_failures(tmp_path):
     assert rows[0]["job_status"] == "failed"
     assert rows[0]["job_error"] == "clone 실패"
     assert rows[0]["run_id"] is None  # run은 없음 — job만이 실패를 안다
+
+
+def test_overview_uses_job_for_current_head_when_pr_returns_to_old_sha(tmp_path):
+    conn = connect(tmp_path / "reverted-head.db")
+    init_schema(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    client = TestClient(app)
+
+    from server.repos import job_repo, pr_repo, repo_repo
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn, repo_id=rid, number=8, title="Reset", author="a", head_sha="old",
+        base_ref="main", url="u",
+    )
+    old_job = job_repo.enqueue(conn, pr_id=pid, head_sha="old", trigger="auto")
+    conn.execute("UPDATE review_job SET status='done' WHERE id=?", (old_job,))
+    conn.commit()
+
+    pr_repo.upsert(
+        conn, repo_id=rid, number=8, title="Reset", author="a", head_sha="new",
+        base_ref="main", url="u",
+    )
+    new_job = job_repo.enqueue(conn, pr_id=pid, head_sha="new", trigger="auto")
+    conn.execute(
+        "UPDATE review_job SET status='failed', error='new head failure' WHERE id=?",
+        (new_job,),
+    )
+    conn.commit()
+
+    pr_repo.upsert(
+        conn, repo_id=rid, number=8, title="Reset", author="a", head_sha="old",
+        base_ref="main", url="u",
+    )
+    job_repo.enqueue_manual(conn, pr_id=pid, head_sha="old")
+
+    row = client.get("/api/overview").json()[0]
+    assert row["job_status"] == "queued"
+    assert row["job_error"] is None
 
 
 def test_overview_orders_by_created_at_desc_and_exposes_draft(tmp_path):

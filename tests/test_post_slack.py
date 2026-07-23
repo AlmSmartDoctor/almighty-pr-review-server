@@ -26,6 +26,9 @@ class HealthyGh:
     def diff(self, repo, number):
         return ""
 
+    def get_pr_review_context(self, repo, number):
+        return {"reviews": [], "inline_comments": [], "conversation_comments": []}
+
     def create_review(self, repo, number, commit_id, body, comments):
         return {"id": 1, "html_url": "https://x/pull/5#pullrequestreview-1"}
 

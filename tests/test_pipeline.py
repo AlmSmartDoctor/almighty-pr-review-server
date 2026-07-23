@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import contextmanager
 
 import pytest
@@ -9,17 +10,136 @@ from server.pipeline import (
     retry_pr,
     PipelineDeps,
     PipelineError,
+    PipelineStaleHead,
+    VendorRunResult,
     _build_prompt,
+    _context_budget,
+    _group_duplicate_candidates,
+    _policy_mode,
+    _run_vendor,
+    _safe_concurrency_limit,
 )
-from server.repos import repo_repo, pr_repo, finding_repo, review_repo
+from server.repos import (
+    finding_repo,
+    pr_repo,
+    repo_repo,
+    review_repo,
+    settings_repo,
+)
+from server.review.finding_policy import policy_snapshot_from_row
+from server.review.harness import HarnessProfile, RuntimeCredentialError
 from server.review.prescreen import PRESCREEN_FALLBACK_REASON
+from server.review.vendor_telemetry import EXECUTION_IDENTITY_FIELDS
+from server.review.vendors import CodexAdapter
+
+
+def test_runtime_cleanup_failure_cannot_report_vendor_success(tmp_path):
+    class Harness:
+        @contextmanager
+        def runtime_credentials(self, **kwargs):
+            yield
+            raise RuntimeCredentialError("runtime_cleanup_failed")
+
+    class Adapter:
+        vendor = "codex"
+
+        async def review(self, **kwargs):
+            return []
+
+    class Pool:
+        async def run(self, job):
+            return await job()
+
+    result = asyncio.run(
+        _run_vendor(
+            Adapter(), ["prompt"], pool=Pool(), wt=tmp_path,
+            hp=Harness(), rt=str(tmp_path / "runtime"),
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.findings == []
+    assert result.chunks[0]["safe_error_code"] == "runtime_cleanup_failed"
+
+
+def test_review_run_policy_snapshot_is_immutable_after_config_change(db, monkeypatch):
+    _, pid = _seed_pr(db, number=90, head_sha="policy-snapshot")
+    monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", True)
+    monkeypatch.setattr("server.config.REVIEW_SCOPE_GUARD_MODE", "enforce")
+    monkeypatch.setattr(
+        "server.config.REVIEW_SCOPE_ENFORCE_REPOS", frozenset({"acme/api"})
+    )
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    before = policy_snapshot_from_row(review_repo.get_run(db, run_id))
+    assert before is not None
+    assert before.scope.effective_mode == "enforce"
+
+    monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", False)
+    after = policy_snapshot_from_row(review_repo.get_run(db, run_id))
+    assert after == before
+
+
+def test_safe_concurrency_limit_recovers_legacy_invalid_settings():
+    assert _safe_concurrency_limit(1) == 1
+    assert _safe_concurrency_limit(8) == 8
+    assert _safe_concurrency_limit(0) == 2
+    assert _safe_concurrency_limit(9) == 2
+    assert _safe_concurrency_limit(True) == 2
+
+
+def test_enforcement_requires_global_canary_and_honors_kill_switch(monkeypatch):
+    repo = {
+        "full_name": "acme/api",
+        "review_scope_guard_mode": None,
+        "review_dedupe_mode": None,
+    }
+    monkeypatch.setattr("server.config.REVIEW_SCOPE_ENFORCE_REPOS", frozenset())
+    monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", False)
+    repo["review_scope_guard_mode"] = "enforce"
+    assert _policy_mode(
+        repo, "review_scope_guard_mode", "observe", policy="scope"
+    ) == "observe"
+    repo["review_scope_guard_mode"] = None
+    monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", True)
+    monkeypatch.setattr("server.config.REVIEW_SCOPE_KILL_SWITCH", False)
+    assert _policy_mode(
+        repo, "review_scope_guard_mode", "enforce", policy="scope"
+    ) == "observe"
+
+    monkeypatch.setattr(
+        "server.config.REVIEW_SCOPE_ENFORCE_REPOS", frozenset({"acme/api"})
+    )
+    assert _policy_mode(
+        repo, "review_scope_guard_mode", "enforce", policy="scope"
+    ) == "enforce"
+
+    monkeypatch.setattr("server.config.REVIEW_SCOPE_KILL_SWITCH", True)
+    repo["review_scope_guard_mode"] = "enforce"
+    assert _policy_mode(
+        repo, "review_scope_guard_mode", "observe", policy="scope"
+    ) == "observe"
+
+
+def test_context_budget_caps_repeated_prompt_and_vendor_cost():
+    assert _context_budget(1, 1) == 20_000
+    assert _context_budget(2, 1) == 10_000
+    assert _context_budget(1, 2) == 10_000
+    assert _context_budget(10, 2) == 1_000
 
 
 @pytest.fixture(autouse=True)
 def _no_runtime_credentials(monkeypatch):
     monkeypatch.setattr(
         "server.review.harness.HarnessProfile.prepare_runtime",
-        lambda self, runtime_dir: None,
+        lambda self, runtime_dir, vendor: None,
     )
 
 
@@ -68,6 +188,92 @@ def test_pipeline_persists_findings_both_vendors(db):
     vendors = {f["vendor"] for f in fs}
     assert vendors == {"claude", "codex"}
     assert pr_repo.get(db, pid)["last_reviewed_sha"] == "sha1"
+
+
+def test_pipeline_discards_findings_when_head_changes_during_vendor_review(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=81,
+        title="t",
+        author="a",
+        head_sha="old",
+        base_ref="main",
+        url="u",
+    )
+
+    class HeadChangingAdapter(FakeAdapter):
+        async def review(self, **kw):
+            db.execute("UPDATE pull_request SET head_sha='new' WHERE id=?", (pid,))
+            db.commit()
+            return self._f
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[
+            HeadChangingAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.9)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+
+    with pytest.raises(PipelineStaleHead):
+        asyncio.run(
+            review_pr(
+                db,
+                pr_id=pid,
+                trigger="manual",
+                deps=deps,
+            )
+        )
+
+    run = db.execute(
+        "SELECT * FROM review_run WHERE pr_id=? ORDER BY id DESC LIMIT 1", (pid,)
+    ).fetchone()
+    assert run["status"] == "canceled"
+    assert finding_repo.list_for_run(db, run["id"]) == []
+    vendor = review_repo.list_vendor_results(db, run["id"])[0]
+    assert vendor["status"] == "canceled"
+    assert vendor["execution_meta"] is not None
+    assert pr_repo.get(db, pid)["last_reviewed_sha"] is None
+
+
+def test_pipeline_runs_vendor_in_injected_plain_snapshot(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=82, title="t", author="a", head_sha="s82",
+        base_ref="main", url="u",
+    )
+    seen = {}
+
+    @contextmanager
+    def snapshot(worktree):
+        seen["source"] = str(worktree)
+        yield "/tmp/plain-snapshot"
+
+    class SnapshotAdapter:
+        vendor = "claude"
+
+        async def review(self, *, workdir, **kwargs):
+            seen["cwd"] = str(workdir)
+            return []
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[SnapshotAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/source",
+        snapshot=snapshot,
+    )
+
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    assert seen == {"source": "/tmp/fake-wt", "cwd": "/tmp/plain-snapshot"}
 
 
 def test_pipeline_reviews_without_local_path_via_ondemand_clone(db):
@@ -271,6 +477,380 @@ def test_pipeline_chunks_large_diff_and_reviews_each_chunk(db, monkeypatch):
     assert all(v["status"] == "done" for v in vrs)
 
 
+def test_pipeline_marks_vendor_partial_and_persists_chunk_coverage(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=12, title="partial", author="a",
+        head_sha="partial-sha", base_ref="main", url="u",
+    )
+    diff = _diff_block("a.py") + _diff_block("b.py")
+    monkeypatch.setattr(
+        "server.pipeline.MAX_INLINE_DIFF_CHARS", len(_diff_block("a.py")) + 1
+    )
+
+    class PartialAdapter:
+        vendor = "claude"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("provider body must not persist")
+            return [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+
+    adapter = PartialAdapter()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[adapter],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    assert review_repo.get_run(db, run_id)["status"] == "done"
+    vendor = review_repo.list_vendor_results(db, run_id)[0]
+    assert vendor["status"] == "partial"
+    assert vendor["error"] == "partial chunk failure"
+    chunks = vendor["execution_meta"]["attempts"][0]["chunks"]
+    assert [chunk["status"] for chunk in chunks] == ["done", "failed"]
+    assert len(finding_repo.list_for_run(db, run_id)) == 1
+    assert review_repo.failed_vendors(db, run_id) == ["claude"]
+    assert "provider body" not in str(vendor)
+
+
+def test_partial_retry_runs_only_unresolved_chunk_and_appends_attempt(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=13, title="partial", author="a",
+        head_sha="partial-retry", base_ref="main", url="u",
+    )
+    a, b = _diff_block("a.py"), _diff_block("b.py")
+    diff = a + b
+    monkeypatch.setattr("server.pipeline.MAX_INLINE_DIFF_CHARS", len(a) + 1)
+
+    class FirstPass:
+        vendor = "claude"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("temporary")
+            return [Finding("claude", "a.py", 1, "high", "bug", "first", "r", 0.8)]
+
+    first = FirstPass()
+    initial_deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[first],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(
+        review_pr(db, pr_id=pid, trigger="manual", deps=initial_deps)
+    )
+
+    class RetryPass:
+        vendor = "claude"
+
+        def __init__(self):
+            self.prompts = []
+
+        async def review(self, *, prompt, **kwargs):
+            self.prompts.append(prompt)
+            return [Finding("claude", "b.py", 1, "medium", "bug", "second", "r", 0.7)]
+
+    retry = RetryPass()
+    retry_deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[retry],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=retry_deps))
+
+    assert len(retry.prompts) == 1
+    assert "b.py" in retry.prompts[0] and "a.py" not in retry.prompts[0].split("## Diff", 1)[1]
+    vendor = review_repo.list_vendor_results(db, run_id)[0]
+    assert vendor["status"] == "done"
+    attempts = vendor["execution_meta"]["attempts"]
+    assert [attempt["attempt"] for attempt in attempts] == [1, 2]
+    assert [chunk["index"] for chunk in attempts[1]["chunks"]] == [1]
+    assert {f["claim"] for f in finding_repo.list_for_run(db, run_id)} == {"first", "second"}
+
+
+def test_retry_groups_duplicate_against_prior_successful_chunk(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=131, title="retry-dupe", author="a",
+        head_sha="retry-dupe", base_ref="main", url="u",
+    )
+    a, b = _diff_block("a.py"), _diff_block("b.py")
+    diff = a + b
+    monkeypatch.setattr("server.pipeline.MAX_INLINE_DIFF_CHARS", len(a) + 1)
+
+    class Initial:
+        vendor = "claude"
+        calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("temporary")
+            return [Finding(
+                "claude", "b.py", 1, "high", "bug", "same defect", "r", 0.8
+            )]
+
+    initial_deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[Initial()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=initial_deps))
+
+    class Retry:
+        vendor = "claude"
+
+        async def review(self, **kwargs):
+            return [Finding(
+                "claude", "b.py", 1, "high", "bug", " same   defect! ", "r", 0.8
+            )]
+
+    retry_deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[Retry()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=retry_deps))
+    findings = finding_repo.list_for_run(db, run_id)
+
+    assert len(findings) == 2
+    assert {item["duplicate_group_id"] for item in findings} == {1}
+    assert all(item["duplicate_suggested"] for item in findings)
+
+
+def test_scope_policy_reassigns_other_chunk_and_marks_context_line_unpostable(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=14, title="scope", author="a",
+        head_sha="scope-sha", base_ref="main", url="u",
+    )
+    a = _diff_block("a.py")
+    b = "diff --git a/b.py b/b.py\n@@ -1,2 +1,2 @@\n context\n-old\n+new\n"
+    diff = a + b
+    monkeypatch.setattr(
+        "server.pipeline.MAX_INLINE_DIFF_CHARS", max(len(a), len(b)) + 1
+    )
+    monkeypatch.setattr("server.config.REVIEW_SCOPE_GUARD_MODE", "observe")
+
+    class ScopeAdapter:
+        vendor = "claude"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return [
+                    Finding("claude", "b.py", 2, "high", "bug", "cross", "r", 0.8),
+                    Finding("claude", "b.py", 1, "low", "bug", "context", "r", 0.5),
+                ]
+            return []
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[ScopeAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    findings = {finding["claim"]: finding for finding in finding_repo.list_for_run(db, run_id)}
+
+    assert findings["cross"]["source_chunk_index"] == 0
+    assert findings["cross"]["owner_chunk_index"] == 1
+    assert findings["cross"]["scope_status"] == "reassigned"
+    assert findings["cross"]["posting_eligible"] == 1
+    assert findings["context"]["scope_status"] == "would_reject"
+    assert findings["context"]["posting_eligible"] == 0
+    chunk = review_repo.list_vendor_results(db, run_id)[0]["execution_meta"]["attempts"][0]["chunks"][0]
+    assert chunk["scope_reassigned"] == 1 and chunk["scope_rejected"] == 1
+
+
+def test_duplicate_policy_groups_exact_claim_without_merging_distinct_claims(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=15, title="dupe", author="a",
+        head_sha="dupe-sha", base_ref="main", url="u",
+    )
+    a, b = _diff_block("a.py"), _diff_block("b.py")
+    diff = a + b
+    monkeypatch.setattr("server.pipeline.MAX_INLINE_DIFF_CHARS", len(a) + 1)
+    monkeypatch.setattr("server.config.REVIEW_DEDUPE_MODE", "observe")
+
+    class DuplicateAdapter:
+        vendor = "claude"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            claim = "Same defect!" if self.calls == 1 else " same   defect "
+            return [
+                Finding("claude", "b.py", 1, "high", "bug", claim, "r", 0.9),
+                Finding("claude", "b.py", 1, "high", "bug", f"distinct {self.calls}", "r", 0.9),
+            ]
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[DuplicateAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    findings = finding_repo.list_for_run(db, run_id)
+    duplicate = [finding for finding in findings if "same" in finding["claim"].lower()]
+    distinct = [finding for finding in findings if finding["claim"].startswith("distinct")]
+
+    assert len(duplicate) == 2
+    assert {finding["duplicate_group_id"] for finding in duplicate} == {1}
+    assert all(finding["duplicate_suggested"] for finding in duplicate)
+    assert all(finding["posting_eligible"] for finding in duplicate)
+    assert all(finding["duplicate_group_id"] is None for finding in distinct)
+
+
+def test_duplicate_policy_does_not_group_same_claim_on_different_lines():
+    first = Finding("claude", "a.py", 10, "high", "bug", "same claim", "r", 0.9)
+    second = Finding("claude", "a.py", 20, "high", "bug", "same claim", "r", 0.9)
+    first.owner_chunk_index = second.owner_chunk_index = 0
+    first.source_chunk_index = second.source_chunk_index = 0
+    result = VendorRunResult(
+        vendor="claude", status="done", findings=[first, second], duration_ms=0,
+        chunks=[{"index": 0, "duplicate_groups": 0}],
+    )
+
+    _group_duplicate_candidates([result], mode="enforce")
+
+    assert first.duplicate_group_id is None
+    assert second.duplicate_group_id is None
+    assert first.posting_eligible is True and second.posting_eligible is True
+
+
+def test_pipeline_selects_and_persists_context_per_chunk(db, monkeypatch):
+    from server.context.base import ContextBlock, ContextResult
+
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=16, title="ctx", author="a",
+        head_sha="ctx-sha", base_ref="main", url="u",
+    )
+    a, b = _diff_block("a.py"), _diff_block("b.py")
+    diff = a + b
+    monkeypatch.setattr("server.pipeline.MAX_INLINE_DIFF_CHARS", len(a) + 1)
+    monkeypatch.setattr("server.config.MAX_CONTEXT_CHARS_TOTAL", 700)
+
+    class ChunkContext:
+        def __init__(self):
+            self.results = [ContextResult(
+                provider="static", status="ok", text="legacy", blocks=(
+                    ContextBlock(
+                        "static", "a-rule", "A-CONTEXT-" * 8, 50, True,
+                        relevant_files=("a.py",),
+                    ),
+                    ContextBlock(
+                        "static", "b-rule", "B-CONTEXT-" * 8, 50, True,
+                        relevant_files=("b.py",),
+                    ),
+                )
+            )]
+
+        def gather(self, *, req):
+            return "legacy"
+
+    class CaptureAdapter:
+        vendor = "claude"
+
+        def __init__(self):
+            self.prompts = []
+
+        async def review(self, *, prompt, **kwargs):
+            self.prompts.append(prompt)
+            return []
+
+    adapter = CaptureAdapter()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: diff,
+        worktree=fake_worktree,
+        adapters=[adapter],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+        context=ChunkContext(),
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    stored = review_repo.get_context_chunks(review_repo.get_run(db, run_id))
+
+    assert len(adapter.prompts) == len(stored) == 2
+    assert "A-CONTEXT" in adapter.prompts[0] and "B-CONTEXT" not in adapter.prompts[0]
+    assert "B-CONTEXT" in adapter.prompts[1] and "A-CONTEXT" not in adapter.prompts[1]
+    assert stored[0]["context_hash"] != stored[1]["context_hash"]
+    assert all(item["manifest"] for item in stored)
+
+
+def test_pipeline_verifies_each_finding_with_owner_chunk_only(db, monkeypatch):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=58, head_sha="s58", verify_singles_on=1)
+    a, b = _diff_block("a.py"), _diff_block("b.py")
+    monkeypatch.setattr("server.pipeline.MAX_INLINE_DIFF_CHARS", len(a) + 1)
+
+    class ChunkAdapter:
+        vendor = "claude"
+
+        async def review(self, *, prompt, **kwargs):
+            path = "a.py" if "diff --git a/a.py" in prompt else "b.py"
+            return [Finding("claude", path, 1, "high", "bug", path, "r", 0.9)]
+
+    verify = FakeVerify([
+        Verdict(refuted=False, independent=True, evidence_status="independent_model_support"),
+        Verdict(refuted=False, independent=True, evidence_status="independent_model_support"),
+    ])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: a + b,
+        worktree=fake_worktree,
+        adapters=[ChunkAdapter()],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    assert len(verify.calls) == 2
+    assert "diff --git a/a.py" in verify.calls[0][1].diff
+    assert "diff --git a/b.py" not in verify.calls[0][1].diff
+    assert "diff --git a/b.py" in verify.calls[1][1].diff
+    assert "diff --git a/a.py" not in verify.calls[1][1].diff
+
+
 def test_pipeline_cancels_when_only_noise_files_changed(db):
     """노이즈(lockfile 등)만 바뀐 PR → 필터 후 빈 diff → 벤더 호출 없이 canceled."""
     rid = repo_repo.add(db, full_name="acme/api")
@@ -371,8 +951,10 @@ def test_pipeline_fails_run_when_all_vendors_fail(db):
     )
     with pytest.raises(PipelineError) as ei:
         asyncio.run(review_pr(db, pr_id=pid, trigger="auto", deps=deps))
-    assert review_repo.get_run(db, ei.value.run_id)["status"] == "failed"
-    assert "rate limit" in str(ei.value)  # retry 판정 근거 문자열 보존
+    run = review_repo.get_run(db, ei.value.run_id)
+    assert run["status"] == "failed"
+    assert "rate limit" not in str(ei.value)  # provider 원문은 영속/전파하지 않음
+    assert run["error"] == "all vendors failed → claude:failed:unknown; codex:failed:unknown"
 
 
 def test_pipeline_partial_success_one_vendor_fails(db):
@@ -544,7 +1126,7 @@ def test_pipeline_redacts_error_in_persisted_meta(db, monkeypatch):
 
 def test_pipeline_persists_gathered_context(db):
     import json
-    from server.context.base import ContextResult
+    from server.context.base import ContextBlock, ContextResult
 
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(
@@ -561,7 +1143,25 @@ def test_pipeline_persists_gathered_context(db):
     class FakeCtx:
         def __init__(self):
             self.results = [
-                ContextResult(provider="static", status="ok", text="hello ctx")
+                ContextResult(
+                    provider="static",
+                    status="ok",
+                    text="hello ctx",
+                    meta={
+                        "failed_sources": ["graphql"],
+                        "items_read": 8,
+                        "items_selected": 6,
+                        "automated_items_selected": 2,
+                    },
+                    blocks=(ContextBlock(
+                        source="static",
+                        block_id="safe-test-context",
+                        text="hello ctx",
+                        priority=10,
+                        recoverable_from_repo=False,
+                        retention="review_history",
+                    ),),
+                )
             ]
 
         def gather(self, *, req):
@@ -587,6 +1187,18 @@ def test_pipeline_persists_gathered_context(db):
         meta["sources"][0]["provider"] == "static"
         and meta["sources"][0]["status"] == "ok"
     )
+    assert meta["diff_chars"] == len("diff...")
+    assert meta["context_chars"] == len("hello ctx")
+    assert meta["prompt_count"] == 1 and meta["vendor_count"] == 1
+    assert meta["repeated_context_chars"] == meta["chunk_context_chars"]
+    chunk_contexts = review_repo.get_context_chunks(run)
+    assert len(chunk_contexts) == 1
+    assert "hello ctx" in chunk_contexts[0]["text"]
+    assert chunk_contexts[0]["manifest"][0]["selected"] is True
+    assert meta["sources"][0]["failed_sources"] == ["graphql"]
+    assert meta["sources"][0]["items_read"] == 8
+    assert meta["sources"][0]["items_selected"] == 6
+    assert meta["sources"][0]["automated_items_selected"] == 2
 
 
 def test_pipeline_passes_head_ref_and_body_to_context_request(db):
@@ -778,12 +1390,67 @@ def test_pipeline_injects_static_context_from_base_revision(db, tmp_path):
     assert "## 외부 컨텍스트" in cap.prompt and "base 아키텍처 결정" in cap.prompt
     assert "PR이 바꾼 지침" not in cap.prompt
     run = review_repo.get_run(db, run_id)
-    assert "아키텍처 결정" in run["context_text"]
+    assert run["context_text"] == ""  # manifest-only repository text is prompt-only
+    assert review_repo.get_context_chunks(run)[0]["text"] == ""
     meta = json.loads(run["context_meta"])
+    assert meta["context_payload_persisted"] is False
     assert (
         meta["sources"][0]["provider"] == "static"
         and meta["sources"][0]["status"] == "ok"
     )
+
+
+def test_pipeline_does_not_persist_sensitive_or_manifest_only_context(db):
+    import hashlib
+    import json
+    from server.context.base import ContextBlock, ContextResult
+
+    rid = repo_repo.add(db, full_name="acme/private")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=22, title="t", author="a",
+        head_sha="s22", base_ref="main", url="u",
+    )
+
+    class SensitiveContext:
+        def __init__(self):
+            self.results = [ContextResult(
+                provider="db_schema",
+                status="ok",
+                text="secret schema",
+                blocks=(ContextBlock(
+                    source="db_schema",
+                    block_id="schema",
+                    text="secret schema",
+                    priority=10,
+                    recoverable_from_repo=False,
+                    sensitivity="sensitive",
+                    retention="manifest_only",
+                ),),
+            )]
+
+        def gather(self, *, req):
+            return "secret schema"
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", [])],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+        context=SensitiveContext(),
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    run = review_repo.get_run(db, run_id)
+    chunks = review_repo.get_context_chunks(run)
+    meta = json.loads(run["context_meta"])
+
+    assert run["context_text"] == ""
+    assert chunks[0]["text"] == ""
+    assert chunks[0]["context_hash"] != hashlib.sha256(b"").hexdigest()
+    assert meta["context_payload_persisted"] is False
+    assert meta["chunk_contexts"][0]["payload_persisted"] is False
+    assert "secret schema" not in run["context_meta"]
 
 
 def test_pipeline_sets_context_request_workdir_to_worktree(db):
@@ -857,7 +1524,7 @@ def test_pipeline_verifies_high_severity_single_and_halves_confidence_on_refute(
     _, pid = _seed_pr(db, number=50, head_sha="s50", verify_singles_on=1)
     verify = FakeVerify([Verdict(refuted=True, rationale="오탐")])
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
@@ -891,9 +1558,16 @@ def test_pipeline_verify_confirmed_keeps_confidence(db):
     from server.review.verify import Verdict
 
     _, pid = _seed_pr(db, number=51, head_sha="s51", verify_singles_on=1)
-    verify = FakeVerify([Verdict(refuted=False, rationale="실제 버그")])
+    verify = FakeVerify([
+        Verdict(
+            refuted=False,
+            rationale="실제 버그",
+            independent=True,
+            evidence_status="independent_model_support",
+        )
+    ])
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
@@ -908,7 +1582,58 @@ def test_pipeline_verify_confirmed_keeps_confidence(db):
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     f = finding_repo.list_for_run(db, run_id)[0]
     assert f["verify_status"] == "confirmed"
+    assert f["verify_independent"] == 1
+    assert f["verify_evidence_status"] == "independent_model_support"
     assert f["confidence"] == 0.9
+
+
+def test_pipeline_same_vendor_support_is_not_confirmed(db):
+    from server.review.vendor_telemetry import unavailable_meta
+    from server.review.vendors import VendorExecution
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=57, head_sha="s57", verify_singles_on=1)
+    execution = VendorExecution(
+        output="",
+        status="done",
+        safe_error_code=None,
+        exit_code=0,
+        cli_name="claude",
+        cli_version="2.1.198",
+        event_schema="claude-stream-json-v1",
+        stream_truncated=False,
+        telemetry=unavailable_meta("claude", status="done"),
+        duration_ms=7,
+    )
+    verify = FakeVerify([
+        Verdict(
+            refuted=False,
+            rationale="자체 재검토",
+            independent=False,
+            evidence_status="supported_self",
+            execution_attempts=(("claude", execution),),
+        )
+    ])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[FakeAdapter(
+            "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.9)]
+        )],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    f = finding_repo.list_for_run(db, run_id)[0]
+    assert f["verify_status"] == "supported_self"
+    assert f["verify_independent"] == 0
+    assert f["verify_evidence_status"] == "supported_self"
+    vendor = review_repo.list_vendor_results(db, run_id)[0]
+    execution_meta = vendor["execution_meta"]
+    assert [attempt["phase"] for attempt in execution_meta["attempts"]] == [
+        "review", "verify"
+    ]
 
 
 def test_pipeline_verify_contested_keeps_confidence(db):
@@ -920,7 +1645,7 @@ def test_pipeline_verify_contested_keeps_confidence(db):
         [Verdict(refuted=False, contested=True, rationale="반박 vs 변호")]
     )
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
@@ -945,14 +1670,14 @@ def test_pipeline_verify_skips_consensus_findings(db):
     verify = FakeVerify([Verdict(refuted=True, rationale="x")])
     # 양 벤더가 같은 위치·카테고리 → CONSENSUS → 검증 대상 아님
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
                 "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
             ),
             FakeAdapter(
-                "codex", [Finding("codex", "a.py", 2, "high", "bug", "c2", "r2", 0.7)]
+                "codex", [Finding("codex", "a.py", 1, "high", "bug", "c2", "r2", 0.7)]
             ),
         ],
         prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
@@ -965,13 +1690,37 @@ def test_pipeline_verify_skips_consensus_findings(db):
         assert f["verify_status"] is None
 
 
+def test_pipeline_does_not_verify_out_of_scope_high_finding(db):
+    from server.review.verify import Verdict
+
+    _, pid = _seed_pr(db, number=59, head_sha="s59", verify_singles_on=1)
+    verify = FakeVerify([Verdict(refuted=False)])
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[FakeAdapter(
+            "claude", [Finding("claude", "outside.py", 1, "high", "bug", "c", "r", 0.9)]
+        )],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/acme-api",
+        verify=verify,
+    )
+
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    assert verify.calls == []
+    finding = finding_repo.list_for_run(db, run_id)[0]
+    assert finding["scope_status"] == "would_reject"
+    assert finding["verify_status"] is None
+
+
 def test_pipeline_verify_disabled_by_default_not_called(db):
     from server.review.verify import Verdict
 
     _, pid = _seed_pr(db, number=53, head_sha="s53")  # verify_singles_on 미설정=off
     verify = FakeVerify([Verdict(refuted=True, rationale="x")])
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
@@ -996,7 +1745,7 @@ def test_pipeline_verify_degraded_verdict_leaves_finding_unlabeled(db):
     _, pid = _seed_pr(db, number=56, head_sha="s56", verify_singles_on=1)
     verify = FakeVerify([Verdict(refuted=False, degraded=True)])
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
@@ -1010,8 +1759,10 @@ def test_pipeline_verify_degraded_verdict_leaves_finding_unlabeled(db):
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     f = finding_repo.list_for_run(db, run_id)[0]
-    assert f["verify_status"] is None
+    assert f["verify_status"] == "degraded"
     assert f["verify_rationale"] is None
+    assert f["verify_independent"] == 0
+    assert f["verify_evidence_status"] == "unverified"
     assert f["confidence"] == 0.9
 
 
@@ -1022,7 +1773,7 @@ def test_pipeline_verify_degrades_when_verifier_raises(db):
         raise RuntimeError("verifier down")
 
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
         adapters=[
             FakeAdapter(
@@ -1035,9 +1786,42 @@ def test_pipeline_verify_degrades_when_verifier_raises(db):
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     run = review_repo.get_run(db, run_id)
-    assert run["status"] == "done"  # 검증 실패가 리뷰를 막지 않음
+    assert run["status"] == "done"  # 일반 검증 실패는 리뷰를 막지 않음
     f = finding_repo.list_for_run(db, run_id)[0]
-    assert f["verify_status"] is None and f["confidence"] == 0.8
+    assert f["verify_status"] == "degraded" and f["confidence"] == 0.8
+    assert f["verify_evidence_status"] == "degraded"
+
+
+def test_pipeline_verify_exception_with_cleanup_note_is_not_absorbed_as_done(db):
+    from server.review.snapshot import ReviewSnapshotCleanupError
+
+    _, pid = _seed_pr(db, number=57, head_sha="s57", verify_singles_on=1)
+
+    async def cleanup_failed(targets, ctx):
+        error = RuntimeError("verify failed")
+        error.add_note("snapshot_cleanup_failed")
+        raise error
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: _diff_block("a.py"),
+        worktree=fake_worktree,
+        adapters=[
+            FakeAdapter(
+                "claude", [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
+            )
+        ],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+        verify=cleanup_failed,
+    )
+
+    with pytest.raises(PipelineError) as caught:
+        asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert isinstance(caught.value.__cause__, ReviewSnapshotCleanupError)
+    run = db.execute(
+        "SELECT * FROM review_run WHERE pr_id=? ORDER BY id DESC LIMIT 1", (pid,)
+    ).fetchone()
+    assert run["status"] != "done"
 
 
 class PromptCapturingAdapter:
@@ -1102,6 +1886,53 @@ def test_incremental_falls_back_to_full_when_no_prior_done_run(db):
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     assert "FULL-DIFF" in cap.prompt
     assert review_repo.get_run(db, run_id)["base_sha"] is None
+
+
+def test_worker_review_uses_base_to_expected_head_exact_diff(db):
+    from server.repos import review_repo
+
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=65,
+        title="t",
+        author="a",
+        head_sha="head2",
+        base_ref="main",
+        base_sha="base0",
+        url="u",
+    )
+    cap = PromptCapturingAdapter()
+    seen = {}
+
+    def compare(repo, base, head):
+        seen.update(repo=repo, base=base, head=head)
+        return "EXACT-DIFF"
+
+    deps = PipelineDeps(
+        gh_diff=lambda *args: (_ for _ in ()).throw(
+            AssertionError("strict worker review must not use live PR diff")
+        ),
+        gh_compare_diff=compare,
+        worktree=fake_worktree,
+        adapters=[cap],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
+        repo_local_path="/tmp/acme-api",
+    )
+    run_id = asyncio.run(
+        review_pr(
+            db,
+            pr_id=pid,
+            trigger="manual",
+            deps=deps,
+            expected_head_sha="head2",
+        )
+    )
+
+    assert seen == {"repo": "acme/api", "base": "base0", "head": "head2"}
+    assert "EXACT-DIFF" in cap.prompt
+    assert review_repo.get_run(db, run_id)["head_sha"] == "head2"
 
 
 def test_incremental_empty_delta_falls_back_to_full(db):
@@ -1318,6 +2149,52 @@ def test_empty_prescreen_model_falls_back_to_default(db):
     assert seen["model"] == "haiku"  # config.DEFAULT_PRESCREEN_MODEL
 
 
+def test_non_claude_prescreen_model_falls_back_and_records_reason(db):
+    from server.repos import settings_repo
+
+    settings_repo.update(db, prescreen_model="gpt-5.6-terra")
+    _, pid = _seed_pr(db, number=92, head_sha="s92")
+    seen = {"models": []}
+
+    class Cap:
+        vendor = "claude"
+
+        async def review(self, **kw):
+            return []
+
+    def prescreen(diff, model):
+        seen["models"].append(model)
+        return ("complex", 0.9, "핵심 로직")
+
+    deps = PipelineDeps(
+        gh_diff=lambda r, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[Cap()],
+        prescreen=prescreen,
+        repo_local_path="/tmp/x",
+    )
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+
+    row = db.execute(
+        "SELECT model, reason, diff_hash FROM pre_screen "
+        "WHERE pr_id=? ORDER BY id DESC LIMIT 1",
+        (pid,),
+    ).fetchone()
+    assert seen["models"] == ["haiku"]
+    assert row["model"] == "haiku"
+    assert row["reason"].startswith("non_claude_model_fallback;")
+    assert row["diff_hash"] is None  # 잘못된 설정 사유를 정상 모델 cache에 섞지 않는다.
+
+    settings_repo.update(db, prescreen_model="haiku")
+    asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    corrected = db.execute(
+        "SELECT reason FROM pre_screen WHERE pr_id=? ORDER BY id DESC LIMIT 1",
+        (pid,),
+    ).fetchone()
+    assert seen["models"] == ["haiku", "haiku"]
+    assert not corrected["reason"].startswith("non_claude_model_fallback;")
+
+
 def test_prescreen_reused_across_reviews_of_identical_diff(db):
     _, pid = _seed_pr(db, number=71, head_sha="s71")
 
@@ -1445,10 +2322,13 @@ class _ClaudeMustNotRun:
         raise AssertionError("이미 성공한 벤더는 재실행되면 안 됨")
 
 
-def _partial_fail_run(db, *, pid, claude_finding, repo_path="/tmp/x"):
+def _partial_fail_run(
+    db, *, pid, claude_finding, repo_path="/tmp/x", diff_text="diff..."
+):
     """claude 성공 + codex 실패한 부분 실패 run을 만들고 run_id 반환."""
+    settings_repo.update(db, codex_model="test-codex")
     deps = PipelineDeps(
-        gh_diff=lambda repo, n: "diff...",
+        gh_diff=lambda repo, n: diff_text,
         worktree=fake_worktree,
         adapters=[FakeAdapter("claude", [claude_finding]), _CodexFail()],
         prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
@@ -1465,6 +2345,326 @@ def _retry_deps(codex_findings, repo_path="/tmp/x"):
         prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
         repo_local_path=repo_path,
     )
+
+
+_RETRY_IDENTITY_TARGETS = (
+    ("root", "schema_version"),
+    *(("root", key) for key in EXECUTION_IDENTITY_FIELDS),
+    ("chunk", "chunk_hash"),
+    ("chunk", "context_hash"),
+    ("chunk", "chunker_version"),
+    ("chunk", "prompt_nonce"),
+)
+
+
+@pytest.mark.parametrize("location,key", _RETRY_IDENTITY_TARGETS)
+@pytest.mark.parametrize("mutation", ("mismatch", "absence"))
+def test_retry_identity_is_complete_and_fail_closed_before_runner(
+    db, location, key, mutation
+):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=200, title="identity", author="a",
+        head_sha="identity", base_ref="main", url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding(
+            "claude", "a.py", 1, "high", "bug", "c", "r", 0.8
+        ),
+    )
+    row = db.execute(
+        "SELECT id, execution_meta FROM vendor_result WHERE run_id=? AND vendor='codex'",
+        (run_id,),
+    ).fetchone()
+    meta = json.loads(row["execution_meta"])
+    target = (
+        meta if location == "root"
+        else meta["attempts"][0]["chunks"][0]
+    )
+    if mutation == "absence":
+        target.pop(key)
+    elif key in {
+        "prompt_hash", "harness_config_hash", "adapter_config_hash", "diff_hash",
+        "context_hash", "policy_decision_hash", "policy_config_hash", "chunk_hash",
+    }:
+        target[key] = "f" * 64 if target[key] != "f" * 64 else "e" * 64
+    elif key in {"scope_policy_mode", "dedupe_policy_mode"}:
+        target[key] = "enforce" if target[key] == "observe" else "observe"
+    elif key == "schema_version":
+        target[key] = 999
+    elif key == "vendor":
+        target[key] = "claude"
+    elif key == "prompt_nonce":
+        target[key] = "deadbeef" if target[key] != "deadbeef" else "feedface"
+    else:
+        target[key] = f"{target[key]}-changed"
+    db.execute(
+        "UPDATE vendor_result SET execution_meta=? WHERE id=?",
+        (json.dumps(meta, separators=(",", ":"), sort_keys=True), row["id"]),
+    )
+    db.commit()
+
+    class NoCall:
+        vendor = "codex"
+        calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            raise AssertionError("retry runner must not be called")
+
+    adapter = NoCall()
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...",
+        worktree=fake_worktree,
+        adapters=[adapter],
+        prescreen=lambda diff, model: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=deps))
+    assert adapter.calls == 0
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("model", "effort", "harness", "adapter", "cli", "event_schema", "diff", "prompt"),
+)
+def test_retry_current_execution_drift_fails_before_runner(db, monkeypatch, drift):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=202, title="identity", author="a",
+        head_sha="identity-current", base_ref="main", url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding(
+            "claude", "a.py", 1, "high", "bug", "c", "r", 0.8
+        ),
+    )
+
+    class NoCall:
+        vendor = "codex"
+        calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+            raise AssertionError("retry runner must not be called")
+
+    adapter = NoCall()
+    current_diff = "diff..."
+    if drift == "model":
+        settings_repo.update(db, codex_model="changed-codex")
+    elif drift == "effort":
+        settings_repo.update(db, codex_effort="high")
+    elif drift == "harness":
+        profile = HarnessProfile.load("default")
+        profile.codex_sandbox = "danger-full-access"
+        monkeypatch.setattr(
+            "server.pipeline.HarnessProfile.load", lambda name: profile
+        )
+    elif drift == "adapter":
+        adapter.adapter_version = "injected-v2"
+    elif drift == "cli":
+        adapter.cli_version = "injected-v2"
+    elif drift == "event_schema":
+        adapter.event_schema_version = "injected-schema-v2"
+    elif drift == "diff":
+        current_diff = "changed diff..."
+    elif drift == "prompt":
+        db.execute("UPDATE pull_request SET title='changed title' WHERE id=?", (pid,))
+        db.commit()
+
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: current_diff,
+        worktree=fake_worktree,
+        adapters=[adapter],
+        prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=deps))
+    assert adapter.calls == 0
+
+
+@pytest.mark.parametrize("drift", ("schema_hint", "review_argv"))
+def test_retry_binds_actual_builtin_wire_inputs_before_runner(
+    db, monkeypatch, drift
+):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=203, title="wire", author="a",
+        head_sha="wire", base_ref="main", url="u",
+    )
+    settings_repo.update(db, codex_model="test-codex")
+    monkeypatch.setattr(
+        "server.review.vendors._cli_version",
+        lambda vendor: "codex-cli 0.144.5",
+    )
+
+    async def invalid_output_runner(*args, **kwargs):
+        return "not structured findings"
+
+    initial = CodexAdapter(runner=invalid_output_runner)
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...", worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", []), initial],
+        prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]
+
+    if drift == "schema_hint":
+        monkeypatch.setattr(
+            "server.review.vendors.PROMPT_SCHEMA_HINT", "changed schema hint"
+        )
+    else:
+        original = CodexAdapter._build_review_argv
+
+        def changed_argv(
+            self, hp, *, last_message_path, cli_version=None
+        ):
+            return [
+                *original(
+                    self, hp, last_message_path=last_message_path,
+                    cli_version=cli_version,
+                ),
+                "--changed-review-option",
+            ]
+
+        monkeypatch.setattr(CodexAdapter, "_build_review_argv", changed_argv)
+
+    calls = 0
+
+    async def must_not_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("retry runner must not be called")
+
+    retry_adapter = CodexAdapter(runner=must_not_run)
+    retry_deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...", worktree=fake_worktree,
+        adapters=[retry_adapter],
+        prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=retry_deps))
+    assert calls == 0
+
+
+def test_retry_reprobes_replaced_cli_before_vendor_runner(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=204, title="cli replacement", author="a",
+        head_sha="cli-replace", base_ref="main", url="u",
+    )
+    settings_repo.update(db, codex_model="test-codex")
+    current_version = ["codex-cli 0.144.5"]
+    probes = 0
+
+    def version_probe(vendor):
+        nonlocal probes
+        probes += 1
+        return current_version[0]
+
+    monkeypatch.setattr("server.review.vendors._cli_version", version_probe)
+
+    async def invalid_output_runner(*args, **kwargs):
+        return "not structured findings"
+
+    initial = CodexAdapter(runner=invalid_output_runner)
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...", worktree=fake_worktree,
+        adapters=[FakeAdapter("claude", []), initial],
+        prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]
+    probes_after_initial = probes
+
+    current_version[0] = "codex-cli 0.145.0"
+    calls = 0
+
+    async def must_not_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("changed CLI retry must stop before runner")
+
+    retry_deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...", worktree=fake_worktree,
+        adapters=[CodexAdapter(runner=must_not_run)],
+        prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=retry_deps))
+    assert probes > probes_after_initial
+    assert calls == 0
+
+
+def test_cli_change_between_identity_and_invocation_stops_before_runner(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=205, title="pre-call drift", author="a",
+        head_sha="pre-call", base_ref="main", url="u",
+    )
+    versions = iter(("codex-cli 0.144.5", "codex-cli 0.145.0"))
+    calls = 0
+
+    async def must_not_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not observe a changed CLI")
+
+    adapter = CodexAdapter(runner=must_not_run)
+    adapter.probe_cli_version = lambda: next(versions)
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...", worktree=fake_worktree,
+        adapters=[adapter], prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
+    assert calls == 0
+
+
+def test_retry_policy_snapshot_drift_fails_before_runner(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db, repo_id=rid, number=201, title="policy", author="a",
+        head_sha="policy", base_ref="main", url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding(
+            "claude", "a.py", 1, "high", "bug", "c", "r", 0.8
+        ),
+    )
+
+    class NoCall:
+        vendor = "codex"
+        calls = 0
+
+        async def review(self, **kwargs):
+            self.calls += 1
+
+    adapter = NoCall()
+    monkeypatch.setattr("server.config.REVIEW_DEDUPE_MODE", "enforce")
+    deps = PipelineDeps(
+        gh_diff=lambda repo, n: "diff...", worktree=fake_worktree,
+        adapters=[adapter], prescreen=lambda d, m: ("complex", 0.9, "핵심"),
+        repo_local_path="/tmp/x",
+    )
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(retry_pr(db, pr_id=pid, run_id=run_id, deps=deps))
+    assert adapter.calls == 0
 
 
 def test_retry_reruns_only_failed_vendor_into_same_run(db):
@@ -1558,8 +2758,8 @@ def test_retry_preserves_human_decision_on_retag(db):
     assert row["consensus"] == "consensus"  # 태깅은 갱신
 
 
-def test_retry_targets_validated_run_not_latest(db):
-    # 같은 head에 done run이 둘일 때 retry는 전달된 run_id만 대상으로 한다(latest 아님).
+def test_retry_rejects_target_that_is_no_longer_latest(db):
+    # API 검증 뒤 같은 head의 새 run이 생겨도 worker가 과거 run을 뒤늦게 변경하지 않는다.
     rid = repo_repo.add(db, full_name="acme/api")
     pid = pr_repo.upsert(
         db,
@@ -1602,22 +2802,22 @@ def test_retry_targets_validated_run_not_latest(db):
     )
     assert later_run != target_run and review_repo.failed_vendors(db, later_run) == []
 
-    asyncio.run(
-        retry_pr(
-            db,
-            pr_id=pid,
-            run_id=target_run,
-            deps=_retry_deps(
-                [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
-            ),
+    with pytest.raises(PipelineError, match="과거 리뷰 run"):
+        asyncio.run(
+            retry_pr(
+                db,
+                pr_id=pid,
+                run_id=target_run,
+                deps=_retry_deps(
+                    [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+                ),
+            )
         )
-    )
-    # codex finding은 검증된 target_run에 들어가고 later_run은 그대로
     assert {f["vendor"] for f in finding_repo.list_for_run(db, target_run)} == {
         "claude",
-        "codex",
     }
-    assert review_repo.failed_vendors(db, target_run) == []
+    assert review_repo.failed_vendors(db, target_run) == ["codex"]
+    assert review_repo.failed_vendors(db, later_run) == []
 
 
 def test_retry_bails_when_head_advanced_between_enqueue_and_run(db):
@@ -1655,6 +2855,121 @@ def test_retry_bails_when_head_advanced_between_enqueue_and_run(db):
     # run은 오염되지 않음: finding 그대로, codex 여전히 failed
     assert [dict(f) for f in finding_repo.list_for_run(db, run_id)] == before
     assert review_repo.failed_vendors(db, run_id) == ["codex"]
+
+
+def test_worker_retry_uses_base_to_expected_head_exact_diff(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=28,
+        title="t",
+        author="a",
+        head_sha="s28",
+        base_ref="main",
+        base_sha="base28",
+        url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8),
+        diff_text="EXACT-RETRY-DIFF",
+    )
+    seen = {}
+    deps = _retry_deps(
+        [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+    )
+    deps.gh_diff = lambda *args: (_ for _ in ()).throw(
+        AssertionError("strict worker retry must not use live PR diff")
+    )
+    deps.gh_compare_diff = lambda repo, base, head: (
+        seen.update(repo=repo, base=base, head=head) or "EXACT-RETRY-DIFF"
+    )
+
+    asyncio.run(
+        retry_pr(
+            db,
+            pr_id=pid,
+            run_id=run_id,
+            deps=deps,
+            expected_head_sha="s28",
+        )
+    )
+
+    assert seen == {"repo": "acme/api", "base": "base28", "head": "s28"}
+    assert review_repo.failed_vendors(db, run_id) == []
+
+
+def test_retry_fails_if_failed_vendor_is_disabled_after_enqueue(db):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=26,
+        title="t",
+        author="a",
+        head_sha="s26",
+        base_ref="main",
+        url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8),
+    )
+    repo_repo.update(db, rid, vendor_codex_on=0)
+
+    with pytest.raises(PipelineError, match="new_full_run_required"):
+        asyncio.run(
+            retry_pr(
+                db,
+                pr_id=pid,
+                run_id=run_id,
+                deps=_retry_deps(
+                    [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+                ),
+            )
+        )
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]
+
+
+def test_retry_rolls_back_vendor_success_when_finding_persistence_fails(db, monkeypatch):
+    rid = repo_repo.add(db, full_name="acme/api")
+    pid = pr_repo.upsert(
+        db,
+        repo_id=rid,
+        number=27,
+        title="t",
+        author="a",
+        head_sha="s27",
+        base_ref="main",
+        url="u",
+    )
+    run_id = _partial_fail_run(
+        db,
+        pid=pid,
+        claude_finding=Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8),
+    )
+
+    def fail_add(*args, **kwargs):
+        raise RuntimeError("persist boom")
+
+    monkeypatch.setattr("server.pipeline.finding_repo.add", fail_add)
+    with pytest.raises(PipelineError, match="persist boom"):
+        asyncio.run(
+            retry_pr(
+                db,
+                pr_id=pid,
+                run_id=run_id,
+                deps=_retry_deps(
+                    [Finding("codex", "b.py", 2, "low", "style", "c2", "r2", 0.4)]
+                ),
+            )
+        )
+
+    assert review_repo.failed_vendors(db, run_id) == ["codex"]
+    assert {f["vendor"] for f in finding_repo.list_for_run(db, run_id)} == {"claude"}
 
 
 def test_retry_vendor_refail_stays_failed_and_retryable(db):
@@ -1699,6 +3014,28 @@ def test_build_prompt_with_block():
     assert "## 외부 컨텍스트" in out and "hi" in out
 
 
+def test_build_prompt_lists_only_added_lines_as_allowed_finding_locations():
+    out = _build_prompt(
+        {"number": 3, "title": "T", "author": "u"},
+        "diff",
+        "",
+        owned_changed_lines={"src/a.py": frozenset({3, 4, 5, 9})},
+    )
+
+    assert '"src/a.py": 3-5,9' in out
+    assert "허용되는 실제 추가 라인" in out
+    assert "허용 목록에 없는 위치" in out
+
+
+def test_build_prompt_without_owned_lines_requires_empty_findings():
+    out = _build_prompt(
+        {"number": 3, "title": "T", "author": "u"}, "diff", "",
+        owned_changed_lines={},
+    )
+
+    assert "추가된 RIGHT-side 라인 없음 — finding을 만들지 말 것" in out
+
+
 def _seed_single_pr(db, number=7, sha="sha1"):
     rid = repo_repo.add(db, full_name="acme/api")
     return pr_repo.upsert(
@@ -1713,7 +3050,7 @@ def _seed_single_pr(db, number=7, sha="sha1"):
     )
 
 
-def test_pipeline_saves_vendor_raw_output(db, tmp_path, monkeypatch):
+def test_pipeline_does_not_store_successful_vendor_raw_output(db, tmp_path, monkeypatch):
     monkeypatch.setattr("server.config.RAW_DIR", tmp_path / "raw")
     pid = _seed_single_pr(db)
 
@@ -1721,8 +3058,7 @@ def test_pipeline_saves_vendor_raw_output(db, tmp_path, monkeypatch):
         vendor = "claude"
 
         async def review(self, *, raw_sink=None, **kw):
-            if raw_sink:
-                raw_sink("RAW CLAUDE STDOUT")
+            assert raw_sink is None
             return [Finding("claude", "a.py", 1, "high", "bug", "c", "r", 0.8)]
 
     deps = PipelineDeps(
@@ -1734,14 +3070,11 @@ def test_pipeline_saves_vendor_raw_output(db, tmp_path, monkeypatch):
     )
     run_id = asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     vr = db.execute("SELECT * FROM vendor_result WHERE run_id=?", (run_id,)).fetchone()
-    assert vr["raw_path"]
-    from pathlib import Path as _P
-
-    assert "RAW CLAUDE STDOUT" in _P(vr["raw_path"]).read_text(encoding="utf-8")
+    assert vr["raw_path"] is None
+    assert not (tmp_path / "raw").exists()
 
 
-def test_pipeline_saves_raw_even_when_vendor_parse_fails(db, tmp_path, monkeypatch):
-    # 파싱 실패(벤더 failed)일수록 원문이 진단에 필요 — 실패 경로에서도 raw 보존.
+def test_pipeline_does_not_store_raw_when_vendor_parse_fails(db, tmp_path, monkeypatch):
     monkeypatch.setattr("server.config.RAW_DIR", tmp_path / "raw")
     pid = _seed_single_pr(db)
 
@@ -1749,9 +3082,8 @@ def test_pipeline_saves_raw_even_when_vendor_parse_fails(db, tmp_path, monkeypat
         vendor = "claude"
 
         async def review(self, *, raw_sink=None, **kw):
-            if raw_sink:
-                raw_sink("garbled non-json output")
-            raise ValueError("응답에 JSON 블록이 없음")
+            assert raw_sink is None
+            raise ValueError("provider body SECRET must not persist")
 
     deps = PipelineDeps(
         gh_diff=lambda repo, n: "diff...",
@@ -1760,10 +3092,10 @@ def test_pipeline_saves_raw_even_when_vendor_parse_fails(db, tmp_path, monkeypat
         prescreen=lambda diff, model: ("complex", 0.9, "핵심 로직"),
         repo_local_path="/tmp/acme-api",
     )
-    with pytest.raises(PipelineError):  # 전 벤더 실패 → run failed
+    with pytest.raises(PipelineError):
         asyncio.run(review_pr(db, pr_id=pid, trigger="manual", deps=deps))
     vr = db.execute("SELECT * FROM vendor_result").fetchone()
-    assert vr["status"] == "failed" and vr["raw_path"]
-    from pathlib import Path as _P
-
-    assert "garbled" in _P(vr["raw_path"]).read_text(encoding="utf-8")
+    assert vr["status"] == "failed"
+    assert vr["raw_path"] is None
+    assert "SECRET" not in (vr["error"] or "")
+    assert not (tmp_path / "raw").exists()

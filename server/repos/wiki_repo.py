@@ -113,7 +113,7 @@ def mark_generating(conn, repo_id: int) -> bool:
     return cur.rowcount == 1
 
 
-def claim_next(conn, *, worker_id: str):
+def claim_next(conn, *, worker_id: str, owner_process_id=None):
     """가장 오래된 미claim Wiki 생성 요청 하나를 원자적으로 선점한다."""
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -131,10 +131,10 @@ def claim_next(conn, *, worker_id: str):
             return None
         conn.execute(
             """UPDATE wiki_page
-               SET locked_by=?, locked_at=datetime('now'), attempts=attempts+1,
-                   next_run_at=NULL
+               SET locked_by=?, locked_at=datetime('now'), owner_process_id=?,
+                   attempts=attempts+1, next_run_at=NULL
                WHERE repo_id=? AND status='generating' AND locked_at IS NULL""",
-            (worker_id, row["repo_id"]),
+            (worker_id, owner_process_id, row["repo_id"]),
         )
         conn.commit()
     except sqlite3.OperationalError:
@@ -143,28 +143,38 @@ def claim_next(conn, *, worker_id: str):
     return row["repo_id"]
 
 
-def save(conn, repo_id: int, *, page: dict, sources: list, source_sha: str) -> None:
-    conn.execute(
+def save(
+    conn, repo_id: int, *, page: dict, sources: list, source_sha: str,
+    owner_process_id=None
+) -> None:
+    cur = conn.execute(
         """INSERT INTO wiki_page
-             (repo_id, status, content, sources, source_sha, generated_at, error, updated_at)
-           VALUES (?, 'ready', ?, ?, ?, datetime('now'), NULL, datetime('now'))
+             (repo_id, status, content, sources, source_sha, generated_at,
+              error, owner_process_id, updated_at)
+           VALUES (?, 'ready', ?, ?, ?, datetime('now'), NULL, NULL, datetime('now'))
            ON CONFLICT(repo_id) DO UPDATE SET
              status='ready', content=excluded.content, sources=excluded.sources,
              source_sha=excluded.source_sha, generated_at=excluded.generated_at,
              error=NULL, next_run_at=NULL, locked_by=NULL, locked_at=NULL,
-             updated_at=excluded.updated_at""",
+             owner_process_id=NULL, updated_at=excluded.updated_at
+           WHERE ? IS NULL OR wiki_page.owner_process_id=?""",
         (
             repo_id,
             json.dumps(page, ensure_ascii=False),
             json.dumps(sources, ensure_ascii=False),
             source_sha,
+            owner_process_id,
+            owner_process_id,
         ),
     )
+    if cur.rowcount != 1:
+        raise RuntimeError(f"wiki {repo_id} process lease lost")
     conn.commit()
 
 
 def schedule_retry(
-    conn, repo_id: int, error: str, *, base_seconds: int = RETRY_BASE_SECONDS
+    conn, repo_id: int, error: str, *, base_seconds: int = RETRY_BASE_SECONDS,
+    owner_process_id=None
 ) -> bool:
     """현재 attempt가 남아 있으면 지수 backoff로 다시 대기시키고 True를 반환한다."""
     row = conn.execute(
@@ -176,21 +186,26 @@ def schedule_retry(
     cur = conn.execute(
         """UPDATE wiki_page
            SET status='generating', error=?, next_run_at=datetime('now', ?),
-               locked_by=NULL, locked_at=NULL, updated_at=datetime('now')
-           WHERE repo_id=? AND status='generating'""",
-        (error[:1000], f"+{delay} seconds", repo_id),
+               locked_by=NULL, locked_at=NULL, owner_process_id=NULL,
+               updated_at=datetime('now')
+           WHERE repo_id=? AND status='generating'
+             AND (? IS NULL OR owner_process_id=?)""",
+        (error[:1000], f"+{delay} seconds", repo_id,
+         owner_process_id, owner_process_id),
     )
     conn.commit()
     return cur.rowcount == 1
 
 
-def mark_failed(conn, repo_id: int, error: str) -> None:
+def mark_failed(conn, repo_id: int, error: str, *, owner_process_id=None) -> None:
     conn.execute(
         """INSERT INTO wiki_page (repo_id, status, error, updated_at)
            VALUES (?, 'failed', ?, datetime('now'))
            ON CONFLICT(repo_id) DO UPDATE SET
              status='failed', error=excluded.error, next_run_at=NULL,
-             locked_by=NULL, locked_at=NULL, updated_at=excluded.updated_at""",
-        (repo_id, error[:1000]),
+             locked_by=NULL, locked_at=NULL, owner_process_id=NULL,
+             updated_at=excluded.updated_at
+           WHERE ? IS NULL OR wiki_page.owner_process_id=?""",
+        (repo_id, error[:1000], owner_process_id, owner_process_id),
     )
     conn.commit()

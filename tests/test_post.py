@@ -28,6 +28,9 @@ class HealthyGh:
         # 기본은 인라인 대상 라인 없음 → review 본문만(대부분 테스트는 본문/호출수만 검증).
         return ""
 
+    def get_pr_review_context(self, repo, number):
+        return {"reviews": [], "inline_comments": [], "conversation_comments": []}
+
 
 def test_post_only_approved_findings(tmp_path):
     conn = connect(tmp_path / "p.db")
@@ -81,16 +84,73 @@ def test_post_only_approved_findings(tmp_path):
         rationale="r2",
         confidence=0.2,
     )
+    f_excluded = finding_repo.add(
+        conn,
+        run_id=run_id,
+        vendor="claude",
+        file="unchanged.py",
+        line=9,
+        severity="high",
+        category="bug",
+        claim="must not post",
+        rationale="outside changed lines",
+        confidence=0.9,
+        scope_status="would_reject",
+        posting_eligible=False,
+    )
     finding_repo.set_status(conn, f_ok, "approved")
     finding_repo.set_status(conn, f_no, "dismissed")
+    finding_repo.set_status(conn, f_excluded, "approved")
 
     r = client.post(f"/api/runs/{run_id}/post")
     assert r.status_code == 200
     # 승인분만 review 본문에 포함
     assert created and "a.py:1" in created[0][2]
     assert "b.py:2" not in created[0][2]
+    assert "must not post" not in created[0][2]
+    assert finding_repo.get(conn, f_excluded)["status"] == "approved"
     # 포스팅된 finding은 status=posted
     assert finding_repo.get(conn, f_ok)["status"] == "posted"
+
+
+def test_post_rejects_past_run_even_when_head_is_unchanged(tmp_path):
+    conn = connect(tmp_path / "past-post.db")
+    init_schema(conn)
+    created = []
+
+    class FakeGh(HealthyGh):
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
+            return {"id": 1, "html_url": "https://x/1"}
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    client = TestClient(app)
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn, repo_id=rid, number=15, title="t", author="a", head_sha="same",
+        base_ref="main", url="u",
+    )
+    old_run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="same", trigger="manual", effort="medium"
+    )
+    fid = finding_repo.add(
+        conn, run_id=old_run, vendor="claude", file="a.py", line=1,
+        severity="high", category="bug", claim="old", rationale="r", confidence=0.9,
+    )
+    finding_repo.set_status(conn, fid, "approved")
+    newer = review_repo.create_run(
+        conn, pr_id=pid, head_sha="same", trigger="manual", effort="medium"
+    )
+    review_repo.finish_run(conn, newer, "done")
+
+    response = client.post(f"/api/runs/{old_run}/post")
+
+    assert response.status_code == 409
+    assert "과거 리뷰 run" in response.json()["detail"]
+    assert created == []
+    assert finding_repo.get(conn, fid)["status"] == "approved"
 
 
 def test_post_includes_edited_findings_with_edited_text(tmp_path):
@@ -341,6 +401,53 @@ def test_post_updates_existing_review_in_place(tmp_path):
     ).fetchall()
     assert rows[0]["superseded_at"] is not None  # 이전 행 supersede
     assert rows[1]["superseded_at"] is None  # 새 행 활성
+
+
+def test_post_db_failure_rolls_back_supersede_and_finding_status(tmp_path, monkeypatch):
+    from server.repos import posted_repo
+
+    conn = connect(tmp_path / "post-rollback.db")
+    init_schema(conn)
+
+    class FakeGh(HealthyGh):
+        def update_review(self, repo, number, review_id, body):
+            return {"id": int(review_id), "html_url": f"https://x/{review_id}"}
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    client = TestClient(app)
+
+    rid = repo_repo.add(conn, full_name="acme/api")
+    pid = pr_repo.upsert(
+        conn, repo_id=rid, number=16, title="t", author="a", head_sha="s1",
+        base_ref="main", url="u",
+    )
+    old_run = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    old_post = posted_repo.add(
+        conn, run_id=old_run, vendor="claude", github_comment_id="7",
+        url="https://x/7", marker="m", body="old", head_sha="s1", kind="review",
+    )
+    run_id = review_repo.create_run(
+        conn, pr_id=pid, head_sha="s1", trigger="manual", effort="medium"
+    )
+    fid = finding_repo.add(
+        conn, run_id=run_id, vendor="claude", file="a.py", line=1,
+        severity="high", category="bug", claim="new", rationale="r", confidence=0.9,
+    )
+    finding_repo.set_status(conn, fid, "approved")
+
+    monkeypatch.setattr(
+        posted_repo, "add", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db full"))
+    )
+    with pytest.raises(RuntimeError, match="db full"):
+        client.post(f"/api/runs/{run_id}/post")
+
+    assert conn.execute(
+        "SELECT superseded_at FROM posted_comment WHERE id=?", (old_post,)
+    ).fetchone()["superseded_at"] is None
+    assert finding_repo.get(conn, fid)["status"] == "approved"
 
 
 def test_post_reposting_same_run_keeps_previously_posted_findings(tmp_path):
@@ -611,6 +718,231 @@ def _run_with_approved(conn, *, vendors=("claude",)):
         )
         finding_repo.set_status(conn, fid, "approved")
     return pid, run_id
+
+
+def test_post_blocks_technical_duplicate_found_in_existing_github_review(tmp_path):
+    conn = connect(tmp_path / "duplicate.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    conn.execute(
+        "UPDATE finding SET claim=?, rationale=? WHERE run_id=?",
+        (
+            "인터셉터 이관으로 OpenAPI에서 X-Api-Key 헤더가 사라진다",
+            "Springdoc Swagger 문서에서 X-Api-Key가 누락되어 클라이언트가 401을 받는다",
+            run_id,
+        ),
+    )
+    conn.commit()
+    created = []
+
+    class FakeGh(HealthyGh):
+        def get_pr_review_context(self, repo, number):
+            return {
+                "reviews": [{
+                    "id": "existing",
+                    "body": "Keep the generated OpenAPI contract: Springdoc Swagger must include X-Api-Key or clients receive 401.",
+                    "author": {"login": "other-reviewer"},
+                }],
+                "inline_comments": [],
+                "conversation_comments": [],
+            }
+
+        def create_review(self, *args):
+            created.append(args)
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    response = TestClient(app).post(f"/api/runs/{run_id}/post")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["duplicates"][0]["github_id"] == "existing"
+    assert created == []
+
+
+def test_post_adopts_remote_review_after_local_crash_gap(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "post-adopt.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+
+    class FakeGh(HealthyGh):
+        def __init__(self):
+            self.created = []
+
+        def create_review(self, repo, number, commit_id, body, comments):
+            review = {"id": 77, "html_url": "https://x/77", "body": body}
+            self.created.append(review)
+            return review
+
+        def list_pr_reviews(self, repo, number):
+            return list(self.created)
+
+    gh = FakeGh()
+    real_mark = __import__(
+        "server.repos.post_operation_repo", fromlist=["mark_remote"]
+    ).mark_remote
+    monkeypatch.setattr(
+        "server.api.post_operation_repo.mark_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db crash")),
+    )
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: gh
+    with pytest.raises(RuntimeError, match="db crash"):
+        TestClient(app).post(f"/api/runs/{run_id}/post")
+
+    monkeypatch.setattr("server.api.post_operation_repo.mark_remote", real_mark)
+    conn.execute(
+        "UPDATE github_post_operation SET locked_at=datetime('now', '-21 minutes')"
+    )
+    conn.commit()
+    response = TestClient(app).post(f"/api/runs/{run_id}/post")
+
+    assert response.status_code == 200
+    assert len(gh.created) == 1
+    assert conn.execute(
+        "SELECT status FROM github_post_operation"
+    ).fetchone()[0] == "succeeded"
+
+
+def test_finding_cannot_change_while_post_operation_is_pending(tmp_path):
+    conn = connect(tmp_path / "post-cas.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    finding_id = conn.execute(
+        "SELECT id FROM finding WHERE run_id=?", (run_id,)
+    ).fetchone()[0]
+
+    class FailingGh(HealthyGh):
+        def create_review(self, *args):
+            raise GitHubCliError(
+                exit_code=1, message="temporary", stderr="temporary",
+                command_kind="create_review"
+            )
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FailingGh()
+    assert TestClient(app).post(f"/api/runs/{run_id}/post").status_code == 502
+
+    response = TestClient(app).patch(
+        f"/api/findings/{finding_id}", json={"status": "dismissed"}
+    )
+    assert response.status_code == 409
+
+
+def test_post_operation_allows_only_one_cross_process_claim(tmp_path):
+    from server.repos import post_operation_repo
+
+    conn = connect(tmp_path / "claim.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    fid = conn.execute("SELECT id FROM finding WHERE run_id=?", (run_id,)).fetchone()[0]
+    operation = post_operation_repo.prepare(
+        conn, run_id=run_id, vendor="claude", body="body",
+        all_ids=[fid], new_ids=[fid],
+    )
+
+    assert post_operation_repo.claim(conn, operation["id"], "process-a") is True
+    assert post_operation_repo.claim(conn, operation["id"], "process-b") is False
+    conn.execute(
+        "UPDATE github_post_operation SET locked_at=datetime('now', '-21 minutes')"
+    )
+    conn.commit()
+    assert post_operation_repo.claim(conn, operation["id"], "process-b") is True
+
+
+def test_post_ignores_resolved_inline_duplicate(tmp_path):
+    conn = connect(tmp_path / "resolved-duplicate.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    created = []
+
+    class FakeGh(HealthyGh):
+        def get_pr_review_context(self, repo, number):
+            return {
+                "reviews": [],
+                "inline_comments": [{
+                    "id": "resolved",
+                    "body": "claude claim",
+                    "is_resolved": True,
+                }],
+                "conversation_comments": [],
+            }
+
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
+            return {"id": 1, "html_url": "https://x/1"}
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    response = TestClient(app).post(f"/api/runs/{run_id}/post")
+
+    assert response.status_code == 200 and len(created) == 1
+
+
+def test_post_rejects_remote_head_change_immediately_before_mutation(tmp_path):
+    conn = connect(tmp_path / "remote-head.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    created = []
+
+    class FakeGh(HealthyGh):
+        def get_pr_head(self, repo, number):
+            return "new-head"
+
+        def create_review(self, *args):
+            created.append(args)
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    response = TestClient(app).post(f"/api/runs/{run_id}/post")
+
+    assert response.status_code == 409 and created == []
+
+
+def test_post_rejects_concurrent_request_for_same_run(tmp_path):
+    from server.api import _post_lock
+
+    conn = connect(tmp_path / "post-lock.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: HealthyGh()
+    lock = _post_lock(run_id)
+    lock.acquire()
+    try:
+        response = TestClient(app).post(f"/api/runs/{run_id}/post")
+    finally:
+        lock.release()
+
+    assert response.status_code == 409
+
+
+def test_post_ignores_current_almighty_review_during_duplicate_scan(tmp_path):
+    conn = connect(tmp_path / "self-review.db")
+    init_schema(conn)
+    _, run_id = _run_with_approved(conn)
+    created = []
+
+    class FakeGh(HealthyGh):
+        def get_pr_review_context(self, repo, number):
+            return {
+                "reviews": [{
+                    "id": "self",
+                    "body": "<!-- almighty-review [claude] --> claude claim",
+                    "author": {"login": "me"},
+                }],
+                "inline_comments": [],
+                "conversation_comments": [],
+            }
+
+        def create_review(self, repo, number, commit_id, body, comments):
+            created.append(body)
+            return {"id": 1, "html_url": "https://x/1"}
+
+    app.dependency_overrides[get_conn] = lambda: conn
+    app.dependency_overrides[get_gh] = lambda: FakeGh()
+    response = TestClient(app).post(f"/api/runs/{run_id}/post")
+
+    assert response.status_code == 200 and len(created) == 1
 
 
 def test_post_health_success(tmp_path):

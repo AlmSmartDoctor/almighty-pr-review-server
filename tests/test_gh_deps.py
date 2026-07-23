@@ -29,7 +29,7 @@ def test_build_deps_filters_verify_adapters_by_vendor_toggle(monkeypatch):
     # OFF 벤더를 refuter로 exec하면 매번 실패해 검증이 조용히 무력화된다.
     captured = {}
 
-    def fake_make_verifier(adapters, worktree, clone=None):
+    def fake_make_verifier(adapters, worktree, clone=None, **kwargs):
         captured["vendors"] = [a.vendor for a in adapters]
         return "verifier"
 

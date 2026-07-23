@@ -2,6 +2,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -10,6 +11,16 @@ from server import config
 
 class WorktreePrepareError(RuntimeError):
     pass
+
+
+_REPO_LOCKS: dict[str, threading.RLock] = {}
+_REPO_LOCKS_GUARD = threading.Lock()
+
+
+def _repo_lock(repo: Path) -> threading.RLock:
+    key = str(Path(repo).resolve())
+    with _REPO_LOCKS_GUARD:
+        return _REPO_LOCKS.setdefault(key, threading.RLock())
 
 
 def _clone_dir(full_name: str) -> Path:
@@ -23,24 +34,27 @@ def persistent_clone(clone, full_name: str) -> Path:
     prepared_worktree가 담당하므로 여기선 clone 존재만 보장한다. worker는 job을
     순차 처리하므로 같은 clone에 동시 git 작업은 없다(락 불필요)."""
     dest = _clone_dir(full_name)
-    if (dest / ".git").exists():
-        prune_orphans(dest)  # 크래시로 남은 orphan worktree 자가 정리
+    with _repo_lock(dest):
+        if (dest / ".git").exists():
+            prune_orphans(dest)  # 크래시로 남은 orphan worktree 자가 정리
+            return dest
+        config.CLONE_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(dest, ignore_errors=True)  # .git 없는 반쪽 clone 잔재 제거
+        clone(full_name, str(dest))
         return dest
-    config.CLONE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(dest, ignore_errors=True)  # .git 없는 반쪽 clone 잔재 제거
-    clone(full_name, str(dest))
-    return dest
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+        timeout=config.GH_TIMEOUT_SEC,
     )
 
 
 def _try_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+        timeout=config.GH_TIMEOUT_SEC,
     )
 
 
@@ -50,6 +64,7 @@ def _has_commit(repo: Path, sha: str) -> bool:
             ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
             capture_output=True,
             text=True,
+            timeout=config.GH_TIMEOUT_SEC,
         ).returncode
         == 0
     )
@@ -62,30 +77,42 @@ def prepared_worktree(repo: Path, sha: str, pr_number: int | None = None):
     tmp = Path(tempfile.mkdtemp(prefix="almighty-wt-"))
     wt = tmp / "wt"
     try:
-        if not _has_commit(repo, sha):
-            errors = []
-            if pr_number is not None:
-                ref = f"+pull/{pr_number}/head:refs/almighty/pr/{pr_number}"
-                res = _try_git(repo, "fetch", "origin", ref, "--depth=1")
-                if res.returncode != 0:
-                    errors.append(f"PR head fetch failed: {res.stderr.strip()}")
+        # 같은 bare/source clone의 fetch·worktree metadata 갱신만 직렬화하고, 실제 벤더
+        # 리뷰(yield)는 서로 다른 worktree에서 병렬 실행한다.
+        with _repo_lock(repo):
             if not _has_commit(repo, sha):
-                res = _try_git(repo, "fetch", "origin", sha, "--depth=1")
-                if res.returncode != 0:
-                    errors.append(f"sha fetch failed: {res.stderr.strip()}")
-            if not _has_commit(repo, sha):
-                msg = (
-                    "; ".join(e for e in errors if e) or "commit not found after fetch"
-                )
-                raise WorktreePrepareError(f"PR head fetch failed for {sha}: {msg}")
-        _git(repo, "worktree", "add", "--detach", str(wt), sha)
+                errors = []
+                if pr_number is not None:
+                    ref = f"+pull/{pr_number}/head:refs/almighty/pr/{pr_number}"
+                    res = _try_git(repo, "fetch", "origin", ref, "--depth=1")
+                    if res.returncode != 0:
+                        errors.append(f"PR head fetch failed: {res.stderr.strip()}")
+                if not _has_commit(repo, sha):
+                    res = _try_git(repo, "fetch", "origin", sha, "--depth=1")
+                    if res.returncode != 0:
+                        errors.append(f"sha fetch failed: {res.stderr.strip()}")
+                if not _has_commit(repo, sha):
+                    msg = (
+                        "; ".join(e for e in errors if e) or "commit not found after fetch"
+                    )
+                    raise WorktreePrepareError(f"PR head fetch failed for {sha}: {msg}")
+            _git(repo, "worktree", "add", "--detach", str(wt), sha)
         yield wt
+    except subprocess.TimeoutExpired as exc:
+        raise WorktreePrepareError(
+            f"git {exc.cmd[-1] if exc.cmd else 'operation'} timed out"
+        ) from exc
     finally:
-        subprocess.run(
-            ["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
-            capture_output=True,
-            text=True,
-        )
+        with _repo_lock(repo):
+            try:
+                subprocess.run(
+                    ["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                    capture_output=True,
+                    text=True,
+                    timeout=config.GH_TIMEOUT_SEC,
+                )
+            except subprocess.TimeoutExpired:
+                pass
         shutil.rmtree(tmp, ignore_errors=True)  # ★개정: rm -rf 서브프로세스 대신
 
 
@@ -99,29 +126,30 @@ def _fetch_base_revision(repo: Path, base_ref: str, base_sha: str = "") -> None:
     ):
         return
     try:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "fetch",
-                "origin",
-                f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
-                "--depth=1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=config.GH_TIMEOUT_SEC,
-        )
-        if re.fullmatch(r"[0-9a-fA-F]{40,64}", base_sha) and not _has_commit(
-            repo, base_sha
-        ):
+        with _repo_lock(repo):
             subprocess.run(
-                ["git", "-C", str(repo), "fetch", "origin", base_sha, "--depth=1"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "fetch",
+                    "origin",
+                    f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
+                    "--depth=1",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=config.GH_TIMEOUT_SEC,
             )
+            if re.fullmatch(r"[0-9a-fA-F]{40,64}", base_sha) and not _has_commit(
+                repo, base_sha
+            ):
+                subprocess.run(
+                    ["git", "-C", str(repo), "fetch", "origin", base_sha, "--depth=1"],
+                    capture_output=True,
+                    text=True,
+                    timeout=config.GH_TIMEOUT_SEC,
+                )
     except (OSError, subprocess.TimeoutExpired):
         pass  # provider가 정확한 base revision 미도달을 error로 self-degrade한다.
 
@@ -156,6 +184,10 @@ def checkout(
 
 def prune_orphans(repo: Path) -> None:
     """실패/크래시로 남은 orphan worktree 정리(영구 clone 재사용 직전 호출)."""
-    subprocess.run(
-        ["git", "-C", str(repo), "worktree", "prune"], capture_output=True, text=True
-    )
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "prune"],
+            capture_output=True, text=True, timeout=config.GH_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        pass

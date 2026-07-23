@@ -19,8 +19,10 @@ const REFRESH_MS = 5 * 60_000;
 
 export function EnvStatus({
   load = api.deepHealth,
+  className,
 }: {
   load?: () => Promise<DeepHealth>;
+  className?: string;
 }) {
   const [health, setHealth] = useState<DeepHealth | null>(null);
   const [unreachable, setUnreachable] = useState(false);
@@ -73,18 +75,27 @@ export function EnvStatus({
 
   return (
     <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
       title={(!ok && health?.gh.error) || undefined}
-      className="mt-auto flex items-center gap-2 border-t border-border px-3 pt-3 text-[11.5px] text-muted-foreground max-md:hidden"
+      className={cn(
+        "mt-auto flex items-center gap-2 border-t border-border px-3 pt-3 text-[11.5px] font-medium text-muted-foreground",
+        className,
+      )}
     >
       <span
+        aria-hidden="true"
         className={cn(
           "size-2 shrink-0 rounded-full",
-          ok || pending
-            ? "bg-ok shadow-[0_0_0_3px_var(--color-ok-soft)]"
-            : "bg-danger shadow-[0_0_0_3px_var(--color-danger-soft)]",
+          pending
+            ? "animate-pulse bg-warn shadow-[0_0_0_3px_var(--color-warn-soft)]"
+            : ok
+              ? "bg-ok shadow-[0_0_0_3px_var(--color-ok-soft)]"
+              : "bg-danger shadow-[0_0_0_3px_var(--color-danger-soft)]",
         )}
       />
-      {label}
+      <span className="truncate">{label}</span>
     </div>
   );
 }

@@ -7,6 +7,18 @@ from dataclasses import dataclass
 from server import config
 
 
+_PR_REVIEW_CONTEXT_QUERY = """query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){pullRequest(number:$number){
+    head_sha:headRefOid
+    reviews(last:20){nodes{id state body submitted_at:submittedAt author{login __typename}}}
+    reviewThreads(last:30){nodes{is_resolved:isResolved comments(last:10){nodes{
+      id body created_at:createdAt path line original_line:originalLine author{login __typename}
+    }}}}
+    comments(last:20){nodes{id body created_at:createdAt author{login __typename}}}
+  }}
+}"""
+
+
 @dataclass
 class PrInfo:
     number: int
@@ -23,7 +35,7 @@ class PrInfo:
     base_sha: str = ""
 
 
-def _default_runner(args: list[str], *, env=None, input=None) -> str:
+def _default_runner(args: list[str], *, env=None, input=None, timeout=None) -> str:
     # env·input을 실제로 전달한다(정규화된 env 토큰 주입 + create_review의 stdin JSON
     # 페이로드 --input -). 이전엔 **kw를 받기만 하고 흘려버려 stdin이 유실됐다.
     # timeout 없으면 네트워크 행 한 번에 폴러/워커가 조용히 영구 정지한다.
@@ -34,7 +46,7 @@ def _default_runner(args: list[str], *, env=None, input=None) -> str:
         text=True,
         env=env,
         input=input,
-        timeout=config.GH_TIMEOUT_SEC,
+        timeout=timeout if timeout is not None else config.GH_TIMEOUT_SEC,
     ).stdout
 
 
@@ -136,12 +148,22 @@ class GhClient:
         self._run = runner
         self._env = env
 
-    def _call(self, args: list[str], *, kind: str, stdin: str | None = None) -> str:
+    def _call(
+        self,
+        args: list[str],
+        *,
+        kind: str,
+        stdin: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> str:
         env = _normalized_env(self._env)
+        kwargs = {"env": env}
+        if stdin is not None:
+            kwargs["input"] = stdin
+        if timeout_sec is not None:
+            kwargs["timeout"] = timeout_sec
         try:
-            if stdin is None:
-                return self._run(args, env=env)
-            return self._run(args, env=env, input=stdin)
+            return self._run(args, **kwargs)
         except subprocess.CalledProcessError as e:
             stderr = _redact(e.stderr, env)
             stdout = _redact(
@@ -230,6 +252,87 @@ class GhClient:
             ],
             kind="compare_diff",
         )
+
+    def get_pr_review_context(self, repo: str, number: int) -> dict:
+        """GraphQL 한 번으로 현재 PR의 최신 리뷰·thread·대화 댓글을 제한 조회한다."""
+        owner, separator, name = repo.partition("/")
+        if not separator or not owner or not name:
+            return {"reviews": [], "inline_comments": [], "conversation_comments": []}
+        out = self._call(
+            [
+                "gh", "api", "graphql",
+                "-f", f"query={_PR_REVIEW_CONTEXT_QUERY}",
+                "-F", f"owner={owner}",
+                "-F", f"name={name}",
+                "-F", f"number={number}",
+            ],
+            kind="get_pr_review_context",
+            timeout_sec=5,
+        )
+        data = json.loads(out)
+        if not isinstance(data, dict) or data.get("errors"):
+            raise RuntimeError("GitHub GraphQL review context query failed")
+        pull = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+        reviews = ((pull.get("reviews") or {}).get("nodes") or [])
+        conversation = ((pull.get("comments") or {}).get("nodes") or [])
+        inline = []
+        for thread in ((pull.get("reviewThreads") or {}).get("nodes") or []):
+            if not isinstance(thread, dict):
+                continue
+            resolved = bool(thread.get("is_resolved"))
+            for comment in ((thread.get("comments") or {}).get("nodes") or []):
+                if isinstance(comment, dict):
+                    inline.append({**comment, "is_resolved": resolved})
+        return {
+            "head_sha": pull.get("head_sha") or "",
+            "reviews": reviews if isinstance(reviews, list) else [],
+            "inline_comments": inline,
+            "conversation_comments": conversation if isinstance(conversation, list) else [],
+        }
+
+    def list_pr_reviews(self, repo: str, number: int) -> list[dict]:
+        """현재 PR의 review 요약을 최대 100개 읽는다. 컨텍스트 수집용 read-only 경로."""
+        out = self._call(
+            ["gh", "api", f"/repos/{repo}/pulls/{number}/reviews?per_page=100"],
+            kind="list_pr_reviews",
+            timeout_sec=3,
+        )
+        data = json.loads(out)
+        return data if isinstance(data, list) else []
+
+    def list_pr_review_comments(self, repo: str, number: int) -> list[dict]:
+        """현재 PR diff에 달린 inline review 댓글을 최대 100개 읽는다."""
+        out = self._call(
+            ["gh", "api", f"/repos/{repo}/pulls/{number}/comments?per_page=100"],
+            kind="list_pr_review_comments",
+            timeout_sec=3,
+        )
+        data = json.loads(out)
+        return data if isinstance(data, list) else []
+
+    def list_pr_conversation_comments(self, repo: str, number: int) -> list[dict]:
+        """현재 PR Conversation의 일반 댓글을 최대 100개 읽는다."""
+        out = self._call(
+            ["gh", "api", f"/repos/{repo}/issues/{number}/comments?per_page=100"],
+            kind="list_pr_conversation_comments",
+            timeout_sec=3,
+        )
+        data = json.loads(out)
+        return data if isinstance(data, list) else []
+
+    def get_pr_head(self, repo: str, number: int) -> str:
+        """게시 mutation 직전 원격 head를 fresh 조회한다."""
+        return self._call(
+            [
+                "gh",
+                "api",
+                f"/repos/{repo}/pulls/{number}",
+                "--jq",
+                ".head.sha",
+            ],
+            kind="get_pr_head",
+            timeout_sec=3,
+        ).strip()
 
     def preflight_user(self) -> dict:
         out = self._call(

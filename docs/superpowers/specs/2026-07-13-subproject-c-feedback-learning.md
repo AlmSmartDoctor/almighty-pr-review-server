@@ -1,7 +1,7 @@
 # Subproject C — 자가 학습 (팀 피드백 학습) Spec
 
 **작성일:** 2026-07-13
-**상태:** 1차 증분 구현 (서버 데이터 우선, hermetic). Slack·외부 신호는 후속 증분.
+**상태:** 팀 판단·Slack 반응·승인형 리뷰 규칙 구현 (hermetic core).
 
 ## 목표 (한 줄)
 
@@ -90,7 +90,9 @@ finding 한 건의 사람 판단을 다음으로 분류한다:
   write-side는 `NullMemoryStore`(seam)가 아니라 코드베이스 컨벤션인 함수 모듈 `server/repos/feedback_repo.py`로
   구체화했다(클래스 seam은 team-mode용으로 미사용 유지). 라이브(봇 토큰/서명 시크릿)는 env-only 게이트, 나머지는 hermetic.
 - **Slack 규약 수집:** 채널 메시지/규약을 별도 소스로 추가.
-- **결정 메타 강화:** 필요 시 `finding.decided_at`/`decided_by` + append-only `finding_decision` 감사
-  테이블을 추가해 시간순·리뷰어별 학습을 가능케 한다(현재는 `set_status`가 in-place 덮어쓰기라
-  편집 사실만 `edited_text` 존재로 복원 가능).
-- **웹 `/learn` 탭:** 현재 `StubSection` 플레이스홀더를 학습된 피드백 열람 UI로 교체(백엔드 주입과 독립).
+- **결정 메타 강화 [부분 구현됨]:** append-only `finding_decision` 감사 테이블이 상태가 실제로 바뀔 때
+  `from_status`/`to_status`/`decided_at`을 기록하고 `/learn`의 최근 결정 활동에 노출한다. 현재 단일 사용자
+  배포에서는 `decided_by`를 기록하지 않으며 team-mode를 재개할 때 추가한다.
+- **웹 `/learn` 탭 [구현됨]:** 레포별 판단 통계·대표 예시·최근 결정·Slack 반응을 열람한다.
+- **승인형 리뷰 규칙 [구현됨]:** 카테고리별 판단이 3건 이상이고 기각이 3건 이상·2/3 이상이면 `proposed` 규칙을 만든다. 자동 적용하지 않고 `/learn`에서 사람이 승인한 `active` 규칙만 `review_rules` ContextProvider로 해당 레포 리뷰에 주입한다. 재제안은 근거 수를 갱신하되 기존 활성/비활성 결정을 덮어쓰지 않는다.
+- **LLM Wiki Ground Truth MVP [구현됨]:** finding 집계가 아니라 레포 코드·문서·정적 DB DDL을 격리된 read-only LLM으로 분석해 도메인 지식·데이터 모델·흐름·불변식을 근거와 함께 레포별 `wiki_page` 스냅샷으로 저장하고 `/api/wiki`·`/wiki`에 노출한다. 리뷰 판단 기반 프롬프트 진화·라이브 DB introspection·지식 그래프는 후속 증분이다.

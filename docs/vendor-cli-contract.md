@@ -4,9 +4,10 @@
 `claude` / `codex` headless adapters (milestones M3.3 / M3.4). It records what was
 *empirically* proven on the real machine, not what the docs claim.
 
-- Verification date: 2026-07-08
+- Auth/isolation verification date: 2026-07-08
+- Structured telemetry recheck: 2026-07-22
 - `claude` 2.1.198 (`/Users/alm/.local/bin/claude`)
-- `codex-cli` 0.142.5 (`/opt/homebrew/bin/codex`)
+- `codex-cli` 0.144.5 (`/Users/alm/.local/bin/codex`)
 - Reference script: [`harness/default/preflight.sh`](../harness/default/preflight.sh)
 - Final preflight result: `[preflight] PASS — claude/codex 모두 auth-ok + no-global-inherit` (exit 0)
 
@@ -27,7 +28,7 @@ The spike proves the two properties that pull in opposite directions can hold
 | Structured output | `--output-format <text\|json\|stream-json>` (+ `--include-partial-messages`) | `--json` (JSONL events); `-o, --output-last-message <FILE>` (final message only); `--output-schema <FILE>` |
 | Config-dir env var | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` |
 | Model select | `--model <name>` | `-m, --model <name>` or `-c model=...` |
-| Reasoning effort | (none — effort = model choice) | `-c model_reasoning_effort=<none\|minimal\|low\|medium\|high\|xhigh>` |
+| Reasoning effort | `--effort <low\|medium\|high\|xhigh\|max>` | `-c model_reasoning_effort=<none\|minimal\|low\|medium\|high\|xhigh>` |
 | Working dir | (runs in CWD; `--add-dir` to widen) | `-C, --cd <DIR>` |
 | Outside a git repo | n/a | `--skip-git-repo-check` (REQUIRED outside a repo) |
 | Skip global config natively | `--safe-mode` (disables CLAUDE.md/skills/plugins/hooks/MCP; **auth still works**) | `--ignore-user-config` (skip `$CODEX_HOME/config.toml`, auth still uses `CODEX_HOME`); `--ignore-rules` |
@@ -38,8 +39,9 @@ to `ANTHROPIC_API_KEY`/`apiKeyHelper` only — it would break our OAuth/keychain
 `--safe-mode` is the safe native equivalent (keeps auth, drops CLAUDE.md/MCP), but the
 adapter's primary isolation mechanism is **env isolation** (below), not these flags.
 
-**codex reads stdin even with a positional prompt.** Every invocation MUST redirect
-`< /dev/null`, otherwise it hangs at 0% CPU waiting on stdin. Output flushes at the end.
+**codex reads stdin until EOF.** The server now sends the complete prompt through a PIPE and
+closes it with `communicate()`. This avoids OS `ARG_MAX` and prompt exposure in process argv;
+leaving stdin open would still hang at 0% CPU. Output flushes at the end.
 codex writes its human banner + turn transcript + `tokens used` to **stderr**; **stdout
 is only the final agent message** — so stdout parsing is clean.
 
@@ -92,10 +94,20 @@ model_reasoning_effort=<value>` is the effort knob. A bad value is rejected by t
 (`invalid_enum_value`) which enumerates the supported set: `none, minimal, low, medium,
 high, xhigh`. The adapter injects this from `HarnessProfile.effort` (driven per-repo by
 `repo.default_effort`) but ONLY when the value is in that set — an unknown value omits the
-flag so codex uses its default, never 400-failing the whole review. `claude` has NO
-reasoning/effort flag (see §1); for claude, effort = model choice.
+flag so codex uses its default, never 400-failing the whole review. Claude Code 2.1.198
+also exposes `--effort <low|medium|high|xhigh|max>`; the adapter passes only this verified
+enum and omits unknown values.
 
-### 2d. Minimal auth env allowlist
+### 2d. Vendor-isolated runtime preparation
+
+`HarnessProfile.prepare_runtime(runtime_dir=..., vendor=...)` requires an explicit vendor.
+A Codex call creates only the Codex runtime and auth symlink and must not read the Claude
+keychain. A Claude call creates only the Claude runtime and auth-only credentials and
+must not inspect Codex auth. Review/retry/verification/Wiki/prescreen callers use a
+vendor-specific temporary subdirectory; one vendor's auth-preparation failure degrades
+only that vendor execution.
+
+### 2e. Minimal auth env allowlist
 
 Because auth is injected as **files** into the isolated dirs, **no auth-specific env var
 needs to pass through.** The runtime only needs `PATH` (to locate the two binaries).
@@ -133,8 +145,8 @@ Setting `HOME` alone hides both global instruction files: claude's global memory
 
 | Field | claude | codex |
 | --- | --- | --- |
-| **argv (read-only probe)** | `claude -p "<prompt>"` (add `--permission-mode plan` / `--disallowedTools` to lock down; `--model <m>`) | `codex exec --skip-git-repo-check --sandbox read-only "<prompt>"` |
-| **stdin** | `< /dev/null` | `< /dev/null` (**mandatory** — else 0% hang) |
+| **argv (read-only probe)** | `claude -p` (`--permission-mode plan --tools "" --disable-slash-commands --model <m>` for no-tool prescreen) | `codex exec --skip-git-repo-check --sandbox read-only` |
+| **stdin** | complete prompt via PIPE, then EOF | complete prompt via PIPE, then EOF (**mandatory** — else 0% hang) |
 | **env: set** | `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR` → tmp | `HOME`, `XDG_CONFIG_HOME`, `CODEX_HOME` → tmp |
 | **env: preserve** | `PATH` | `PATH` |
 | **env: forbid** | `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` |
@@ -163,9 +175,10 @@ last_token() { awk 'NF{l=$0} END{print l}' | tr -dc 'A-Za-z' | tr 'a-z' 'A-Z'; }
 
 **One-word compliance (verified, v6 [LOW] guard):** all four probe calls obeyed
 "reply with exactly one word" — raw stdout was literally `OK`, `OK`, `CLEAN`, `CLEAN`
-(no prose), so `last_token` matched exactly. Because compliance is model-dependent, the
-adapter/preflight still echoes raw stdout+stderr on any mismatch so a future
-non-compliant reply is diagnosable rather than a silent false-negative.
+(no prose), so `last_token` matched exactly. That historical, operator-controlled spike
+used local raw output for diagnosis. Production and the current telemetry preflight never
+echo raw stdout/stderr or a non-compliant response; they emit only an allowlisted safe
+error and retain diagnosis inside the bounded transient process buffer.
 
 ---
 
@@ -201,6 +214,108 @@ rather than editing the user's real global files.
   would instead have a real `~/.claude/.credentials.json` file to symlink — the adapter must
   branch on platform.
 - **Temp-dir / extracted-secret cleanup:** the isolated `RT` contains a real OAuth token
-  (`.credentials.json`). The adapter MUST delete it per invocation (`trap 'rm -rf "$RT"' EXIT`)
-  so a plaintext token never lingers in `/tmp`; never reuse an `RT` across runs.
+  (`.credentials.json`). `HarnessProfile.runtime_credentials()` removes the selected
+  vendor credential on success, setup failure, cancellation, and timeout before the
+  enclosing temporary directory exits. Residue or unlink failure emits only the safe
+  diagnostic `runtime_cleanup_failed`; it cannot be reported as a successful vendor run.
+  When cancellation/timeout is already active, that active exception remains primary and
+  the cleanup diagnostic is attached/logged rather than masking cancellation. Never reuse
+  an `RT` across runs.
 - **python3 + macOS `security` are runtime prerequisites** of `preflight.sh`.
+
+---
+
+## 8. Structured telemetry contract (2026-07-22 recheck)
+
+The opt-in probe is `scripts/review-cli-telemetry-preflight.py --live`. It prints only
+schema-v2 JSON containing public CLI/schema versions, exit/safe-error status, reviewed
+event type/key signatures, capped unknown-name counts, booleans, and telemetry presence.
+It never prints prompts, responses, commands, paths, stdout, stderr, or dynamic unknown
+key/type names. `--output <file>` writes the same sanitized schema and leaves stdout empty.
+
+### Codex 0.144.5 — verified success
+
+Invocation additions: `--json --output-last-message <confined-file> --ephemeral
+--ignore-user-config --ignore-rules`.
+
+Observed JSONL event types for a minimal no-tool call:
+
+- `thread.started`
+- `turn.started`
+- `item.completed`
+- `turn.completed`
+
+`turn.completed.usage` contained numeric `input_tokens`, `cached_input_tokens`,
+`output_tokens`, and `reasoning_output_tokens`. The final answer was written to the
+confined `--output-last-message` file. Event bodies may contain model text, commands, and
+tool output and therefore are transient parser input only; they are not persistence data.
+
+### Claude 2.1.198 — terminal schema observed, successful billing unavailable
+
+`--output-format stream-json` requires `--verbose`. The probe observed `system`,
+`assistant`, and terminal `result` events. `result` included `is_error`,
+`api_error_status`, `duration_ms`, `num_turns`, `usage`, and `modelUsage` fields. The
+current account returned HTTP 403 for both tested aliases, so only the terminal error
+schema—not a successful structured review—was verified. Production keeps Claude in
+legacy text mode with `telemetry_status=unavailable`: `event_schema()` does not expose
+Claude 2.1.198 to production adapters. The parser can recognize that schema only when an
+explicit attestation path requests `attestation=True`; this does not activate structured
+production execution. Activation requires a separate successful live attestation,
+synthetic parser fixture, fresh review, and user-approved commit.
+
+### Bounded preflight contract
+
+- CLI version probes use a 4 KiB synchronous bounded reader; vendor probes share the
+  production concurrent bounded runner with 10 MiB stdout/stderr caps and a 180-second
+  wall-clock limit. Timeout/cancellation kills the dedicated process group, not only the
+  direct CLI process.
+- Parsers inspect at most 10 MiB / 20,000 events. Public signatures allow at most 64
+  reviewed signatures, 64-character public key names, capped unknown counts, and a
+  32 KiB total report.
+- Output/final-message overflow produces only `output_limit`,
+  `stream_truncated=true`, and the fixed report schema. Raw event bodies and partial final
+  output are discarded. Prescreen source is sent only over stdin with `--tools ""`; its
+  stdout/stderr and process group use the same bounded runner contract.
+- Each selected vendor gets only its own temporary runtime credential; Claude keychain
+  stdout is capped at 64 KiB with a 15-second timeout. Cleanup failure is represented by
+  the safe `runtime_cleanup_failed` code and cannot produce a successful preflight result.
+
+### Version and privacy rules
+
+- Structured parsers dispatch by exact CLI version/event schema. Unknown versions fall
+  back to the existing text path and mark telemetry unavailable.
+- Do not parse the human stderr `tokens used` line as a production contract.
+- Persist only allowlisted numeric/status fields. Tool commands, paths, prompt/response
+  bodies, item payloads, stdout, and stderr are forbidden.
+- Rate-limit and overload event taxonomies remain unverified and must fail to a generic
+  allowlisted safe error code rather than persisting provider text.
+
+---
+
+## 9. Plain snapshot and read-containment boundary (2026-07-22)
+
+Production review cwd is created from `git archive HEAD` and contains tracked PR-head
+files without `.git`, refs, reflogs, or unreachable objects. `git ls-tree` first rejects
+blob/file-count/total-byte overflow, then archive stdout is written through a byte-limited
+stream so the temporary tar cannot grow past its configured cap. On the SmartDoctor clone the
+snapshot preflight extracted 11,080 files / 62,433,844 bytes in about 9.2 seconds.
+
+This is **not** an OS-level read sandbox. The opt-in safe-sentinel probe
+`scripts/review-read-containment-preflight.py --live --repo <repo>` empirically returned:
+
+```json
+{"exit_code":0,"git_repo":false,"outside_readable":true,"read_containment":"unproven"}
+```
+
+Therefore:
+
+- plain snapshot prevents accidental cwd-relative Git history exploration;
+- Codex `--sandbox read-only` does not prevent absolute reads outside cwd;
+- do not claim that persistent clones, adjacent worktrees, or runtime auth files are
+  inaccessible to model-generated tools;
+- strong read containment requires a separately verified path-enforcing tool broker or
+  external runner architecture that can separate CLI credential access from tool-child
+  filesystem access.
+
+The preflight uses only a generated `SAFE_SENTINEL`; it never opens project files or
+credentials and never prints provider output, commands, or paths.
