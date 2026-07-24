@@ -21,6 +21,7 @@ from server.repos import (
     settings_repo,
 )
 from server.models import Finding
+from server.review.benchmark_attestation import BenchmarkRuntimeIdentity
 from server.review.finding_policy import (
     apply_finding_scope as _apply_finding_scope,
     apply_scope_and_duplicate_policy as _apply_scope_and_duplicate_policy,
@@ -173,7 +174,9 @@ async def review_pr(
         merge_enabled=repo["merge_enabled"],
         owner_process_id=owner_process_id,
         owner_job_id=owner_job_id,
-        policy_snapshot=policy_snapshot,
+        # Policy is finalized exactly once after the actual main-review runtime
+        # identity is known and before any main vendor call.
+        policy_snapshot=None,
     )
     try:
         await _execute_run(
@@ -331,6 +334,17 @@ async def _execute_run(
             )
             for adapter in adapters
         }
+        runtime_identity = _benchmark_runtime_identity(execution_identities)
+        bound_policy_snapshot = resolve_policy_snapshot(
+            repo, benchmark_runtime_identity=runtime_identity
+        )
+        review_repo.set_policy_snapshot(conn, run_id, bound_policy_snapshot)
+        if bound_policy_snapshot != policy_snapshot:
+            policy_snapshot = bound_policy_snapshot
+            execution_identities = {
+                vendor: _bind_policy_identity(identity, policy_snapshot)
+                for vendor, identity in execution_identities.items()
+            }
 
         snapshot_cm = deps.snapshot(wt) if deps.snapshot else nullcontext(wt)
         with snapshot_cm as review_wt:
@@ -888,6 +902,40 @@ def _vendor_execution_identity(
     return identity
 
 
+def _benchmark_runtime_identity(
+    execution_identities: dict[str, dict[str, str]],
+) -> BenchmarkRuntimeIdentity | None:
+    # A sanitized benchmark report currently describes one candidate vendor arm.
+    # Multi-vendor production runs remain observe until each arm can be attested.
+    if len(execution_identities) != 1:
+        return None
+    identity = next(iter(execution_identities.values()))
+    return BenchmarkRuntimeIdentity(
+        vendor=identity["vendor"],
+        model=identity["model"],
+        effort=identity["effort"],
+        prompt_sha256=identity["harness_config_hash"],
+        protocol_sha256=_canonical_hash(identity["protocol_version"]),
+        chunker_sha256=_canonical_hash(identity["chunker_version"]),
+        chunk_budget=MAX_INLINE_DIFF_CHARS,
+        adapter_sha256=identity["adapter_config_hash"],
+        cli_version=identity["cli_version"],
+        event_schema_sha256=_canonical_hash(identity["event_schema_version"]),
+    )
+
+
+def _bind_policy_identity(
+    identity: dict[str, str], policy_snapshot
+) -> dict[str, str]:
+    return {
+        **identity,
+        "scope_policy_mode": policy_snapshot.scope.effective_mode,
+        "dedupe_policy_mode": policy_snapshot.dedupe.effective_mode,
+        "policy_decision_hash": policy_snapshot.decision_hash,
+        "policy_config_hash": policy_snapshot.config_hash,
+    }
+
+
 def _require_retry_identity(stored, current: dict[str, str]) -> None:
     if stored is None or any(
         not isinstance(current.get(key), str) or not current[key]
@@ -1386,16 +1434,6 @@ async def _retry_failed_vendors(
     stored_policy = policy_snapshot_from_row(run)
     if stored_policy is None:
         raise NewFullRunRequired()
-    current_policy = resolve_policy_snapshot(repo)
-    if (
-        current_policy.config_hash != stored_policy.config_hash
-        or current_policy.decision_hash != stored_policy.decision_hash
-        or current_policy.cohort_key != stored_policy.cohort_key
-        or current_policy.benchmark_attestation_hash
-        != stored_policy.benchmark_attestation_hash
-    ):
-        raise NewFullRunRequired()
-
     failed = set(review_repo.failed_vendors(conn, run_id))
     adapters = [
         ad for ad in _enabled_adapters(deps.adapters, repo) if ad.vendor in failed
@@ -1474,6 +1512,18 @@ async def _retry_failed_vendors(
         )
         for adapter in adapters
     }
+    current_policy = resolve_policy_snapshot(
+        repo,
+        benchmark_runtime_identity=_benchmark_runtime_identity(execution_identities),
+    )
+    if (
+        current_policy.config_hash != stored_policy.config_hash
+        or current_policy.decision_hash != stored_policy.decision_hash
+        or current_policy.cohort_key != stored_policy.cohort_key
+        or current_policy.benchmark_attestation_hash
+        != stored_policy.benchmark_attestation_hash
+    ):
+        raise NewFullRunRequired()
     for adapter in adapters:
         _require_retry_identity(
             stored_execution[adapter.vendor], execution_identities[adapter.vendor]

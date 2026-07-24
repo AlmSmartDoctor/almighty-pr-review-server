@@ -6,7 +6,7 @@ Chunk ownership and exact duplicate shadow grouping run in `observe` mode by def
 
 Per-chunk context is selected as complete semantic blocks. Persistable chunk context is hash-bound to the diff chunk and reused for failed-chunk retry; `sensitive`/`manifest_only` payloads are prompt-only and force a full rerun instead of unsafe retry. API metadata contains only the block manifest, hashes, sizes, trust/sensitivity classes, and omission reasons—not per-chunk block text. Plain tracked-file snapshots omit `.git`, but they are defense in depth and **not OS-level read containment**.
 
-Every new `review_run` snapshots the requested/effective scope and dedupe decisions, reason, selection source, two-axis cohort key, policy/config hashes, and optional benchmark attestation hash at creation. Run-history API responses label pre-migration or partial rows as `policy_snapshot.snapshot_status=unknown`; they never infer historical policy from current settings.
+Every run that reaches a main review vendor call finalizes the requested/effective scope and dedupe decisions, reason, selection source, two-axis cohort key, policy/config hashes, and optional benchmark attestation hash exactly once before that call. Empty-diff, auto-prescreen-skip, or no-enabled-vendor runs stop before policy application and remain `policy_snapshot.snapshot_status=unknown`; run-history never infers those or legacy rows from current settings.
 
 A failed-vendor retry reuses the saved policy decision and the original random prompt fence nonce. Before any vendor runner call it requires an exact execution identity match for vendor/model/effort, prompt and harness/tool/sandbox hashes, adapter name/version/config hash, CLI/event-schema versions, protocol/chunker/policy identity, filtered diff/context hashes, and every retry chunk hash. Missing or changed identity fails closed as `new_full_run_required` with zero vendor calls. A benchmark evidence digest may be bound with `ALMIGHTY_REVIEW_BENCHMARK_ATTESTATION_HASH=<sha256>`; the digest is non-secret and an invalid value prevents startup.
 
@@ -35,7 +35,7 @@ The small checked-in fixture is a regression smoke test and intentionally cannot
 
 ## Canary and kill switches
 
-Enforcement first requires an operator attestation that the adjudicated benchmark gate passed; without it the effective mode remains `observe` even if a stored setting says `enforce`:
+Enforcement first requires an operator attestation that the adjudicated benchmark gate passed; without it the effective mode remains `observe` even if a stored setting says `enforce`. The scorer requires two distinct independent adjudicators per answer, rejects unresolved gold material, and requires a hash-committed resolver record for resolved disagreements. Immediately before the main review vendor call, the server derives the actual runtime vendor/model/effort, harness, protocol/chunker/budget, adapter, CLI, and event-schema identity and requires an exact report match. Missing/mismatched identity and multi-vendor runs remain `observe`:
 
 ```bash
 ALMIGHTY_REVIEW_POLICY_ENFORCEMENT_UNLOCKED=1
@@ -67,7 +67,7 @@ Run-specific operational information now lives in each review detail page. The d
 
 The dedicated `ALMIGHTY_INGRESS_PROFILE=webhook` profile accepts only the GitHub webhook route, requires a new DB in a mode-0700 `almighty-ingress-*` temporary workspace, and disables background loops and notifications. `ALMIGHTY_EXTERNAL_MODE=1` additionally requires a 32-character admin token and HTTPS origins; direct TLS or `X-Forwarded-Proto: https` from an explicitly trusted proxy CIDR is required. No public listener/proxy probe was run, so actual delivery remains `not_run`.
 
-Offline gates passed with 855 Python tests collected (1 skipped, 0 failed), 116 web tests, production build, `compileall`, `git diff --check`, and the synthetic benchmark smoke command. The synthetic smoke report remained `can_enforce=false` with insufficient-sample and quality/coverage/cost reasons, as designed.
+Offline gates passed with 858 Python tests collected (1 skipped, 0 failed), 117 web tests, production build, `compileall`, `git diff --check`, and the synthetic benchmark smoke command. The synthetic smoke report remained `can_enforce=false` with insufficient-sample and quality/coverage/cost reasons, as designed. Three final independent reviews found two benchmark Blockers and four pagination/operations High issues; all six were remediated, and one fresh targeted follow-up reported no remaining Blocker/High.
 
 | Evidence | Status | Scope |
 |---|---|---|
@@ -82,4 +82,4 @@ Offline gates passed with 855 Python tests collected (1 skipped, 0 failed), 116 
 | Rollout sample gate | `locked` | Remote/live paired benchmark and two-person adjudication were not run |
 | Operations dashboard | `passed` | Authenticated bounded system dashboard and per-review diagnostics; no Canary rollout controls |
 
-Tooling completion does not substitute for live rehearsal or rollout approval. Enforcement remains locked and effective behavior remains `observe`; no push, release, public probe, remote benchmark, external mutation, or rollout unlock was performed.
+Tooling completion does not substitute for live rehearsal or rollout approval. Enforcement remains locked and effective behavior remains `observe`; no release, public probe, remote benchmark, external mutation, or rollout unlock was performed.

@@ -58,6 +58,7 @@ type Dashboard = {
     success: SuccessMetric;
     latency_ms: LatencyMetric;
     vendors: VendorMetric[];
+    recent_failure_summary: { total: number; listed: number; truncated: boolean };
     recent_failures: Failure[];
   };
   active_jobs: {
@@ -150,7 +151,7 @@ export function OperationsSection({ loadRepos, loadDashboard }: Loaders) {
     </Card>
 
     {loading && !dashboard ? <LoadingState label="운영 현황을 불러오는 중입니다." /> : dashboard && <>
-      {(dashboard.summary.truncated || dashboard.active_jobs.truncated) && (
+      {(dashboard.summary.truncated || dashboard.active_jobs.truncated || dashboard.summary.recent_failure_summary.truncated) && (
         <StatusLine tone="muted" className="mb-4" announce>
           조회 상한에 도달해 일부 결과만 표시합니다. 분모와 sampled 범위를 함께 확인하세요.
         </StatusLine>
@@ -159,7 +160,7 @@ export function OperationsSection({ loadRepos, loadDashboard }: Loaders) {
         <MetricCard title="리뷰 실행" value={number(dashboard.summary.sampled_runs)} detail={counts(dashboard.summary.statuses)} />
         <MetricCard title="성공률" value={percent(dashboard.summary.success)} detail={`${dashboard.summary.success.numerator}/${dashboard.summary.success.denominator} terminal runs`} />
         <MetricCard title="실행 중 작업" value={number(dashboard.active_jobs.total)} detail={`표시 ${dashboard.active_jobs.listed}건`} />
-        <MetricCard title="최근 장애" value={number(dashboard.summary.recent_failures.length)} detail="실패·취소·벤더 누락" />
+        <MetricCard title="최근 장애" value={number(dashboard.summary.recent_failure_summary.total)} detail={`실패·취소·벤더 누락 · 표시 ${number(dashboard.summary.recent_failure_summary.listed)}건`} />
         <MetricCard title="실행 지연시간" value={formatDuration(dashboard.summary.latency_ms.p95) ?? "—"} detail={`p95 · p50 ${formatDuration(dashboard.summary.latency_ms.p50) ?? "—"} · n=${dashboard.summary.latency_ms.denominator}`} />
       </div>
 
@@ -196,7 +197,7 @@ export function OperationsSection({ loadRepos, loadDashboard }: Loaders) {
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><TriangleAlert className="size-4" /> 최근 장애</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><TriangleAlert className="size-4" /> 최근 장애</CardTitle><StatusLine inline>{dashboard.summary.recent_failure_summary.listed}/{dashboard.summary.recent_failure_summary.total}건 표시</StatusLine></CardHeader>
         <CardContent className="p-0">
           {dashboard.summary.recent_failures.length === 0 ? <div className="p-5"><Empty>선택한 기간에 실패·취소·벤더 누락이 없습니다.</Empty></div> : (
             <Table><TableHeader><TableRow><TableHead>시각</TableHead><TableHead>레포 / PR</TableHead><TableHead>실행</TableHead><TableHead>진단</TableHead></TableRow></TableHeader><TableBody>

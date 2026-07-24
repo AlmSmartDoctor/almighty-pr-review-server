@@ -51,6 +51,32 @@ def create_run(
     return cur.lastrowid
 
 
+def set_policy_snapshot(conn, run_id: int, policy_snapshot, *, commit=True) -> None:
+    policy = policy_snapshot_record(policy_snapshot)
+    cur = conn.execute(
+        """UPDATE review_run SET
+             scope_requested_mode=?, scope_effective_mode=?, scope_policy_reason=?,
+             scope_selection_source=?, dedupe_requested_mode=?,
+             dedupe_effective_mode=?, dedupe_policy_reason=?,
+             dedupe_selection_source=?, policy_cohort_key=?,
+             policy_decision_hash=?, policy_config_hash=?, benchmark_attestation_hash=?
+           WHERE id=? AND status='running' AND policy_decision_hash IS NULL""",
+        (
+            policy["scope_requested_mode"], policy["scope_effective_mode"],
+            policy["scope_policy_reason"], policy["scope_selection_source"],
+            policy["dedupe_requested_mode"], policy["dedupe_effective_mode"],
+            policy["dedupe_policy_reason"], policy["dedupe_selection_source"],
+            policy["policy_cohort_key"], policy["policy_decision_hash"],
+            policy["policy_config_hash"], policy["benchmark_attestation_hash"],
+            run_id,
+        ),
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("run policy snapshot is not mutable")
+    if commit:
+        conn.commit()
+
+
 def last_done_head_sha(conn, pr_id):
     """직전에 실제로 벤더 리뷰까지 완료(done)된 런의 head_sha. 증분 델타 기준선.
     prescreen auto-skip은 canceled로 마감되므로 done만 보면 '실제 리뷰된 sha'가 된다

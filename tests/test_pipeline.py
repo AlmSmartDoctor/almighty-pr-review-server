@@ -71,7 +71,7 @@ def test_review_run_policy_snapshot_is_immutable_after_config_change(db, monkeyp
     )
     monkeypatch.setattr(
         "server.review.finding_policy.resolve_benchmark_attestation",
-        lambda: type("ValidAttestation", (), {"can_enforce": True, "report_hash": "a" * 64})(),
+        lambda **kwargs: type("ValidAttestation", (), {"can_enforce": True, "report_hash": "a" * 64})(),
     )
     deps = PipelineDeps(
         gh_diff=lambda repo, n: _diff_block("a.py"),
@@ -89,6 +89,8 @@ def test_review_run_policy_snapshot_is_immutable_after_config_change(db, monkeyp
     monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", False)
     after = policy_snapshot_from_row(review_repo.get_run(db, run_id))
     assert after == before
+    with pytest.raises(RuntimeError, match="not mutable"):
+        review_repo.set_policy_snapshot(db, run_id, before)
 
 
 def test_safe_concurrency_limit_recovers_legacy_invalid_settings():

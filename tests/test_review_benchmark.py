@@ -10,16 +10,20 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from server.review.benchmark_attestation import (
     AttestationReason,
     BenchmarkIdentity,
+    BenchmarkRuntimeIdentity,
     resolve_benchmark_attestation,
 )
-from server.review.finding_policy import resolve_policy_decision
+from server.review.finding_policy import resolve_policy_decision, resolve_policy_snapshot
 from scripts.review_benchmark_common import (
     BenchmarkError,
     bernoulli_metric,
     strict_json_loads,
+    validate_schema,
 )
 from server.review.pipeline_contracts import REVIEW_CHUNKER_VERSION
 from server.review.rollout import evaluate_scope_dedupe_rollout
@@ -163,7 +167,10 @@ def _task_31_fixtures():
             {"first_prediction_id": "prediction-001", "second_prediction_id": "prediction-003", "label": "distinct_issue_hard_negative"},
         ],
         "prediction_issue_resolutions": [],
-        "adjudicator_verdicts": [{"adjudicator_id": "adj-abc123", "independent_verdict": "accept", "date": "2026-07-23", "disagreement_status": "none"}],
+        "adjudicator_verdicts": [
+            {"adjudicator_id": "adj-abc123", "independent_verdict": "accept", "date": "2026-07-23", "disagreement_status": "none"},
+            {"adjudicator_id": "adj-def456", "independent_verdict": "accept", "date": "2026-07-23", "disagreement_status": "none"},
+        ],
         "resolution_status": "unanimous",
         "oracle_contract": {
             "ownership_function_version": "diff-ownership-v1",
@@ -537,6 +544,14 @@ def _attestation_identity(report):
     )
 
 
+def _runtime_identity(report):
+    identity = report["identity"]
+    return BenchmarkRuntimeIdentity(**{
+        field: identity[field]
+        for field in BenchmarkRuntimeIdentity.__dataclass_fields__
+    })
+
+
 def _write_attestation(path, report):
     path.write_bytes(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -551,8 +566,19 @@ def test_benchmark_attestation_fails_closed_for_report_and_identity_mismatches(t
         "server.review.benchmark_attestation._clean_head",
         lambda root: ("c" * 40, None),
     )
-    valid = resolve_benchmark_attestation(
+    runtime = _runtime_identity(report)
+    assert resolve_benchmark_attestation(
         report_path=path, expected_hash=digest, expected_identity=expected, now=now,
+    ).reason is AttestationReason.RUNTIME_IDENTITY_MISSING
+    mismatch = copy.deepcopy(runtime.__dict__)
+    mismatch["model"] = "different"
+    assert resolve_benchmark_attestation(
+        report_path=path, expected_hash=digest, expected_identity=expected,
+        runtime_identity=mismatch, now=now,
+    ).reason is AttestationReason.RUNTIME_IDENTITY_MISMATCH
+    valid = resolve_benchmark_attestation(
+        report_path=path, expected_hash=digest, expected_identity=expected,
+        runtime_identity=runtime, now=now,
     )
     assert valid.can_enforce and valid.reason is AttestationReason.VALID
     assert valid.report_hash == digest and valid.identity == expected
@@ -652,6 +678,43 @@ def test_benchmark_attestation_rejects_schema_expiry_dirty_and_rollout_locks(tmp
     ).reason is AttestationReason.IMPLEMENTATION_DIRTY
 
 
+def test_policy_enforcement_requires_exact_runtime_candidate_identity(monkeypatch):
+    runtime = BenchmarkRuntimeIdentity(
+        vendor="codex", model="gpt", effort="high",
+        prompt_sha256="a" * 64, protocol_sha256="b" * 64,
+        chunker_sha256="c" * 64, chunk_budget=100_000,
+        adapter_sha256="d" * 64, cli_version="1.2.3",
+        event_schema_sha256="e" * 64,
+    )
+    monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", True)
+    monkeypatch.setattr("server.config.REVIEW_SCOPE_KILL_SWITCH", False)
+    monkeypatch.setattr("server.config.REVIEW_DEDUPE_KILL_SWITCH", False)
+
+    def attestation(*, runtime_identity=None):
+        valid = runtime_identity == runtime
+        return type("Decision", (), {
+            "can_enforce": valid,
+            "report_hash": "f" * 64 if valid else None,
+        })()
+
+    monkeypatch.setattr(
+        "server.review.finding_policy.resolve_benchmark_attestation", attestation
+    )
+    repo = {
+        "full_name": "acme/api",
+        "review_scope_guard_mode": "enforce",
+        "review_dedupe_mode": "enforce",
+    }
+    assert resolve_policy_snapshot(repo).scope.effective_mode == "observe"
+    mismatched = BenchmarkRuntimeIdentity(**{**runtime.__dict__, "model": "other"})
+    assert resolve_policy_snapshot(
+        repo, benchmark_runtime_identity=mismatched
+    ).scope.effective_mode == "observe"
+    exact = resolve_policy_snapshot(repo, benchmark_runtime_identity=runtime)
+    assert exact.scope.effective_mode == exact.dedupe.effective_mode == "enforce"
+    assert exact.benchmark_attestation_hash == "f" * 64
+
+
 def test_unlock_never_bypasses_attestation_canary_or_kill_switch(monkeypatch):
     repo = {"full_name": "acme/api", "review_scope_guard_mode": None}
     monkeypatch.setattr("server.config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED", True)
@@ -668,6 +731,26 @@ def test_unlock_never_bypasses_attestation_canary_or_kill_switch(monkeypatch):
     assert resolve_policy_decision(
         repo, policy="scope", default_mode="enforce", benchmark_attestation=Valid()
     ).effective_mode == "observe"
+
+
+def test_adjudication_requires_two_independent_completed_verdicts():
+    _, adjudication, *_ = _task_31_fixtures()
+    single = copy.deepcopy(adjudication)
+    single["adjudicator_verdicts"] = single["adjudicator_verdicts"][:1]
+    with pytest.raises(BenchmarkError):
+        validate_schema("adjudication", single)
+
+    unresolved = copy.deepcopy(adjudication)
+    unresolved["resolution_status"] = "unresolved"
+    with pytest.raises(BenchmarkError, match="unresolved"):
+        validate_schema("adjudication", unresolved)
+
+    resolved_without_record = copy.deepcopy(adjudication)
+    resolved_without_record["resolution_status"] = "resolved"
+    for verdict in resolved_without_record["adjudicator_verdicts"]:
+        verdict["disagreement_status"] = "resolved"
+    with pytest.raises(BenchmarkError):
+        validate_schema("adjudication", resolved_without_record)
 
 
 def test_task_31_private_benchmark_workspaces_are_ignored_without_staging():

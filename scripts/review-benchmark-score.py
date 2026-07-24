@@ -140,6 +140,23 @@ def _cost(run: dict[str, Any]) -> int:
     return sum(int(run.get(field, 0)) for field in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"))
 
 
+def _adjudication_complete(answer: dict[str, Any]) -> bool:
+    verdicts = answer["adjudicator_verdicts"]
+    adjudicators = {item["adjudicator_id"] for item in verdicts}
+    if len(verdicts) < 2 or len(adjudicators) != len(verdicts):
+        return False
+    status = answer["resolution_status"]
+    if status == "unanimous":
+        return all(
+            item["independent_verdict"] == "accept"
+            and item["disagreement_status"] == "none"
+            for item in verdicts
+        )
+    if status == "resolved":
+        return isinstance(answer.get("resolution_record"), dict)
+    return False
+
+
 def score(manifests_root: Path, predictions_root: Path, runs_root: Path, adjudication_root: Path, workspace: Path, *, implementation_commit_sha: str, generated_at: str, valid_until: str) -> dict[str, Any]:
     roots = [manifests_root, predictions_root, runs_root, adjudication_root]
     if any(root.is_symlink() for root in roots):
@@ -258,6 +275,8 @@ def score(manifests_root: Path, predictions_root: Path, runs_root: Path, adjudic
     scope_expected: dict[str, str] = {}
     stable_by_prediction: dict[str, str] = {}
     invalid_reasons: set[str] = set()
+    if any(not _adjudication_complete(answer) for answer in answer_by_case.values()):
+        invalid_reasons.add("adjudication_incomplete")
     for case_id, run in sorted(primary.items()):
         answer = answer_by_case[case_id]
         if run["status"] == "not_invoked_setup_failure":

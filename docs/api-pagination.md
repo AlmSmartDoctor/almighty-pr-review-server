@@ -41,7 +41,7 @@ Each item query uses an ordering index and stops after `limit + 1` rows to deter
 
 ## Cursor contract
 
-`next_cursor` is opaque. Clients must not decode, modify, persist indefinitely, or derive ordering from it. It contains a version, resource and parent binding, an ID high-water mark, and the exclusive continuation position; the payload is protected with HMAC-SHA256.
+`next_cursor` is opaque. Clients must not decode, modify, persist indefinitely, or derive ordering from it. It contains a version, resource and parent binding, an ID high-water mark, and the exclusive continuation position; the payload is protected with HMAC-SHA256. It is authenticated, not encrypted, and a findings position can contain a file path, so cursor-bearing URLs must remain inside the authenticated management boundary and be redacted from public logs.
 
 A cursor is rejected with HTTP 400 when it is malformed, modified, too large, from another endpoint, or bound to another PR/run. A cursor cannot be combined with overview `pr_id` direct lookup. Limits outside the documented range return HTTP 422.
 
@@ -57,4 +57,4 @@ Ordering is stable and exclusive:
 
 Cursor signatures use `ALMIGHTY_CURSOR_HMAC_SECRET`, then the admin token, then a process-local development key. Secret rotation or restarting a process that uses the development key invalidates old cursors. Clients should discard the old window and request the first page again after a cursor 400 response.
 
-`GET /api/overview?pr_id={id}&limit=1` supports direct `/reviews/{pr_id}` navigation when the PR is outside the currently loaded overview pages. It only returns an open PR and does not accept a cursor.
+`GET /api/overview?pr_id={id}&limit=1` supports direct `/reviews/{pr_id}` navigation when the PR is outside the currently loaded overview pages, including closed or merged PRs linked from operational failure history. Normal overview pagination remains open-PR-only. Direct lookup does not accept a cursor.

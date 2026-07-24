@@ -27,6 +27,20 @@ from server.review.rollout import evaluate_scope_dedupe_rollout
 
 
 @dataclass(frozen=True)
+class BenchmarkRuntimeIdentity:
+    vendor: str
+    model: str
+    effort: str
+    prompt_sha256: str
+    protocol_sha256: str
+    chunker_sha256: str
+    chunk_budget: int
+    adapter_sha256: str
+    cli_version: str
+    event_schema_sha256: str
+
+
+@dataclass(frozen=True)
 class BenchmarkIdentity:
     implementation_commit_sha: str
     vendor: str
@@ -63,6 +77,8 @@ class AttestationReason(StrEnum):
     IMPLEMENTATION_DIRTY = "implementation_dirty"
     IMPLEMENTATION_COMMIT_MISMATCH = "implementation_commit_mismatch"
     IDENTITY_MISMATCH = "identity_mismatch"
+    RUNTIME_IDENTITY_MISSING = "runtime_identity_missing"
+    RUNTIME_IDENTITY_MISMATCH = "runtime_identity_mismatch"
 
 
 @dataclass(frozen=True)
@@ -220,8 +236,9 @@ def _clean_head(repo_root: Path) -> tuple[str | None, AttestationReason | None]:
 
 def resolve_benchmark_attestation(
     *, report_path: Path | None = None, expected_hash: str | None = None,
-    expected_identity: BenchmarkIdentity | None = None, repo_root: Path | None = None,
-    now: datetime | None = None,
+    expected_identity: BenchmarkIdentity | None = None,
+    runtime_identity: BenchmarkRuntimeIdentity | dict[str, Any] | None = None,
+    repo_root: Path | None = None, now: datetime | None = None,
 ) -> BenchmarkAttestationDecision:
     """Return only a safe allow/deny reason and public identity metadata."""
     report_path = config.REVIEW_BENCHMARK_REPORT_PATH if report_path is None else report_path
@@ -269,4 +286,16 @@ def resolve_benchmark_attestation(
         return _decision(AttestationReason.IMPLEMENTATION_COMMIT_MISMATCH, identity=identity)
     if identity != expected_identity:
         return _decision(AttestationReason.IDENTITY_MISMATCH, identity=identity)
+    if runtime_identity is None:
+        return _decision(AttestationReason.RUNTIME_IDENTITY_MISSING, identity=identity)
+    if isinstance(runtime_identity, dict):
+        try:
+            runtime_identity = BenchmarkRuntimeIdentity(**runtime_identity)
+        except TypeError:
+            return _decision(AttestationReason.RUNTIME_IDENTITY_MISMATCH, identity=identity)
+    if not isinstance(runtime_identity, BenchmarkRuntimeIdentity) or any(
+        getattr(identity, field) != getattr(runtime_identity, field)
+        for field in BenchmarkRuntimeIdentity.__dataclass_fields__
+    ):
+        return _decision(AttestationReason.RUNTIME_IDENTITY_MISMATCH, identity=identity)
     return _decision(AttestationReason.VALID, identity=identity, report_hash=report_hash)

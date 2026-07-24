@@ -80,7 +80,16 @@ CREATE TABLE IF NOT EXISTS finding (
   scope_status TEXT,
   posting_eligible INTEGER NOT NULL DEFAULT 1,
   duplicate_group_id INTEGER,
-  duplicate_suggested INTEGER NOT NULL DEFAULT 0
+  duplicate_suggested INTEGER NOT NULL DEFAULT 0,
+  page_severity_order INTEGER GENERATED ALWAYS AS (
+    CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+         WHEN 'medium' THEN 2 ELSE 3 END
+  ) VIRTUAL,
+  page_consensus_order INTEGER GENERATED ALWAYS AS (
+    CASE consensus WHEN 'consensus' THEN 0 ELSE 1 END
+  ) VIRTUAL,
+  page_confidence_order REAL GENERATED ALWAYS AS (-COALESCE(confidence, -1)) VIRTUAL,
+  page_file_order TEXT GENERATED ALWAYS AS (COALESCE(file, '')) VIRTUAL
 );
 -- Paginated findings use an O(1) authoritative status/posting summary.
 CREATE TABLE IF NOT EXISTS run_finding_summary (
@@ -358,6 +367,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(
         conn, "finding", "duplicate_suggested", "INTEGER NOT NULL DEFAULT 0"
     )
+    _ensure_column(
+        conn, "finding", "page_severity_order",
+        "INTEGER GENERATED ALWAYS AS (CASE severity WHEN 'critical' THEN 0 "
+        "WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END) VIRTUAL",
+    )
+    _ensure_column(
+        conn, "finding", "page_consensus_order",
+        "INTEGER GENERATED ALWAYS AS (CASE consensus WHEN 'consensus' THEN 0 "
+        "ELSE 1 END) VIRTUAL",
+    )
+    _ensure_column(
+        conn, "finding", "page_confidence_order",
+        "REAL GENERATED ALWAYS AS (-COALESCE(confidence, -1)) VIRTUAL",
+    )
+    _ensure_column(
+        conn, "finding", "page_file_order",
+        "TEXT GENERATED ALWAYS AS (COALESCE(file, '')) VIRTUAL",
+    )
     # 벤더 리뷰 시작 시각 — running 중 상세 트레이스의 실시간 경과시간 계산용.
     _ensure_column(conn, "vendor_result", "started_at", "TEXT")
     # 원문 transcript 없이 attempt/phase/chunk별 숫자·상태 telemetry만 저장.
@@ -517,6 +544,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
           ON review_run(pr_id, status, id DESC);
         CREATE INDEX IF NOT EXISTS idx_pre_screen_reuse
           ON pre_screen(pr_id, diff_hash, model, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_pre_screen_pr_head_page
+          ON pre_screen(pr_id, head_sha, id DESC);
         CREATE INDEX IF NOT EXISTS idx_finding_run_status
           ON finding(run_id, status, vendor, id);
         CREATE INDEX IF NOT EXISTS idx_pull_request_repo_open
@@ -538,14 +567,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
           ON vendor_result(run_id, vendor, status);
         CREATE INDEX IF NOT EXISTS idx_finding_canary_metrics
           ON finding(run_id, scope_status, status, posting_eligible, duplicate_group_id);
-        CREATE INDEX IF NOT EXISTS idx_finding_run_page_v2
+        CREATE INDEX IF NOT EXISTS idx_finding_run_page_v3
           ON finding(
-            run_id,
-            CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                 WHEN 'medium' THEN 2 ELSE 3 END,
-            CASE consensus WHEN 'consensus' THEN 0 ELSE 1 END,
-            -COALESCE(confidence, -1),
-            COALESCE(file, ''), id
+            run_id, page_severity_order, page_consensus_order,
+            page_confidence_order, page_file_order, id
           );
         """
     )
@@ -557,7 +582,7 @@ def _ensure_column(
 ) -> None:
     cols = {
         row["name"] if isinstance(row, sqlite3.Row) else row[1]
-        for row in conn.execute(f"PRAGMA table_info({table})")
+        for row in conn.execute(f"PRAGMA table_xinfo({table})")
     }
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

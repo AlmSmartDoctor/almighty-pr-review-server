@@ -58,8 +58,18 @@ prediction resolutions, versioned ownership/chunker oracle identity, known-clean
 ranges, and the two explicit pair labels:
 `same_issue_duplicate` and `distinct_issue_hard_negative`. The scorer validates cross-file joins, primary repetition and artifact commitments,
 recomputes scope/reassignment/posting ownership, and writes only stable-ID private audit
-rows plus a sanitized aggregate report. Enforcement still requires a clean final
-candidate and an operator-pinned canonical report/identity exact match.
+rows plus a sanitized aggregate report. Every answer requires two distinct
+independent adjudicators; unanimous gold answers require two accepting verdicts,
+and a disagreement requires a hash-committed resolver record. Unresolved or
+single-adjudicator material cannot produce enforceable evidence.
+
+Enforcement still requires a clean final candidate and an operator-pinned canonical
+report/identity exact match. Immediately before the review vendor call, production
+also derives the actual runtime candidate identity from the selected vendor/model/
+effort, harness configuration hash, protocol/chunker versions, chunk budget, adapter
+configuration hash, probed CLI version, and event-schema version. All fields must
+match the report. Missing or mismatched runtime identity—and multi-vendor runs while
+the report describes only one candidate arm—remain `observe`.
 
 ## Offline commands
 

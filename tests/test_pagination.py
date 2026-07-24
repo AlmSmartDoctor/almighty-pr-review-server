@@ -76,6 +76,10 @@ def test_overview_direct_lookup_and_cursor_validation(tmp_path):
     direct = client.get("/api/overview", params={"pr_id": pr_id}).json()
     assert [item["id"] for item in direct["items"]] == [pr_id]
     assert direct["pagination"]["has_more"] is False
+    conn.execute("UPDATE pull_request SET state='closed' WHERE id=?", (pr_id,))
+    conn.commit()
+    closed_direct = client.get("/api/overview", params={"pr_id": pr_id}).json()
+    assert [item["id"] for item in closed_direct["items"]] == [pr_id]
     assert client.get(
         "/api/overview", params={"pr_id": pr_id, "cursor": "bad"}
     ).status_code == 400
@@ -130,7 +134,13 @@ def test_page_query_plans_seek_indexes_without_temp_sort(db):
     db.commit()
     plans = [
         db.execute(
-            """EXPLAIN QUERY PLAN SELECT p.id,r.full_name
+            """EXPLAIN QUERY PLAN SELECT p.id,r.full_name,
+                      (SELECT complexity FROM pre_screen ps
+                       WHERE ps.pr_id=p.id AND ps.head_sha=p.head_sha
+                       ORDER BY ps.id DESC LIMIT 1),
+                      (SELECT duration_ms FROM pre_screen ps
+                       WHERE ps.pr_id=p.id AND ps.head_sha=p.head_sha
+                       ORDER BY ps.id DESC LIMIT 1)
                FROM pull_request p INDEXED BY idx_pull_request_overview_page
                JOIN repo r ON r.id=p.repo_id
                WHERE p.state='open' AND p.id<=?
@@ -146,18 +156,26 @@ def test_page_query_plans_seek_indexes_without_temp_sort(db):
         ).fetchall(),
         db.execute(
             """EXPLAIN QUERY PLAN SELECT id FROM finding
-               INDEXED BY idx_finding_run_page_v2 WHERE run_id=? AND id<=?
-               ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                            WHEN 'medium' THEN 2 ELSE 3 END,
-                        CASE consensus WHEN 'consensus' THEN 0 ELSE 1 END,
-                        -COALESCE(confidence,-1),COALESCE(file,''),id LIMIT ?""",
-            (run_id, 999, 10),
+               INDEXED BY idx_finding_run_page_v3 WHERE run_id=? AND id<=?
+                 AND (page_severity_order,page_consensus_order,
+                      page_confidence_order,page_file_order,id) > (?,?,?,?,?)
+               ORDER BY page_severity_order,page_consensus_order,
+                        page_confidence_order,page_file_order,id LIMIT ?""",
+            (run_id, 999, 1, 1, -0.5, "a.py", 1, 10),
+        ).fetchall(),
+        db.execute(
+            """EXPLAIN QUERY PLAN SELECT complexity FROM pre_screen
+               INDEXED BY idx_pre_screen_pr_head_page
+               WHERE pr_id=? AND head_sha=? ORDER BY id DESC LIMIT 1""",
+            (pr_id, "head"),
         ).fetchall(),
     ]
     for plan in plans:
         detail = " ".join(row[3] for row in plan)
         assert "SEARCH" in detail
         assert "TEMP B-TREE" not in detail
+    finding_detail = " ".join(row[3] for row in plans[2])
+    assert "page_severity_order" in finding_detail
 
 
 def test_findings_priority_pages_and_authoritative_summary(tmp_path):

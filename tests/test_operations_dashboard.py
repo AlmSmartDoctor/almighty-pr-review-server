@@ -157,6 +157,25 @@ def test_dashboard_scan_is_hard_capped_and_disclosed(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_dashboard_failure_cap_has_its_own_denominator(tmp_path, monkeypatch):
+    client, conn = _client(tmp_path)
+    repo_id, pr_id = _seed_repo(conn, "acme/api")
+    for age in (1, 2, 3):
+        _seed_run(
+            conn, repo_id=repo_id, pr_id=pr_id, status="failed",
+            age_hours=age, error="timeout", vendor_status="timeout",
+        )
+    monkeypatch.setattr(operations_repo, "MAX_FAILURES", 2)
+    summary = client.get("/api/operations/dashboard").json()["summary"]
+    assert summary["recent_failure_summary"] == {
+        "total": 3, "listed": 2, "truncated": True,
+    }
+    assert len(summary["recent_failures"]) == 2
+    assert summary["truncated"] is False
+    app.dependency_overrides.clear()
+    conn.close()
+
+
 def _execution_meta():
     chunk = {
         "index": 0, "status": "timeout", "safe_error_code": "timeout",

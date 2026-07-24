@@ -15,6 +15,7 @@ const dashboard = (overrides: Record<string, unknown> = {}) => ({
     success: { numerator: 8, denominator: 10, rate: 0.8 },
     latency_ms: { denominator: 10, p50: 1000, p95: 3000 },
     vendors: [{ vendor: "codex", results: 10, statuses: { done: 8, timeout: 2 }, success: { numerator: 8, denominator: 10, rate: 0.8 }, latency_ms: { denominator: 10, p50: 900, p95: 2800 } }],
+    recent_failure_summary: { total: 1, listed: 1, truncated: false },
     recent_failures: [{ run_id: 9, status: "failed", started_at: "2026-07-24 11:00:00", failure_code: "timeout", repo: { id: 7, full_name: "org/repo" }, pr: { id: 11, number: 42, title: "Fix" }, vendors: [{ vendor: "codex", status: "timeout", failure_code: "timeout" }] }],
   },
   active_jobs: { total: 1, listed: 1, truncated: false, jobs: [{ id: 3, status: "running", trigger: "manual", attempts: 1, max_attempts: 3, created_at: "2026-07-24 11:30:00", locked_at: "2026-07-24 11:31:00", next_run_at: null, failure_code: "unknown", repo: { id: 7, full_name: "org/repo" }, pr: { id: 11, number: 42 } }] },
@@ -70,6 +71,20 @@ test("announces loading, failure, and truncated data", async () => {
   renderOperations({ loadDashboard: async () => dashboard({ summary: { ...dashboard().summary, truncated: true } }) });
   expect(await screen.findByText(/일부 결과만 표시/)).toBeInTheDocument();
 });
+
+test("discloses the recent failure list denominator and truncation", async () => {
+  renderOperations({
+    loadDashboard: async () => dashboard({
+      summary: {
+        ...dashboard().summary,
+        recent_failure_summary: { total: 21, listed: 20, truncated: true },
+      },
+    }),
+  });
+  expect(await screen.findByText("20/21건 표시")).toBeInTheDocument();
+  expect(screen.getByText(/일부 결과만 표시/)).toBeInTheDocument();
+});
+
 
 test("ignores stale dashboard responses after filters change", async () => {
   let resolveOld!: (value: ReturnType<typeof dashboard>) => void;

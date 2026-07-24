@@ -200,8 +200,10 @@ def resolve_policy_decision(
     )
 
 
-def resolve_policy_snapshot(repo) -> PolicySnapshot:
-    benchmark_attestation = resolve_benchmark_attestation()
+def resolve_policy_snapshot(repo, *, benchmark_runtime_identity=None) -> PolicySnapshot:
+    benchmark_attestation = resolve_benchmark_attestation(
+        runtime_identity=benchmark_runtime_identity
+    )
     scope = resolve_policy_decision(
         repo, policy="scope", benchmark_attestation=benchmark_attestation
     )
@@ -224,6 +226,15 @@ def resolve_policy_snapshot(repo) -> PolicySnapshot:
         "scope_kill_switch": config.REVIEW_SCOPE_KILL_SWITCH,
         "dedupe_kill_switch": config.REVIEW_DEDUPE_KILL_SWITCH,
         "benchmark_attestation_hash": benchmark_attestation.report_hash,
+        "benchmark_runtime_identity": (
+            (
+                asdict(benchmark_runtime_identity)
+                if hasattr(benchmark_runtime_identity, "__dataclass_fields__")
+                else benchmark_runtime_identity
+            )
+            if benchmark_attestation.report_hash is not None
+            else None
+        ),
         "decisions": decision_payload,
     }
     cohort_key = (

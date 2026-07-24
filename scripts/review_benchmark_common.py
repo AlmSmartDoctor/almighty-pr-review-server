@@ -249,17 +249,20 @@ def validate_schema(name: str, value: Any) -> None:
         if len(set(pair_ids)) != len(pair_ids):
             raise BenchmarkError("adjudication: duplicate or conflicting pair label")
         verdicts = value["adjudicator_verdicts"]
+        adjudicator_ids = [item["adjudicator_id"] for item in verdicts]
+        if len(verdicts) < 2 or len(set(adjudicator_ids)) != len(verdicts):
+            raise BenchmarkError("adjudication: two independent adjudicators required")
         verdict_values = {item["independent_verdict"] for item in verdicts}
         disagreement_values = {item["disagreement_status"] for item in verdicts}
         if value["resolution_status"] == "unanimous" and (
-            len(verdict_values) != 1
-            or "uncertain" in verdict_values
+            verdict_values != {"accept"}
             or disagreement_values != {"none"}
         ):
             raise BenchmarkError("adjudication: unanimous verdicts conflict")
         if value["resolution_status"] == "resolved" and (
             "disputed" in disagreement_values
             or "resolved" not in disagreement_values
+            or not isinstance(value.get("resolution_record"), dict)
         ):
             raise BenchmarkError("adjudication: resolver status is incomplete")
         for issue in value["issues"]:

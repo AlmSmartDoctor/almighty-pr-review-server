@@ -1,10 +1,15 @@
 """Bounded page queries for review-facing list APIs."""
 from __future__ import annotations
 
-_SEVERITY = "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
-_CONSENSUS = "CASE consensus WHEN 'consensus' THEN 0 ELSE 1 END"
-_CONFIDENCE = "-COALESCE(confidence, -1)"
-_FILE = "COALESCE(file, '')"
+_SEVERITY = "page_severity_order"
+_CONSENSUS = "page_consensus_order"
+_CONFIDENCE = "page_confidence_order"
+_FILE = "page_file_order"
+_FINDING_COLUMNS = """id,run_id,vendor_result_id,vendor,file,line,severity,category,
+claim,rationale,confidence,consensus,consensus_group_id,status,edited_text,created_at,
+posting_operation_id,source_chunk_index,owner_chunk_index,scope_status,posting_eligible,
+duplicate_group_id,duplicate_suggested,verify_status,verify_rationale,
+verify_independent,verify_evidence_status"""
 
 
 def overview_snapshot_max(conn, *, pr_id=None) -> int:
@@ -14,20 +19,21 @@ def overview_snapshot_max(conn, *, pr_id=None) -> int:
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT COALESCE(MAX(id),0) AS value FROM pull_request WHERE state='open' AND id=?",
+            "SELECT COALESCE(MAX(id),0) AS value FROM pull_request WHERE id=?",
             (pr_id,),
         ).fetchone()
     return int(row["value"])
 
 
 def overview_page(conn, *, snapshot_max_id, after, limit, pr_id=None):
-    clauses = ["p.state='open'", "p.id<=?"]
+    clauses = ["p.id<=?"]
     params = [snapshot_max_id]
     index_hint = ""
     if pr_id is not None:
         clauses.append("p.id=?")
         params.append(pr_id)
     else:
+        clauses.append("p.state='open'")
         index_hint = "INDEXED BY idx_pull_request_overview_page"
         if after is not None:
             sort_at, row_id = after
@@ -159,7 +165,7 @@ def findings_page(
         )
         params.extend(after)
     return conn.execute(
-        f"""SELECT * FROM finding INDEXED BY idx_finding_run_page_v2
+        f"""SELECT {_FINDING_COLUMNS} FROM finding INDEXED BY idx_finding_run_page_v3
            WHERE {' AND '.join(clauses)}
            ORDER BY {_SEVERITY}, {_CONSENSUS}, {_CONFIDENCE}, {_FILE}, id
            LIMIT ?""",

@@ -218,9 +218,13 @@ def summarize(runs: list[dict[str, Any]], *, truncated: bool) -> dict[str, Any]:
         })
 
     failures = []
+    failure_total = 0
     for run in runs:
         failed_vendors = [row for row in run["vendors"] if row["status"] in _VENDOR_FAILURES]
         if run["status"] not in {"failed", "canceled"} and not failed_vendors:
+            continue
+        failure_total += 1
+        if len(failures) >= MAX_FAILURES:
             continue
         failures.append({
             "run_id": run["id"], "status": run["status"], "started_at": run["started_at"],
@@ -232,8 +236,6 @@ def summarize(runs: list[dict[str, Any]], *, truncated: bool) -> dict[str, Any]:
                 for row in failed_vendors
             ],
         })
-        if len(failures) >= MAX_FAILURES:
-            break
 
     return {
         "sampled_runs": len(runs),
@@ -251,5 +253,10 @@ def summarize(runs: list[dict[str, Any]], *, truncated: bool) -> dict[str, Any]:
             "p95": _percentile(run_durations, 0.95),
         },
         "vendors": vendors,
+        "recent_failure_summary": {
+            "total": failure_total,
+            "listed": len(failures),
+            "truncated": failure_total > len(failures),
+        },
         "recent_failures": failures,
     }
