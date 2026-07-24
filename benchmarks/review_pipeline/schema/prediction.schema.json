@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://almighty.local/schema/review-pipeline/prediction.schema.json",
+  "title": "Review pipeline private blinded prediction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "prediction_id",
+    "case_id",
+    "run_id",
+    "file",
+    "line",
+    "category",
+    "claim_normalization_version",
+    "claim_tokenizer_sha256",
+    "scope_status",
+    "posting_status",
+    "duplicate_relation",
+    "source_chunk_index",
+    "normalized_claim_tokens",
+    "production_claim_key",
+    "emission_index"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "review-pipeline-prediction-v1"
+    },
+    "prediction_id": {
+      "$ref": "#/$defs/stableId"
+    },
+    "case_id": {
+      "$ref": "#/$defs/stableId"
+    },
+    "run_id": {
+      "$ref": "#/$defs/stableId"
+    },
+    "file": {
+      "$ref": "#/$defs/relativePath"
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "category": {
+      "$ref": "#/$defs/stableId"
+    },
+    "claim_normalization_version": {
+      "const": "claim-normalization-v1"
+    },
+    "claim_tokenizer_sha256": {
+      "const": "9787d268171dfc88884d9961c1ae8608b111eda1eda892656a4db17622937458"
+    },
+    "normalized_claim_tokens": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]+$",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "scope_status": {
+      "enum": [
+        "owned",
+        "reassigned",
+        "would_reject"
+      ]
+    },
+    "posting_status": {
+      "enum": [
+        "post",
+        "suppress"
+      ]
+    },
+    "duplicate_relation": {
+      "enum": [
+        "proposal_positive",
+        "proposal_negative",
+        "not_evaluated"
+      ]
+    },
+    "source_chunk_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "production_claim_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "emission_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+      "minLength": 1,
+      "maxLength": 1024
+    }
+  }
+}

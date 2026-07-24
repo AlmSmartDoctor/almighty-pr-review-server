@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://almighty.local/schema/review-pipeline/benchmark-report.schema.json",
+  "title": "Review pipeline sanitized aggregate benchmark report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "threshold_schema_version",
+    "generated_at",
+    "valid_until",
+    "implementation_commit_sha",
+    "identity",
+    "corpus_manifest_sha256",
+    "adjudication_commitment_sha256",
+    "primary_run_selection_sha256",
+    "paired_schedule_sha256",
+    "scorer_sha256",
+    "schema_sha256",
+    "cost_model_version",
+    "metrics",
+    "finding_count",
+    "issue_count",
+    "can_enforce",
+    "failure_reasons",
+    "rollout_evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "review-pipeline-benchmark-report-v1"
+    },
+    "threshold_schema_version": {
+      "const": "review-pipeline-thresholds-v1"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "implementation_commit_sha": {
+      "$ref": "#/$defs/revisionSha"
+    },
+    "identity": {
+      "$ref": "#/$defs/identity"
+    },
+    "corpus_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "adjudication_commitment_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "primary_run_selection_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "paired_schedule_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "scorer_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "cost_model_version": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,63}$"
+    },
+    "finding_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "issue_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rollout_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pr_size_strata_covered",
+        "partial_timeout_cases",
+        "hard_negative_pairs",
+        "case_count"
+      ],
+      "properties": {
+        "pr_size_strata_covered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "partial_timeout_cases": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hard_negative_pairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "case_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_precision",
+        "issue_recall",
+        "duplicate_precision",
+        "duplicate_recall",
+        "scope_accuracy",
+        "posting_accuracy",
+        "cost_regression"
+      ],
+      "properties": {
+        "issue_precision": {
+          "$ref": "#/$defs/metric"
+        },
+        "issue_recall": {
+          "$ref": "#/$defs/metric"
+        },
+        "duplicate_precision": {
+          "$ref": "#/$defs/metric"
+        },
+        "duplicate_recall": {
+          "$ref": "#/$defs/metric"
+        },
+        "scope_accuracy": {
+          "$ref": "#/$defs/metric"
+        },
+        "posting_accuracy": {
+          "$ref": "#/$defs/metric"
+        },
+        "cost_regression": {
+          "$ref": "#/$defs/metric"
+        }
+      }
+    },
+    "can_enforce": {
+      "type": "boolean"
+    },
+    "failure_reasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "revisionSha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vendor",
+        "model",
+        "effort",
+        "prompt_sha256",
+        "protocol_sha256",
+        "chunker_sha256",
+        "adapter_sha256",
+        "cli_version",
+        "event_schema_sha256",
+        "chunk_budget"
+      ],
+      "properties": {
+        "vendor": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "prompt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "protocol_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "chunker_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "adapter_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "cli_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "event_schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "chunk_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numerator",
+        "denominator",
+        "point_estimate",
+        "wilson_95_lower_bound",
+        "threshold",
+        "passed",
+        "required_sample_shortfall"
+      ],
+      "properties": {
+        "numerator": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "denominator": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "point_estimate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "wilson_95_lower_bound": {
+          "type": "number",
+          "minimum": 0
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "required_sample_shortfall": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

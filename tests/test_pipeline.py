@@ -69,6 +69,10 @@ def test_review_run_policy_snapshot_is_immutable_after_config_change(db, monkeyp
     monkeypatch.setattr(
         "server.config.REVIEW_SCOPE_ENFORCE_REPOS", frozenset({"acme/api"})
     )
+    monkeypatch.setattr(
+        "server.review.finding_policy.resolve_benchmark_attestation",
+        lambda: type("ValidAttestation", (), {"can_enforce": True, "report_hash": "a" * 64})(),
+    )
     deps = PipelineDeps(
         gh_diff=lambda repo, n: _diff_block("a.py"),
         worktree=fake_worktree,
@@ -116,6 +120,10 @@ def test_enforcement_requires_global_canary_and_honors_kill_switch(monkeypatch):
 
     monkeypatch.setattr(
         "server.config.REVIEW_SCOPE_ENFORCE_REPOS", frozenset({"acme/api"})
+    )
+    monkeypatch.setattr(
+        "server.review.finding_policy.resolve_benchmark_attestation",
+        lambda: type("ValidAttestation", (), {"can_enforce": True})(),
     )
     assert _policy_mode(
         repo, "review_scope_guard_mode", "enforce", policy="scope"

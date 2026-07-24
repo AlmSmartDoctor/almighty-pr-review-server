@@ -18,3 +18,6 @@ harness/**/runtime/
 .env
 .env.*
 .playwright-mcp/
+# Private benchmark inputs, answers, predictions, and local run artifacts.
+benchmarks/review_pipeline/private/
+benchmarks/review_pipeline/results/

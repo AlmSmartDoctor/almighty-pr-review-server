@@ -742,6 +742,8 @@ Cost는 report의 pinned `cost_model_version`으로 계산한다. 각 invocation
 - report hash와 clean commit, vendor/model/effort, prompt/protocol/chunker/adapter/CLI/event schema, corpus/adjudication commitment, **primary selection/schedule**, scorer/schema identity의 동일 set은 run snapshot과 Operations UI에 표시된다.
 - Slice 1C는 tooling만 완료한다. final paired run·sanitized attestation은 Slice 1D의 candidate code/UI/schema가 clean commit으로 고정된 뒤에만 생성한다.
 
+**Current Slice 1C offline evidence (2026-07-24):** strict provenance/adjudication/prediction/run/report schemas, local immutable-bundle collect, physical-separation lint, label-blind paired offline fixture runner, exact issue/duplicate/scope/posting scorer, Wilson/sample/cost locks, private audit, canonical sanitized report, clean-commit/all-identity attestation binding을 구현했다. Prediction artifact filename+content commitments, full paired run commitment, production-equivalent path/claim/emission-order dedupe oracle, private ambiguity resolution, primary repetition, coverage evidence, duplicate-key JSON rejection을 포함한다. Python full gate는 838 collected, 1 skipped, 0 failed이며 compileall/diff check가 통과했다. Remote collector, live model benchmark, two-person adjudication, final paired report/attestation, rollout unlock은 모두 `not_run`/`locked`다.
+
 ---
 
 ## Milestone 4 — Canary metrics/query UI

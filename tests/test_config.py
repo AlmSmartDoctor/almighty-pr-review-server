@@ -36,6 +36,34 @@ def test_optional_sha256_accepts_empty_or_canonical_digest(monkeypatch):
         config._env_optional_sha256("ALMIGHTY_TEST_HASH")
 
 
+def test_benchmark_expected_identity_requires_complete_explicit_values(monkeypatch):
+    fields = config._BENCHMARK_IDENTITY_FIELDS
+    value = {
+        field: ("a" * 64 if field.endswith("_sha256") else "value")
+        for field in fields
+    }
+    value["implementation_commit_sha"] = "b" * 40
+    value["chunk_budget"] = 100000
+    import json
+    monkeypatch.setenv("ALMIGHTY_TEST_BENCHMARK_IDENTITY", json.dumps(value))
+    assert config._env_optional_benchmark_expected_identity(
+        "ALMIGHTY_TEST_BENCHMARK_IDENTITY"
+    ) == value
+
+    value.pop("schema_sha256")
+    monkeypatch.setenv("ALMIGHTY_TEST_BENCHMARK_IDENTITY", json.dumps(value))
+    with pytest.raises(RuntimeError, match="every benchmark identity"):
+        config._env_optional_benchmark_expected_identity(
+            "ALMIGHTY_TEST_BENCHMARK_IDENTITY"
+        )
+
+
+def test_benchmark_report_path_must_be_absolute(monkeypatch):
+    monkeypatch.setenv("ALMIGHTY_TEST_REPORT_PATH", "relative/report.json")
+    with pytest.raises(RuntimeError, match="absolute local path"):
+        config._env_optional_absolute_path("ALMIGHTY_TEST_REPORT_PATH")
+
+
 def test_env_float_rejects_invalid_or_out_of_range_values(monkeypatch):
     monkeypatch.setenv("ALMIGHTY_TEST_FLOAT", "later")
     with pytest.raises(RuntimeError, match="ALMIGHTY_TEST_FLOAT must be a number"):

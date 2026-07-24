@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://almighty.local/schema/review-pipeline/run-result.schema.json",
+  "title": "Review pipeline private benchmark run result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "case_id",
+    "manifest_sha256",
+    "arm",
+    "primary_repetition_index",
+    "seed",
+    "schedule_sha256",
+    "vendor",
+    "model",
+    "effort",
+    "protocol_sha256",
+    "prompt_sha256",
+    "diff_sha256",
+    "context_sha256",
+    "chunker_sha256",
+    "adapter_sha256",
+    "cli_version",
+    "event_schema_sha256",
+    "prediction_artifact_path",
+    "prediction_artifact_sha256",
+    "status",
+    "duration_ms",
+    "tool_calls",
+    "token_telemetry_status",
+    "repetition_index",
+    "chunk_budget",
+    "coverage_evidence_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "review-pipeline-run-result-v1"
+    },
+    "run_id": {
+      "$ref": "#/$defs/stableId"
+    },
+    "case_id": {
+      "$ref": "#/$defs/stableId"
+    },
+    "manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "arm": {
+      "enum": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    "primary_repetition_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "schedule_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "vendor": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "effort": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "protocol_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "prompt_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "diff_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "context_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "chunker_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "adapter_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "cli_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "event_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "prediction_artifact_path": {
+      "type": "string",
+      "pattern": "^benchmarks/review_pipeline/private/predictions/[A-Za-z0-9._-]+\\.json$",
+      "maxLength": 1024
+    },
+    "prediction_artifact_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "partial",
+        "timeout",
+        "failed",
+        "not_invoked_setup_failure"
+      ]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400000
+    },
+    "tool_calls": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "token_telemetry_status": {
+      "enum": [
+        "available",
+        "unavailable"
+      ]
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cached_input_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reasoning_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "repetition_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "chunk_budget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000000
+    },
+    "coverage_evidence_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import json
 import math
 import os
 from pathlib import Path
@@ -52,6 +53,61 @@ def _env_optional_sha256(name: str) -> str:
         len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value)
     ):
         raise RuntimeError(f"{name} must be a SHA-256 hex digest")
+    return value
+
+
+def _env_optional_absolute_path(name: str) -> Path | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise RuntimeError(f"{name} must be an absolute local path")
+    return path
+
+
+_BENCHMARK_IDENTITY_FIELDS = (
+    "implementation_commit_sha", "vendor", "model", "effort", "prompt_sha256",
+    "protocol_sha256", "chunker_sha256", "chunk_budget", "adapter_sha256", "cli_version",
+    "event_schema_sha256", "corpus_manifest_sha256",
+    "adjudication_commitment_sha256", "primary_run_selection_sha256",
+    "paired_schedule_sha256", "scorer_sha256", "schema_sha256",
+)
+_BENCHMARK_SHA256_FIELDS = frozenset(
+    field for field in _BENCHMARK_IDENTITY_FIELDS
+    if field.endswith("_sha256")
+)
+
+
+def _env_optional_benchmark_expected_identity(name: str) -> dict | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{name} must be a JSON object") from exc
+    if not isinstance(value, dict) or set(value) != set(_BENCHMARK_IDENTITY_FIELDS):
+        raise RuntimeError(f"{name} must define every benchmark identity exactly once")
+    string_fields = set(_BENCHMARK_IDENTITY_FIELDS) - {"chunk_budget"}
+    if any(
+        not isinstance(value[field], str) or not value[field]
+        for field in string_fields
+    ):
+        raise RuntimeError(f"{name} string values must be non-empty")
+    if (
+        not isinstance(value["chunk_budget"], int)
+        or isinstance(value["chunk_budget"], bool)
+        or value["chunk_budget"] < 1
+    ):
+        raise RuntimeError(f"{name}.chunk_budget must be a positive integer")
+    for field in _BENCHMARK_SHA256_FIELDS:
+        digest = value[field]
+        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise RuntimeError(f"{name}.{field} must be a SHA-256 hex digest")
+    commit = value["implementation_commit_sha"]
+    if len(commit) != 40 or any(ch not in "0123456789abcdef" for ch in commit):
+        raise RuntimeError(f"{name}.implementation_commit_sha must be a commit SHA")
     return value
 
 
@@ -181,6 +237,13 @@ REVIEW_POLICY_ENFORCEMENT_UNLOCKED = _env_bool01(
 )
 REVIEW_BENCHMARK_ATTESTATION_HASH = _env_optional_sha256(
     "ALMIGHTY_REVIEW_BENCHMARK_ATTESTATION_HASH"
+)
+# All identities are required; missing fields deliberately cannot act as wildcards.
+REVIEW_BENCHMARK_REPORT_PATH = _env_optional_absolute_path(
+    "ALMIGHTY_REVIEW_BENCHMARK_REPORT_PATH"
+)
+REVIEW_BENCHMARK_EXPECTED_IDENTITY = _env_optional_benchmark_expected_identity(
+    "ALMIGHTY_REVIEW_BENCHMARK_EXPECTED_IDENTITY_JSON"
 )
 REVIEW_SCOPE_KILL_SWITCH = _env_bool01("ALMIGHTY_REVIEW_SCOPE_KILL_SWITCH")
 REVIEW_DEDUPE_KILL_SWITCH = _env_bool01("ALMIGHTY_REVIEW_DEDUPE_KILL_SWITCH")

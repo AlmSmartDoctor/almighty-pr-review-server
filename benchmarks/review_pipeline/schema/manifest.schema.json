@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://almighty.local/schema/review-pipeline/manifest.schema.json",
+  "title": "Review pipeline model-visible benchmark manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "case_id", "source", "patch_sha256", "content_sha256", "pr_size_stratum", "model_visible_input", "provenance_approval_status", "contains_proprietary_code", "contains_jira_context", "contains_database_context", "contains_private_context", "claim_normalization_version", "claim_tokenizer_sha256"],
+  "properties": {
+    "schema_version": {"const": "review-pipeline-manifest-v1"},
+    "case_id": {"$ref": "#/$defs/stableId"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "source_type", "source_url", "immutable_revision_sha", "license_spdx", "redistribution_permitted"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/stableId"},
+        "source_type": {"enum": ["public", "synthetic"]},
+        "source_url": {"type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2048},
+        "immutable_revision_sha": {"$ref": "#/$defs/revisionSha"},
+        "license_spdx": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 .+()\\-]{0,127}$"},
+        "redistribution_permitted": {"const": true}
+      }
+    },
+    "patch_sha256": {"$ref": "#/$defs/sha256"},
+    "content_sha256": {"$ref": "#/$defs/sha256"},
+    "pr_size_stratum": {"enum": ["small", "medium", "large"]},
+    "model_visible_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "provenance_approval_status": {"const": "approved"},
+    "contains_proprietary_code": {"const": false},
+    "contains_jira_context": {"const": false},
+    "contains_database_context": {"const": false},
+    "contains_private_context": {"const": false},
+    "claim_normalization_version": {"const": "claim-normalization-v1"},
+    "claim_tokenizer_sha256": {"const": "9787d268171dfc88884d9961c1ae8608b111eda1eda892656a4db17622937458"}
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", "minLength": 3, "maxLength": 128},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "revisionSha": {"type": "string", "pattern": "^[a-f0-9]{40}(?:[a-f0-9]{24})?$"},
+    "relativePath": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$", "minLength": 1, "maxLength": 1024}
+  }
+}

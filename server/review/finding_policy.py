@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 
 from server import config
+from server.review.benchmark_attestation import (
+    BenchmarkAttestationDecision,
+    resolve_benchmark_attestation,
+)
 
 
 def normalize_finding_path(value: str) -> str | None:
@@ -147,7 +151,8 @@ def _canonical_hash(value) -> str:
 
 
 def resolve_policy_decision(
-    repo, *, policy: str, default_mode: str | None = None
+    repo, *, policy: str, default_mode: str | None = None,
+    benchmark_attestation: BenchmarkAttestationDecision | None = None,
 ) -> PolicyDecision:
     if policy == "scope":
         column = "review_scope_guard_mode"
@@ -178,6 +183,8 @@ def resolve_policy_decision(
         effective, reason = "observe", "kill_switch"
     elif not config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED:
         effective, reason = "observe", "benchmark_gate_locked"
+    elif not (benchmark_attestation or resolve_benchmark_attestation()).can_enforce:
+        effective, reason = "observe", "benchmark_gate_locked"
     elif explicit == "enforce":
         effective, reason = "enforce", "repo_canary"
     elif full_name in canaries:
@@ -194,8 +201,13 @@ def resolve_policy_decision(
 
 
 def resolve_policy_snapshot(repo) -> PolicySnapshot:
-    scope = resolve_policy_decision(repo, policy="scope")
-    dedupe = resolve_policy_decision(repo, policy="dedupe")
+    benchmark_attestation = resolve_benchmark_attestation()
+    scope = resolve_policy_decision(
+        repo, policy="scope", benchmark_attestation=benchmark_attestation
+    )
+    dedupe = resolve_policy_decision(
+        repo, policy="dedupe", benchmark_attestation=benchmark_attestation
+    )
     decision_payload = {"scope": asdict(scope), "dedupe": asdict(dedupe)}
     decision_hash = _canonical_hash(decision_payload)
     full_name = _row_value(repo, "full_name", "") or ""
@@ -211,7 +223,7 @@ def resolve_policy_snapshot(repo) -> PolicySnapshot:
         "enforcement_unlocked": config.REVIEW_POLICY_ENFORCEMENT_UNLOCKED,
         "scope_kill_switch": config.REVIEW_SCOPE_KILL_SWITCH,
         "dedupe_kill_switch": config.REVIEW_DEDUPE_KILL_SWITCH,
-        "benchmark_attestation_hash": config.REVIEW_BENCHMARK_ATTESTATION_HASH or None,
+        "benchmark_attestation_hash": benchmark_attestation.report_hash,
         "decisions": decision_payload,
     }
     cohort_key = (
@@ -224,7 +236,7 @@ def resolve_policy_snapshot(repo) -> PolicySnapshot:
         cohort_key=cohort_key,
         decision_hash=decision_hash,
         config_hash=_canonical_hash(relevant_config),
-        benchmark_attestation_hash=config.REVIEW_BENCHMARK_ATTESTATION_HASH or None,
+        benchmark_attestation_hash=benchmark_attestation.report_hash,
     )
 
 

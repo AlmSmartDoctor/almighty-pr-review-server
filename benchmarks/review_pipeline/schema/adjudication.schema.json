@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://almighty.local/schema/review-pipeline/adjudication.schema.json",
+  "title": "Review pipeline private adjudication answer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "manifest_sha256",
+    "claim_normalization_version",
+    "claim_tokenizer_sha256",
+    "issues",
+    "known_clean_ranges",
+    "issue_pairs",
+    "adjudicator_verdicts",
+    "resolution_status",
+    "oracle_contract",
+    "prediction_issue_resolutions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "review-pipeline-adjudication-v1"
+    },
+    "case_id": {
+      "$ref": "#/$defs/stableId"
+    },
+    "manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "claim_normalization_version": {
+      "const": "claim-normalization-v1"
+    },
+    "claim_tokenizer_sha256": {
+      "const": "9787d268171dfc88884d9961c1ae8608b111eda1eda892656a4db17622937458"
+    },
+    "issues": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "known_clean_ranges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/location"
+      }
+    },
+    "issue_pairs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issuePair"
+      }
+    },
+    "adjudicator_verdicts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/verdict"
+      }
+    },
+    "resolution_status": {
+      "enum": [
+        "unanimous",
+        "resolved",
+        "unresolved"
+      ]
+    },
+    "oracle_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownership_function_version",
+        "ownership_function_sha256",
+        "chunker_version",
+        "chunker_sha256"
+      ],
+      "properties": {
+        "ownership_function_version": {
+          "const": "diff-ownership-v1"
+        },
+        "ownership_function_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "chunker_version": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,63}$"
+        },
+        "chunker_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "prediction_issue_resolutions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/predictionResolution"
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "line_start",
+        "line_end"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "line_start": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "line_end": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "line_start": {
+                "type": "integer"
+              },
+              "line_end": {
+                "type": "integer"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "line_end": {
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "allowed_locations",
+        "accepted_categories",
+        "canonical_claim_rubric"
+      ],
+      "properties": {
+        "issue_id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "allowed_locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/location"
+          }
+        },
+        "accepted_categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
+        },
+        "canonical_claim_rubric": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "allowed_token_sequences",
+            "evidence_tokens"
+          ],
+          "properties": {
+            "allowed_token_sequences": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/token"
+                }
+              }
+            },
+            "evidence_tokens": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/token"
+              }
+            }
+          }
+        }
+      }
+    },
+    "issuePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first_prediction_id",
+        "second_prediction_id",
+        "label"
+      ],
+      "properties": {
+        "first_prediction_id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "second_prediction_id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "label": {
+          "enum": [
+            "same_issue_duplicate",
+            "distinct_issue_hard_negative"
+          ]
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adjudicator_id",
+        "independent_verdict",
+        "date",
+        "disagreement_status"
+      ],
+      "properties": {
+        "adjudicator_id": {
+          "type": "string",
+          "pattern": "^adj-[a-z0-9]{6,32}$"
+        },
+        "independent_verdict": {
+          "enum": [
+            "accept",
+            "reject",
+            "uncertain"
+          ]
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "disagreement_status": {
+          "enum": [
+            "none",
+            "disputed",
+            "resolved"
+          ]
+        }
+      }
+    },
+    "predictionResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prediction_id",
+        "status"
+      ],
+      "properties": {
+        "prediction_id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "status": {
+          "enum": [
+            "resolved",
+            "unmatched"
+          ]
+        },
+        "issue_id": {
+          "$ref": "#/$defs/stableId"
+        }
+      }
+    }
+  }
+}
