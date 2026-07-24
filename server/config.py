@@ -168,14 +168,6 @@ REHEARSAL_ALLOW_SLACK = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_SLACK")
 # 공개 터널/프록시에서 관리 API를 보호하는 env-only bearer token. 빈 값은 기존
 # loopback-only 개발 동작을 보존한다.
 ADMIN_TOKEN = os.environ.get("ALMIGHTY_ADMIN_TOKEN", "")
-# Operations cursors are integrity protected and never contain paths, claims, or event data.
-# A deployment should set a distinct secret; the local fallback preserves pagination across
-# restarts without making the management token part of a response.
-OPERATIONS_CURSOR_SECRET = os.environ.get(
-    "ALMIGHTY_OPERATIONS_CURSOR_SECRET", ADMIN_TOKEN or f"local:{BASE_DIR}"
-)
-if len(OPERATIONS_CURSOR_SECRET) < 16:
-    raise RuntimeError("ALMIGHTY_OPERATIONS_CURSOR_SECRET must be at least 16 characters")
 def _validate_webhook_ingress_db(path: Path) -> None:
     temp_root = Path(tempfile.gettempdir()).resolve()
     candidate = path.resolve()

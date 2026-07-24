@@ -34,27 +34,9 @@ export type HarnessPut = {
   vendor_prompts?: Record<string, string>;
 };
 
-export type OperationsFilters = {
-  repo_id: number;
-  days: number;
-  cohort?: string;
-  vendor?: string;
-  status?: string;
-  baseline_days?: number;
-};
-
-const operationQuery = (filters: OperationsFilters, extra: Record<string, string | number | undefined> = {}) => {
-  const query = new URLSearchParams({ repo_id: String(filters.repo_id), days: String(filters.days) });
-  for (const [key, value] of Object.entries({
-    cohort: filters.cohort || undefined,
-    vendor: filters.vendor || undefined,
-    status: filters.status || undefined,
-    baseline_days: filters.baseline_days,
-    ...extra,
-  })) {
-    if (value !== undefined && value !== "") query.set(key, String(value));
-  }
-  return query.toString();
+export type OperationsDashboardFilters = {
+  repo_id?: number | null;
+  range: "24h" | "7d" | "30d";
 };
 
 export const api = {
@@ -84,6 +66,7 @@ export const api = {
   putHarness: (name: string, body: HarnessPut) => request(`/api/harness/${name}`, writeJson("PUT", body)).then(json),
   runFindings: (id: number) => request(`/api/runs/${id}/findings`).then(json),
   runVendorResults: (id: number) => request(`/api/runs/${id}/vendor-results`).then(json),
+  runDiagnostics: (id: number) => request(`/api/runs/${id}/diagnostics`).then(json),
   prRuns: (prId: number) => request(`/api/prs/${prId}/runs`).then(json),
   runContext: (id: number) => request(`/api/runs/${id}/context`).then(json),
   runPostPreview: (id: number) => request(`/api/runs/${id}/post-preview`).then(json),
@@ -93,10 +76,9 @@ export const api = {
   triggerReview: (prId: number) => request(`/api/prs/${prId}/review`, { method: "POST" }).then(json),
   cancelReview: (prId: number) => request(`/api/prs/${prId}/cancel-review`, { method: "POST" }).then(json),
   retryVendors: (runId: number) => request(`/api/runs/${runId}/retry-vendors`, { method: "POST" }).then(json),
-  operationsSummary: (filters: OperationsFilters) =>
-    request(`/api/operations/review-policy/summary?${operationQuery(filters)}`).then(json),
-  operationsRuns: (filters: OperationsFilters, cursor?: string | null, limit = 50) => {
-    const { baseline_days: _baselineDays, ...runFilters } = filters;
-    return request(`/api/operations/review-policy/runs?${operationQuery(runFilters, { cursor: cursor || undefined, limit })}`).then(json);
+  operationsDashboard: (filters: OperationsDashboardFilters) => {
+    const query = new URLSearchParams({ range: filters.range });
+    if (filters.repo_id) query.set("repo_id", String(filters.repo_id));
+    return request(`/api/operations/dashboard?${query}`).then(json);
   },
 };

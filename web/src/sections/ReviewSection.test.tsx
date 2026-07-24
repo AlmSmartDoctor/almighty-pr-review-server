@@ -10,6 +10,13 @@ vi.mock("../api", () => ({
     overview: async () => [],
     runFindings: async () => [],
     runVendorResults: async () => [],
+    runDiagnostics: async () => ({
+      run: { id: 11, status: "done", trigger: "auto", duration_ms: 1000, failure_code: "unknown", review_scope: "full" },
+      job: null, vendors: [],
+      processing: { attempts: 0, chunks: 0, chunk_statuses: {}, safe_error_codes: {}, telemetry: { denominator: 0, ok: 0, partial: 0, unavailable: 0 }, tokens: 0, tool_calls: 0 },
+      findings: { total: 0, files: 0, statuses: {}, scope: {}, posting: { eligible: 0, suppressed: 0 } },
+      retry: { mode: "not_applicable", failed_vendors: [], reasons: ["no_failed_vendor"] },
+    }),
     runContext: async () => ({ text: "", meta: null }),
     runPostPreview: async () => ({ comments: [] }),
     prPostHealth: async () => ({
@@ -53,6 +60,29 @@ function renderReview(
     </MemoryRouter>,
   );
 }
+
+test("review detail shows bounded run diagnostics and retry safety", async () => {
+  renderReview({
+    loadPrs: async () => PRS,
+    loadFindings: async () => [],
+    loadVendors: async () => [],
+    loadDiagnostics: async () => ({
+      run: { id: 11, status: "done", trigger: "manual", duration_ms: 3200, failure_code: "unknown", review_scope: "incremental" },
+      job: { id: 4, status: "done", trigger: "retry", attempts: 2, max_attempts: 3, next_run_at: null, failure_code: "unknown" },
+      vendors: [{ vendor: "codex", status: "timeout", duration_ms: 900, failure_code: "timeout" }],
+      processing: { attempts: 2, chunks: 3, chunk_statuses: { done: 2, timeout: 1 }, safe_error_codes: { timeout: 1 }, telemetry: { denominator: 3, ok: 2, partial: 1, unavailable: 0 }, tokens: 1234, tool_calls: 5 },
+      findings: { total: 2, files: 2, statuses: { approved: 1, dismissed: 1 }, scope: { owned: 1, reassigned: 1 }, posting: { eligible: 1, suppressed: 1 } },
+      retry: { mode: "failed_vendors", failed_vendors: ["codex"], reasons: [] },
+    }),
+  }, "/reviews/1");
+  expect(await screen.findByText("실행 진단")).toBeInTheDocument();
+  expect(await screen.findByText(/증분 리뷰/)).toBeInTheDocument();
+  expect(screen.getByText(/attempt 2 · chunk 3/)).toBeInTheDocument();
+  expect(screen.getByText(/tokens 1,234 · tools 5/)).toBeInTheDocument();
+  expect(screen.getByText(/posting 가능 1 · 억제 1/)).toBeInTheDocument();
+  expect(screen.getByText(/실패 벤더만 안전하게 재시도 가능: codex/)).toBeInTheDocument();
+});
+
 
 test("synchronizes all repositories and refreshes the overview", async () => {
   let loads = 0;

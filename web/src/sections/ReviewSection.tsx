@@ -76,6 +76,14 @@ type ExecutionChunk = { status: string; total_tokens?: number | null; tool_calls
 type VendorExecutionMeta = { attempts?: { attempt: number; phase: string; chunks: ExecutionChunk[] }[] };
 type VendorResult = { id: number; vendor: string; status: string; error: string | null; duration_ms?: number | null; execution_meta?: VendorExecutionMeta | null };
 type RunSummary = { id: number; head_sha: string; trigger: string | null; status: string; error: string | null; started_at: string | null; finished_at: string | null; finding_count: number };
+type RunDiagnostic = {
+  run: { id: number; status: string; trigger?: string | null; effort?: string | null; started_at?: string | null; finished_at?: string | null; duration_ms?: number | null; failure_code: string; review_scope: "full" | "incremental" };
+  job?: { id: number; status: string; trigger?: string | null; attempts: number; max_attempts: number; next_run_at?: string | null; failure_code: string } | null;
+  vendors: { vendor: string; status: string; duration_ms?: number | null; failure_code: string }[];
+  processing: { attempts: number; chunks: number; chunk_statuses: Record<string, number>; safe_error_codes: Record<string, number>; telemetry: { denominator: number; ok: number; partial: number; unavailable: number }; tokens: number; tool_calls: number };
+  findings: { total: number; files: number; statuses: Record<string, number>; scope: Record<string, number>; posting: { eligible: number; suppressed: number } };
+  retry: { mode: "failed_vendors" | "new_full_run_required" | "retry_unavailable" | "not_applicable"; failed_vendors: string[]; reasons: string[] };
+};
 type ContextManifestItem = {
   source: string;
   block_id: string;
@@ -152,6 +160,7 @@ export function ReviewSection(props: {
   loadPrs?: () => Promise<Pr[]>;
   loadFindings?: (runId: number) => Promise<Finding[]>;
   loadVendors?: (runId: number) => Promise<VendorResult[]>;
+  loadDiagnostics?: (runId: number) => Promise<RunDiagnostic>;
   loadContext?: (runId: number) => Promise<RunContext>;
   loadPreview?: (runId: number) => Promise<PostPreview>;
   loadPostHealth?: (prId: number) => Promise<PostHealth>;
@@ -168,6 +177,7 @@ export function ReviewSection(props: {
   const loadPrs = props.loadPrs ?? api.overview;
   const loadFindings = props.loadFindings ?? api.runFindings;
   const loadVendors = props.loadVendors ?? api.runVendorResults;
+  const loadDiagnostics = props.loadDiagnostics ?? api.runDiagnostics;
   const loadContext = props.loadContext ?? api.runContext;
   const loadPreview = props.loadPreview ?? api.runPostPreview;
   const syncRepos = props.syncRepos ?? api.syncRepos;
@@ -264,6 +274,7 @@ export function ReviewSection(props: {
         pr={detail}
         load={loadFindings}
         loadVendors={loadVendors}
+        loadDiagnostics={loadDiagnostics}
         loadContext={loadContext}
         loadPreview={loadPreview}
         loadPostHealth={props.loadPostHealth}
@@ -507,10 +518,60 @@ function prCreatedLine(pr: Pr) {
   return author;
 }
 
-function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealth, loadRuns, onRefresh, onBack }: {
+const diagnosticCounts = (value: Record<string, number>) => Object.entries(value)
+  .map(([key, count]) => `${key} ${count}`)
+  .join(" · ") || "기록 없음";
+
+const retryDiagnostic = (retry: RunDiagnostic["retry"]) => {
+  if (retry.mode === "failed_vendors") return `실패 벤더만 안전하게 재시도 가능: ${retry.failed_vendors.join(", ")}`;
+  if (retry.mode === "new_full_run_required") return `전체 재리뷰 필요: ${retry.reasons.join(", ")}`;
+  if (retry.mode === "retry_unavailable") return `재시도 불가: ${retry.reasons.join(", ")}`;
+  return "재시도할 실패 벤더가 없습니다.";
+};
+
+function DiagnosticPanel({ diagnostic, loaded }: { diagnostic: RunDiagnostic | null; loaded: boolean }) {
+  return <Card>
+    <CardHeader><CardTitle>실행 진단</CardTitle><StatusLine inline>원문 없이 안전한 운영 정보만 표시</StatusLine></CardHeader>
+    <CardContent>
+      {!diagnostic ? <Empty>{loaded ? "실행 진단을 불러오지 못했습니다." : "실행 진단을 불러오는 중입니다."}</Empty> : <div className="grid gap-4 text-sm sm:grid-cols-2">
+        <section aria-label="실행 상태" className="space-y-1">
+          <h3 className="font-semibold">실행 상태</h3>
+          <p>{diagnostic.run.status} · {diagnostic.run.review_scope === "incremental" ? "증분 리뷰" : "전체 리뷰"} · {diagnostic.run.trigger ?? "trigger 미상"}</p>
+          <p>소요 {formatDuration(diagnostic.run.duration_ms) ?? "—"} · 시작 {diagnostic.run.started_at ? formatDateTime(diagnostic.run.started_at) : "—"}</p>
+          {diagnostic.run.failure_code !== "unknown" && <p className="text-danger">실패 분류: {diagnostic.run.failure_code}</p>}
+        </section>
+        <section aria-label="벤더 결과" className="space-y-1">
+          <h3 className="font-semibold">벤더 결과</h3>
+          {diagnostic.vendors.length ? diagnostic.vendors.map((vendor) => <p key={vendor.vendor}>{vendor.vendor}: {vendor.status} · {formatDuration(vendor.duration_ms) ?? "—"}{vendor.failure_code !== "unknown" ? ` · ${vendor.failure_code}` : ""}</p>) : <p>벤더 결과 없음</p>}
+        </section>
+        <section aria-label="처리 범위와 사용량" className="space-y-1">
+          <h3 className="font-semibold">처리 범위와 사용량</h3>
+          <p>attempt {diagnostic.processing.attempts} · chunk {diagnostic.processing.chunks} ({diagnosticCounts(diagnostic.processing.chunk_statuses)})</p>
+          <p>finding 파일 {diagnostic.findings.files}개 · finding {diagnostic.findings.total}건</p>
+          <p>tokens {diagnostic.processing.tokens.toLocaleString("ko-KR")} · tools {diagnostic.processing.tool_calls.toLocaleString("ko-KR")}</p>
+          <p>telemetry ok {diagnostic.processing.telemetry.ok}/{diagnostic.processing.telemetry.denominator} · partial {diagnostic.processing.telemetry.partial} · unavailable {diagnostic.processing.telemetry.unavailable}</p>
+        </section>
+        <section aria-label="리뷰 결과 처리" className="space-y-1">
+          <h3 className="font-semibold">리뷰 결과 처리</h3>
+          <p>{diagnosticCounts(diagnostic.findings.statuses)}</p>
+          <p>posting 가능 {diagnostic.findings.posting.eligible} · 억제 {diagnostic.findings.posting.suppressed}</p>
+          <p>범위: {diagnosticCounts(diagnostic.findings.scope)}</p>
+        </section>
+        <section aria-label="재시도 안전성" className="space-y-1 sm:col-span-2">
+          <h3 className="font-semibold">재시도 안전성</h3>
+          <p>{retryDiagnostic(diagnostic.retry)}</p>
+          {diagnostic.job && <p className="text-muted-foreground">job {diagnostic.job.id} · {diagnostic.job.status} · attempt {diagnostic.job.attempts}/{diagnostic.job.max_attempts}{diagnostic.job.next_run_at ? ` · 다음 ${formatDateTime(diagnostic.job.next_run_at)}` : ""}</p>}
+        </section>
+      </div>}
+    </CardContent>
+  </Card>;
+}
+
+function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPreview, loadPostHealth, loadRuns, onRefresh, onBack }: {
   pr: Pr;
   load: (id: number) => Promise<Finding[]>;
   loadVendors?: (id: number) => Promise<VendorResult[]>;
+  loadDiagnostics?: (id: number) => Promise<RunDiagnostic>;
   loadContext?: (id: number) => Promise<RunContext>;
   loadPreview?: (id: number) => Promise<PostPreview>;
   loadPostHealth?: (id: number) => Promise<PostHealth>;
@@ -519,6 +580,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   onBack: () => void;
 }) {
   const loadVR = loadVendors ?? api.runVendorResults;
+  const loadDiag = loadDiagnostics ?? api.runDiagnostics;
   const loadCtx = loadContext ?? api.runContext;
   const loadPostPreview = loadPreview ?? api.runPostPreview;
   const loadHealth = loadPostHealth ?? api.prPostHealth;
@@ -526,6 +588,8 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   const [findingsRunId, setFindingsRunId] = useState<number | null>(null);
   const [vendors, setVendors] = useState<VendorResult[]>([]);
   const [vendorsRunId, setVendorsRunId] = useState<number | null>(null);
+  const [diagnostic, setDiagnostic] = useState<RunDiagnostic | null>(null);
+  const [diagnosticRunId, setDiagnosticRunId] = useState<number | null>(null);
   const [context, setContext] = useState<RunContext | null>(null);
   const [contextRunId, setContextRunId] = useState<number | null>(null);
   const [postHealth, setPostHealth] = useState<PostHealth | null>(null);
@@ -536,6 +600,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   const findingsAppliedSeq = useRef(0);
   const vendorsRequestSeq = useRef(0);
   const vendorsAppliedSeq = useRef(0);
+  const diagnosticRequestSeq = useRef(0);
   const contextRequestSeq = useRef(0);
   const contextAppliedSeq = useRef(0);
   const [savingFindingIds, setSavingFindingIds] = useState<Set<number>>(new Set());
@@ -556,6 +621,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
   const findingsLoaded = findingsRunId === runId;
   const currentFindings = findingsLoaded ? findings : [];
   const currentVendors = vendorsRunId === runId ? vendors : [];
+  const currentDiagnostic = diagnosticRunId === runId ? diagnostic : null;
   const currentContext = contextRunId === runId ? context : null;
   const currentPreview = previewRunId === runId ? preview : "승인된 finding이 없습니다.";
   const viewingPast = selectedRun !== null && selectedRun !== pr.run_id;
@@ -604,6 +670,22 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
         setVendorsRunId(targetRunId);
       });
   };
+  const reloadDiagnostics = () => {
+    const targetRunId = runId;
+    const requestSeq = ++diagnosticRequestSeq.current;
+    if (!targetRunId) return Promise.resolve();
+    return loadDiag(targetRunId)
+      .then((loaded) => {
+        if (runIdRef.current !== targetRunId || requestSeq !== diagnosticRequestSeq.current) return;
+        setDiagnostic(loaded);
+        setDiagnosticRunId(targetRunId);
+      })
+      .catch(() => {
+        if (runIdRef.current !== targetRunId || requestSeq !== diagnosticRequestSeq.current) return;
+        setDiagnostic(null);
+        setDiagnosticRunId(targetRunId);
+      });
+  };
   const reloadContext = () => {
     const targetRunId = runId;
     const requestSeq = ++contextRequestSeq.current;
@@ -626,6 +708,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
     if (!runId) return;
     reloadFindings();
     reloadVendors();
+    reloadDiagnostics();
     reloadContext();
     loadHealth(pr.id)
       .then(setPostHealth)
@@ -666,6 +749,7 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
       onRefresh();
       reloadFindings();
       reloadVendors();
+      reloadDiagnostics();
       reloadContext();
     }, POLL_MS);
     return () => clearInterval(id);
@@ -998,6 +1082,8 @@ function Detail({ pr, load, loadVendors, loadContext, loadPreview, loadPostHealt
               )}
             </CardContent>
           </Card>
+
+          <DiagnosticPanel diagnostic={currentDiagnostic} loaded={diagnosticRunId === runId} />
 
           <Card>
             <CardHeader>

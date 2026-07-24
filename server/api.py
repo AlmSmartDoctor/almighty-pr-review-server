@@ -854,6 +854,157 @@ def run_vendor_results(run_id: int, conn=Depends(get_conn)):
     return [dict(v) for v in review_repo.list_vendor_results(conn, run_id)]
 
 
+@app.get("/api/runs/{run_id}/diagnostics")
+def run_diagnostics(run_id: int, conn=Depends(get_conn)):
+    """Return bounded operational diagnostics without raw model or finding content."""
+    from server.repos import operations_repo
+
+    run = review_repo.get_run(conn, run_id)
+    if run is None:
+        raise HTTPException(404, "run not found")
+    row = conn.execute(
+        """SELECT p.id AS pr_id, p.number AS pr_number, p.head_sha AS current_head,
+                  p.state AS pr_state, r.id AS repo_id, r.full_name AS repo_name,
+                  r.enabled, r.vendor_claude_on, r.vendor_codex_on
+           FROM pull_request p JOIN repo r ON r.id=p.repo_id WHERE p.id=?""",
+        (run["pr_id"],),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "pr not found")
+
+    vendors = [dict(item) for item in review_repo.list_vendor_results(conn, run_id)]
+    attempts = chunks = tokens = tools = 0
+    telemetry = {"ok": 0, "partial": 0, "unavailable": 0}
+    chunk_statuses: dict[str, int] = {}
+    safe_errors: dict[str, int] = {}
+    for vendor in vendors:
+        meta = vendor.get("execution_meta") or {}
+        for attempt in meta.get("attempts", []):
+            attempts += 1
+            for chunk in attempt.get("chunks", []):
+                chunks += 1
+                status = chunk.get("status", "unknown")
+                chunk_statuses[status] = chunk_statuses.get(status, 0) + 1
+                state = chunk.get("telemetry_status", "unavailable")
+                state = state if state in telemetry else "unavailable"
+                telemetry[state] += 1
+                for key, target in (("total_tokens", "tokens"), ("tool_calls", "tools")):
+                    value = chunk.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        if target == "tokens":
+                            tokens += value
+                        else:
+                            tools += value
+                code = chunk.get("safe_error_code")
+                if isinstance(code, str):
+                    safe_errors[code] = safe_errors.get(code, 0) + 1
+
+    finding_rows = conn.execute(
+        """SELECT status, scope_status, posting_eligible, file
+           FROM finding WHERE run_id=?""",
+        (run_id,),
+    ).fetchall()
+    finding_statuses: dict[str, int] = {}
+    scope_statuses: dict[str, int] = {}
+    files: set[str] = set()
+    eligible = 0
+    for finding in finding_rows:
+        status = finding["status"] or "unknown"
+        scope = finding["scope_status"] or "unknown"
+        finding_statuses[status] = finding_statuses.get(status, 0) + 1
+        scope_statuses[scope] = scope_statuses.get(scope, 0) + 1
+        eligible += int(bool(finding["posting_eligible"]))
+        if finding["file"]:
+            files.add(finding["file"])
+
+    failed = set(review_repo.failed_vendors(conn, run_id))
+    latest_id = conn.execute(
+        "SELECT id FROM review_run WHERE pr_id=? ORDER BY id DESC LIMIT 1",
+        (run["pr_id"],),
+    ).fetchone()["id"]
+    enabled_vendors = ({"claude"} if row["vendor_claude_on"] else set())
+    if row["vendor_codex_on"]:
+        enabled_vendors.add("codex")
+    reasons: list[str] = []
+    if row["pr_state"] != "open":
+        reasons.append("pr_closed")
+    if row["current_head"] != run["head_sha"]:
+        reasons.append("head_changed")
+    if latest_id != run_id:
+        reasons.append("not_latest_run")
+    if run["status"] != "done":
+        reasons.append("run_not_done")
+    if not row["enabled"]:
+        reasons.append("repo_disabled")
+    if failed - enabled_vendors:
+        reasons.append("failed_vendor_disabled")
+    if job_repo.retry_enqueue_conflict(
+        conn, pr_id=run["pr_id"], head_sha=run["head_sha"], run_id=run_id
+    ):
+        reasons.append("active_job_conflict")
+    if not failed:
+        mode = "not_applicable"
+        reasons.append("no_failed_vendor")
+    elif reasons:
+        mode = (
+            "new_full_run_required"
+            if {"head_changed", "not_latest_run", "run_not_done"} & set(reasons)
+            else "retry_unavailable"
+        )
+    else:
+        mode = "failed_vendors"
+
+    job = conn.execute(
+        """SELECT id,status,trigger,attempts,max_attempts,next_run_at,error
+           FROM review_job WHERE run_id=? OR retry_run_id=?
+           ORDER BY id DESC LIMIT 1""",
+        (run_id, run_id),
+    ).fetchone()
+    return {
+        "run": {
+            "id": run_id, "status": run["status"], "trigger": run["trigger"],
+            "effort": run["effort"], "started_at": run["started_at"],
+            "finished_at": run["finished_at"],
+            "duration_ms": operations_repo.duration_ms(
+                run["started_at"], run["finished_at"],
+                running=run["status"] == "running",
+            ),
+            "failure_code": operations_repo.failure_code(run["error"]),
+            "review_scope": "incremental" if run["base_sha"] else "full",
+            "repo": {"id": row["repo_id"], "full_name": row["repo_name"]},
+            "pr": {"id": row["pr_id"], "number": row["pr_number"]},
+        },
+        "job": None if job is None else {
+            "id": job["id"], "status": job["status"], "trigger": job["trigger"],
+            "attempts": job["attempts"], "max_attempts": job["max_attempts"],
+            "next_run_at": job["next_run_at"],
+            "failure_code": operations_repo.failure_code(job["error"]),
+        },
+        "vendors": [
+            {
+                "vendor": vendor["vendor"], "status": vendor["status"],
+                "duration_ms": vendor["duration_ms"],
+                "failure_code": operations_repo.failure_code(vendor["error"]),
+            }
+            for vendor in vendors
+        ],
+        "processing": {
+            "attempts": attempts, "chunks": chunks,
+            "chunk_statuses": chunk_statuses, "safe_error_codes": safe_errors,
+            "telemetry": {"denominator": chunks, **telemetry},
+            "tokens": tokens, "tool_calls": tools,
+        },
+        "findings": {
+            "total": len(finding_rows), "files": len(files),
+            "statuses": finding_statuses, "scope": scope_statuses,
+            "posting": {"eligible": eligible, "suppressed": len(finding_rows) - eligible},
+        },
+        "retry": {
+            "mode": mode, "failed_vendors": sorted(failed), "reasons": reasons,
+        },
+    }
+
+
 @app.get("/api/vendor-results/{vr_id}/raw")
 def vendor_result_raw(vr_id: int, conn=Depends(get_conn)):
     """Raw model transcripts are disabled by default and never served normally."""

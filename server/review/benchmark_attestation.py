@@ -218,64 +218,6 @@ def _clean_head(repo_root: Path) -> tuple[str | None, AttestationReason | None]:
     return value, None
 
 
-def public_benchmark_evidence() -> dict[str, Any] | None:
-    """Return only hash-pinned sanitized aggregate evidence, even while locked."""
-    path = config.REVIEW_BENCHMARK_REPORT_PATH
-    expected_hash = config.REVIEW_BENCHMARK_ATTESTATION_HASH
-    expected_identity = config.REVIEW_BENCHMARK_EXPECTED_IDENTITY
-    if path is None or not expected_hash or expected_identity is None:
-        return None
-    loaded = _read_canonical_report(path)
-    if loaded is None:
-        return None
-    report, report_hash = loaded
-    if report_hash != expected_hash:
-        return None
-    try:
-        identity = _identity_from_report(report)
-        configured = BenchmarkIdentity(**expected_identity)
-    except (KeyError, TypeError):
-        return None
-    if identity != configured:
-        return None
-    metrics = report["metrics"]
-    duplicate = metrics["duplicate_precision"]
-    def public_metric(name: str) -> dict[str, Any]:
-        metric = metrics[name]
-        return {
-            key: metric[key]
-            for key in (
-                "numerator", "denominator", "point_estimate",
-                "wilson_95_lower_bound", "threshold", "passed",
-                "required_sample_shortfall",
-            )
-        }
-
-    return {
-        "report_hash": report_hash,
-        "identity": identity,
-        "generated_at": report["generated_at"],
-        "sample": {
-            "cases": report["rollout_evidence"]["case_count"],
-            "findings": report["finding_count"],
-            "issues": report["issue_count"],
-            "duplicate_precision": {
-                "numerator": duplicate["numerator"],
-                "denominator": duplicate["denominator"],
-            },
-        },
-        "metrics": {
-            name: public_metric(name)
-            for name in (
-                "issue_precision", "issue_recall", "duplicate_precision",
-                "duplicate_recall", "scope_accuracy", "posting_accuracy",
-            )
-        },
-        "cost_regression": metrics["cost_regression"]["point_estimate"],
-        "gate_reasons": list(report["failure_reasons"])[:32],
-    }
-
-
 def resolve_benchmark_attestation(
     *, report_path: Path | None = None, expected_hash: str | None = None,
     expected_identity: BenchmarkIdentity | None = None, repo_root: Path | None = None,

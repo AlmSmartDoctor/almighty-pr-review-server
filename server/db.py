@@ -399,14 +399,15 @@ def init_schema(conn: sqlite3.Connection) -> None:
           ON finding(run_id, status, vendor, id);
         CREATE INDEX IF NOT EXISTS idx_pull_request_repo_open
           ON pull_request(repo_id, number) WHERE state='open';
-        -- Bounded operations scans: repo -> PR -> run start bucket and explicit
-        -- legacy NULL bucket continuation without reading finding/transcript bodies.
+        -- Bounded operations dashboard scans by repository or across all repositories.
         CREATE INDEX IF NOT EXISTS idx_pull_request_repo_id
           ON pull_request(repo_id, id);
         CREATE INDEX IF NOT EXISTS idx_review_run_operations
           ON review_run(pr_id, started_at DESC, id DESC);
-        CREATE INDEX IF NOT EXISTS idx_review_run_operations_repo
-          ON review_run(repo_id, (started_at IS NULL), started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_review_run_dashboard_repo
+          ON review_run(repo_id, started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_review_run_dashboard_global
+          ON review_run(started_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_vendor_result_run_vendor
           ON vendor_result(run_id, vendor, status);
         CREATE INDEX IF NOT EXISTS idx_finding_canary_metrics

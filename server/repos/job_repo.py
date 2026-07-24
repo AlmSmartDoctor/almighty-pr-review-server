@@ -140,6 +140,23 @@ def enqueue_manual(conn, *, pr_id, head_sha, priority=0) -> int:
     )
 
 
+def retry_enqueue_conflict(conn, *, pr_id, head_sha, run_id) -> bool:
+    """Read-only parity check for enqueue_retry's active same-head conflict."""
+    current = conn.execute(
+        """SELECT status, trigger, retry_run_id FROM review_job
+           WHERE pr_id=? AND head_sha=?""",
+        (pr_id, head_sha),
+    ).fetchone()
+    return bool(
+        current
+        and current["status"] in {"queued", "running"}
+        and (
+            current["trigger"] != "retry"
+            or current["retry_run_id"] != run_id
+        )
+    )
+
+
 def enqueue_retry(conn, *, pr_id, head_sha, run_id) -> int:
     """부분 재시도: trigger='retry' + retry_run_id로 이어받을 대상 run을 명시해,
     worker가 latest run이 아니라 **엔드포인트가 검증한 바로 그 run**의 실패 벤더만

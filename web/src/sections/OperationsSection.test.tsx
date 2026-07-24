@@ -1,128 +1,85 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { expect, test, vi } from "vitest";
 import { OperationsSection } from "./OperationsSection";
 
-const metrics = (overrides: Record<string, unknown> = {}) => ({
-  runs: 24,
-  policy_modes: { observe: 24, enforce: 0, unknown: 0 },
-  vendor_final: { denominator: 24, statuses: { done: 24 } },
-  vendor_attempts: { denominator: 24, statuses: { done: 24 }, phases: { initial: 24 } },
-  telemetry: { denominator: 24, ok: 24, partial: 0, unavailable: 0 },
-  aggregates: { tokens: 1200, tools: 24, duration_ms: 12000 },
-  scope: { owned: 2, reassigned: 1, would_reject: 0, rejected: 0 },
-  posting: { eligible: 2, suppressed: 1 },
-  duplicates: { groups: 0, originals: 0 },
-  adjudication: { coverage_denominator: 0, decided: 0, would_reject_feedback_denominator: 0, approved: 0, edited: 0, dismissed: 0 },
+const dashboard = (overrides: Record<string, unknown> = {}) => ({
+  filters: { repo_id: null, range: "24h" as const },
+  as_of: "2026-07-24 12:00:00.000000",
+  window_start: "2026-07-23 12:00:00.000000",
+  summary: {
+    sampled_runs: 10,
+    scan_limit: 5000,
+    truncated: false,
+    statuses: { done: 8, failed: 2 },
+    success: { numerator: 8, denominator: 10, rate: 0.8 },
+    latency_ms: { denominator: 10, p50: 1000, p95: 3000 },
+    vendors: [{ vendor: "codex", results: 10, statuses: { done: 8, timeout: 2 }, success: { numerator: 8, denominator: 10, rate: 0.8 }, latency_ms: { denominator: 10, p50: 900, p95: 2800 } }],
+    recent_failures: [{ run_id: 9, status: "failed", started_at: "2026-07-24 11:00:00", failure_code: "timeout", repo: { id: 7, full_name: "org/repo" }, pr: { id: 11, number: 42, title: "Fix" }, vendors: [{ vendor: "codex", status: "timeout", failure_code: "timeout" }] }],
+  },
+  active_jobs: { total: 1, listed: 1, truncated: false, jobs: [{ id: 3, status: "running", trigger: "manual", attempts: 1, max_attempts: 3, created_at: "2026-07-24 11:30:00", locked_at: "2026-07-24 11:31:00", next_run_at: null, failure_code: "unknown", repo: { id: 7, full_name: "org/repo" }, pr: { id: 11, number: 42 } }] },
   ...overrides,
 });
 
-const summary = (overrides: Record<string, unknown> = {}) => ({
-  as_of: "2026-07-23T12:00:00Z",
-  sampled_through: "2026-07-23T11:00:00Z",
-  truncated: false,
-  current: metrics(),
-  baseline: { window_days: 14, metrics: metrics() },
-  comparison: { status: "ready", minimum_denominator: 20, current_run_shortfall: 0, baseline_run_shortfall: 0 },
-  benchmark: { validated: true, status: "valid", sample: { cases: 30, findings: 30, issues: 30, duplicate_precision: { numerator: 30, denominator: 30 } }, gate_reasons: [] },
-  control: { enforcement_unlocked: false, scope: { configured_mode: "observe", canary_member: false, kill_switch: false }, dedupe: { configured_mode: "observe", canary_member: false, kill_switch: false }, configuration_activation: "startup", restart_required: false },
-  ...overrides,
-});
-
-const knownRun = {
-  id: 1, status: "done", started_at: "2026-07-23T10:00:00Z", cohort: "cohort-a",
-  policy: { scope_requested_mode: "observe", scope_effective_mode: "observe", scope_reason: "locked", dedupe_requested_mode: "observe", dedupe_effective_mode: "observe", dedupe_reason: "locked" },
-  vendor_final: { denominator: 1, statuses: { done: 1 } }, finding_scope: { owned: 1 },
-};
 const renderOperations = (props: Partial<React.ComponentProps<typeof OperationsSection>> = {}) => render(
-  <OperationsSection
-    loadRepos={async () => [{ id: 7, full_name: "org/repo" }]}
-    loadSummary={async () => summary()}
-    loadRuns={async () => ({ runs: [knownRun], next_cursor: null })}
+  <MemoryRouter><OperationsSection
+    loadRepos={async () => [{ id: 7, full_name: "org/repo" }, { id: 8, full_name: "org/other" }]}
+    loadDashboard={async () => dashboard()}
     {...props}
-  />,
+  /></MemoryRouter>,
 );
 
-test("sends the exact selected filters to both summary and runs queries", async () => {
-  const loadSummary = vi.fn(async () => summary());
-  const loadRuns = vi.fn(async () => ({ runs: [knownRun], next_cursor: null }));
-  renderOperations({ loadSummary, loadRuns });
-  await screen.findByText("실행 정책 snapshot");
-
-  fireEvent.change(screen.getByLabelText("기간"), { target: { value: "7" } });
-  fireEvent.change(screen.getByLabelText("정책 cohort"), { target: { value: "unknown" } });
-  fireEvent.change(screen.getByLabelText("벤더"), { target: { value: "codex" } });
-  fireEvent.change(screen.getByLabelText("실행 상태"), { target: { value: "failed" } });
-
-  const expected = { repo_id: 7, days: 7, baseline_days: 7, cohort: "unknown", vendor: "codex", status: "failed" };
-  await waitFor(() => expect(loadSummary).toHaveBeenLastCalledWith(expected));
-  await waitFor(() => expect(loadRuns).toHaveBeenLastCalledWith(expected, null));
+test("loads all repositories and 24 hours by default", async () => {
+  const loadDashboard = vi.fn(async () => dashboard());
+  renderOperations({ loadDashboard });
+  expect(await screen.findByText("운영 대시보드")).toBeInTheDocument();
+  await waitFor(() => expect(loadDashboard).toHaveBeenCalledWith({ repo_id: null, range: "24h" }));
+  expect(screen.getByLabelText("레포")).toHaveValue("");
+  expect(screen.getByLabelText("기간")).toHaveValue("24h");
 });
 
-test("announces loading, empty, and error states accessibly", async () => {
+test("sends exact repository and range filters", async () => {
+  const loadDashboard = vi.fn(async () => dashboard());
+  renderOperations({ loadDashboard });
+  await screen.findByRole("heading", { name: "최근 장애" });
+  fireEvent.change(screen.getByLabelText("레포"), { target: { value: "8" } });
+  fireEvent.change(screen.getByLabelText("기간"), { target: { value: "30d" } });
+  await waitFor(() => expect(loadDashboard).toHaveBeenLastCalledWith({ repo_id: 8, range: "30d" }));
+});
+
+test("renders core health, active work, vendor metrics, and failure links", async () => {
+  renderOperations();
+  expect(await screen.findByText("80.0%")).toBeInTheDocument();
+  expect(screen.getByText("codex")).toBeInTheDocument();
+  expect(screen.getByText("running")).toBeInTheDocument();
+  expect(screen.getByText("시간 초과")).toBeInTheDocument();
+  const links = screen.getAllByRole("link", { name: "org/repo #42" });
+  expect(links.every((link) => link.getAttribute("href") === "/reviews/11")).toBe(true);
+  expect(screen.queryByText(/Canary|benchmark|enforcement|cohort/i)).not.toBeInTheDocument();
+});
+
+test("announces loading, failure, and truncated data", async () => {
   const pending = new Promise<never>(() => undefined);
-  const { unmount } = render(<OperationsSection loadRepos={() => pending} />);
-  expect(screen.getByRole("status")).toHaveTextContent("운영 지표를 불러오는 중입니다.");
+  const { unmount } = renderOperations({ loadDashboard: () => pending });
+  expect(screen.getByRole("status")).toHaveTextContent("운영 현황을 불러오는 중입니다.");
   unmount();
 
-  renderOperations({ loadRepos: async () => [] });
-  expect(await screen.findByText(/표시할 레포가 없습니다/)).toBeInTheDocument();
+  renderOperations({ loadDashboard: async () => { throw new Error("down"); } });
+  expect(await screen.findByRole("alert")).toHaveTextContent("운영 현황을 불러오지 못했습니다.");
 
-  renderOperations({ loadSummary: async () => { throw new Error("down"); } });
-  expect(await screen.findByRole("alert")).toHaveTextContent("운영 지표를 불러오지 못했습니다.");
+  renderOperations({ loadDashboard: async () => dashboard({ summary: { ...dashboard().summary, truncated: true } }) });
+  expect(await screen.findByText(/일부 결과만 표시/)).toBeInTheDocument();
 });
 
-test("shows locked observe state and an accessible unknown cohort", async () => {
+test("ignores stale dashboard responses after filters change", async () => {
+  let resolveOld!: (value: ReturnType<typeof dashboard>) => void;
+  let calls = 0;
+  const old = new Promise<ReturnType<typeof dashboard>>((resolve) => { resolveOld = resolve; });
   renderOperations({
-    loadSummary: async () => summary({ benchmark: { validated: false, status: "missing_report_path", gate_reasons: ["report missing"] } }),
-    loadRuns: async () => ({ runs: [{ ...knownRun, cohort: "unknown" }], next_cursor: null }),
+    loadDashboard: async (filters) => ++calls === 1 ? old : dashboard({ filters, summary: { ...dashboard().summary, sampled_runs: 77 } }),
   });
-  expect(await screen.findByText("observe 유지 — benchmark gate가 잠겨 enforce할 수 없습니다.")).toBeInTheDocument();
-  expect(screen.getByText("unknown cohort")).toBeInTheDocument();
-  expect(screen.getByText("report missing")).toBeInTheDocument();
-});
-
-test("does not let stale filter responses overwrite the new selection", async () => {
-  let resolveOldSummary!: (value: ReturnType<typeof summary>) => void;
-  let resolveOldRuns!: (value: { runs: (typeof knownRun)[]; next_cursor: null }) => void;
-  let summaryCalls = 0;
-  let runCalls = 0;
-  const oldSummary = new Promise<ReturnType<typeof summary>>((resolve) => { resolveOldSummary = resolve; });
-  const oldRuns = new Promise<{ runs: (typeof knownRun)[]; next_cursor: null }>((resolve) => { resolveOldRuns = resolve; });
-  renderOperations({
-    loadSummary: async () => ++summaryCalls === 1 ? oldSummary : summary(),
-    loadRuns: async () => ++runCalls === 1 ? oldRuns : { runs: [{ ...knownRun, cohort: "new-cohort" }], next_cursor: null },
-  });
-  const cohort = await screen.findByLabelText("정책 cohort");
-  fireEvent.change(cohort, { target: { value: "new-cohort" } });
-  expect(await screen.findByText("new-cohort")).toBeInTheDocument();
-  resolveOldSummary(summary());
-  resolveOldRuns({ runs: [{ ...knownRun, cohort: "old-cohort" }], next_cursor: null });
-  await waitFor(() => expect(screen.queryByText("old-cohort")).not.toBeInTheDocument());
-});
-
-
-test("uses the same filters and returned cursor for pagination", async () => {
-  const loadRuns = vi.fn(async (_filters, cursor?: string | null) => cursor === "page-2"
-    ? { runs: [{ ...knownRun, id: 2 }], next_cursor: null }
-    : { runs: [knownRun], next_cursor: "page-2" });
-  renderOperations({ loadRuns });
-  await screen.findByText("다음");
-  fireEvent.click(screen.getByRole("button", { name: "다음" }));
-  await waitFor(() => expect(loadRuns).toHaveBeenLastCalledWith({ repo_id: 7, days: 14, baseline_days: 14, cohort: "", vendor: "", status: "" }, "page-2"));
-});
-
-test("renders API-derived rollback warnings only when denominator thresholds permit comparison", async () => {
-  const current = metrics({
-    vendor_final: { denominator: 24, statuses: { partial: 4, timeout: 2 } },
-    telemetry: { denominator: 24, ok: 20, partial: 4, unavailable: 0 },
-    adjudication: { coverage_denominator: 2, decided: 2, would_reject_feedback_denominator: 2, approved: 1, edited: 0, dismissed: 1 },
-    cost_regression: 1.11,
-  });
-  const baseline = metrics({ vendor_final: { denominator: 24, statuses: { partial: 0, timeout: 0 } }, telemetry: { denominator: 24, ok: 24, partial: 0, unavailable: 0 } });
-  renderOperations({ loadSummary: async () => summary({ current, baseline: { window_days: 14, metrics: baseline }, benchmark: { validated: false, status: "locked", sample: { duplicate_precision: { numerator: 29, denominator: 30 } }, gate_reasons: ["precision"] } }) });
-  expect(await screen.findByRole("heading", { name: "Rollback 경고" })).toBeInTheDocument();
-  expect(screen.getByText(/승인 또는 편집된 finding/)).toBeInTheDocument();
-  expect(screen.getByText(/partial\/timeout 비율/)).toBeInTheDocument();
-  expect(screen.getByText(/telemetry ok coverage/)).toBeInTheDocument();
-  expect(screen.getByText(/cost regression/)).toBeInTheDocument();
+  fireEvent.change(await screen.findByLabelText("기간"), { target: { value: "7d" } });
+  expect(await screen.findByText("77")).toBeInTheDocument();
+  resolveOld(dashboard({ summary: { ...dashboard().summary, sampled_runs: 99 } }));
+  await waitFor(() => expect(screen.queryByText("99")).not.toBeInTheDocument());
 });
