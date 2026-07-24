@@ -91,6 +91,19 @@ CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 # 포스팅 코멘트 최상단 배너(env-only). 설정 시 게시 코멘트 맨 위에 붙는다(테스트/스테이징
 # 표식용). 미설정("")이면 배너 없음(기본 동작 불변).
 POST_BANNER = os.environ.get("ALMIGHTY_POST_BANNER", "")
+REHEARSAL_POST_ENABLED = _env_bool01("ALMIGHTY_REHEARSAL_POST_ENABLED")
+REHEARSAL_POST_TARGET = os.environ.get("ALMIGHTY_REHEARSAL_POST_TARGET", "").strip().lower()
+REHEARSAL_POST_HEAD_SHA = os.environ.get("ALMIGHTY_REHEARSAL_POST_HEAD_SHA", "").strip()
+REHEARSAL_GH_CREDENTIAL_FINGERPRINT = os.environ.get(
+    "ALMIGHTY_REHEARSAL_GH_CREDENTIAL_FINGERPRINT", ""
+).strip().lower()
+REHEARSAL_ALLOW_CREATE = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_CREATE")
+REHEARSAL_ALLOW_UPDATE = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_UPDATE")
+REHEARSAL_ALLOW_UPDATE_FALLBACK = _env_bool01(
+    "ALMIGHTY_REHEARSAL_ALLOW_UPDATE_FALLBACK"
+)
+REHEARSAL_ALLOW_INLINE = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_INLINE")
+REHEARSAL_ALLOW_SLACK = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_SLACK")
 
 # 리뷰 종료 macOS 알림(osascript). 로컬 단일 사용자 도구라 기본 켜짐 — "0"으로 끔.
 NOTIFY_ON_DONE = os.environ.get("ALMIGHTY_NOTIFY", "1") != "0"

@@ -21,6 +21,37 @@ class FakeRunner:
         raise AssertionError(f"unexpected call: {args}")
 
 
+def test_complete_review_pagination_reads_until_explicit_short_page(monkeypatch):
+    monkeypatch.setattr(gh, "_normalized_env", lambda *args, **kwargs: {})
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        endpoint = args[2]
+        if "&page=2" in endpoint:
+            return json.dumps([{"id": 100}])
+        if "&page=1" in endpoint:
+            return json.dumps([{"id": i} for i in range(100)])
+        raise AssertionError(endpoint)
+
+    rows = gh.GhClient(runner=runner).list_pr_reviews_complete("acme/api", 7)
+    assert len(rows) == 101
+    assert len(calls) == 2
+
+
+def test_complete_review_pagination_cap_fails_closed(monkeypatch):
+    monkeypatch.setattr(gh, "_normalized_env", lambda *args, **kwargs: {})
+    client = gh.GhClient(
+        runner=lambda *args, **kwargs: json.dumps([{} for _ in range(100)])
+    )
+    with pytest.raises(gh.GitHubCliError, match="pagination cap"):
+        client._list_complete_pages(
+            "/repos/acme/api/pulls/7/reviews",
+            kind="test_complete_pages",
+            max_pages=2,
+        )
+
+
 def test_list_open_prs_parses_json():
     payload = json.dumps(
         [

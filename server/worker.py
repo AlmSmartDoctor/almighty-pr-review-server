@@ -43,7 +43,7 @@ def _is_retryable(msg: str) -> bool:
 
 
 async def run_one_job(
-    conn, *, worker_id: str, pool=None, owner_process_id=None
+    conn, *, worker_id: str, pool=None, owner_process_id=None, deps_builder=build_deps
 ) -> bool:
     """queued 잡 1건을 claim해 실행. 처리했으면 True."""
     job = job_repo.claim_next(
@@ -83,9 +83,9 @@ async def run_one_job(
             return True
         settings = settings_repo.get(conn)
         deps = (
-            build_deps(repo, settings, pool=pool)
+            deps_builder(repo, settings, pool=pool)
             if pool is not None
-            else build_deps(repo, settings)
+            else deps_builder(repo, settings)
         )
         # trigger='retry'는 엔드포인트가 검증한 retry_run_id의 실패 벤더만 재실행(새 run 미생성).
         owner_kwargs = (

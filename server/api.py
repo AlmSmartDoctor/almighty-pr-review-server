@@ -1,10 +1,13 @@
 import asyncio
+import hashlib
 import json
+import os
 import re
 import sqlite3
 import threading
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -51,6 +54,39 @@ from server.routes.harness import (
 _initialized = False
 _POST_LOCKS: dict[int, threading.Lock] = {}
 _POST_LOCKS_GUARD = threading.Lock()
+
+
+@dataclass(frozen=True)
+class RehearsalPostingPolicy:
+    """Explicit harness-only posting boundary; inactive preserves product behavior."""
+    active: bool = False
+    allow_create: bool = False
+    allow_update: bool = False
+    allow_update_fallback: bool = False
+    allow_inline: bool = False
+    allow_slack: bool = False
+
+
+DEFAULT_REHEARSAL_POSTING_POLICY = RehearsalPostingPolicy()
+
+
+def _server_rehearsal_policy(repo, pr, run) -> RehearsalPostingPolicy:
+    if not config.REHEARSAL_POST_ENABLED:
+        return DEFAULT_REHEARSAL_POSTING_POLICY
+    target = f"{repo['full_name'].strip().lower()}#{pr['number']}"
+    if (
+        target != config.REHEARSAL_POST_TARGET
+        or run["head_sha"] != config.REHEARSAL_POST_HEAD_SHA
+    ):
+        raise HTTPException(403, "rehearsal target identity mismatch")
+    return RehearsalPostingPolicy(
+        active=True,
+        allow_create=config.REHEARSAL_ALLOW_CREATE,
+        allow_update=config.REHEARSAL_ALLOW_UPDATE,
+        allow_update_fallback=config.REHEARSAL_ALLOW_UPDATE_FALLBACK,
+        allow_inline=config.REHEARSAL_ALLOW_INLINE,
+        allow_slack=config.REHEARSAL_ALLOW_SLACK,
+    )
 
 
 def _post_lock(run_id: int) -> threading.Lock:
@@ -914,6 +950,22 @@ _gh = None
 
 def get_gh():
     global _gh
+    if config.REHEARSAL_POST_ENABLED:
+        token = os.environ.get("GH_TOKEN", "")
+        config_dir = os.environ.get("GH_CONFIG_DIR", "")
+        fingerprint = "sha256:" + hashlib.sha256(token.encode()).hexdigest()
+        if (
+            not token
+            or not config_dir
+            or fingerprint != config.REHEARSAL_GH_CREDENTIAL_FINGERPRINT
+        ):
+            raise HTTPException(503, "rehearsal write credential binding failed")
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "GH_CONFIG_DIR": config_dir,
+            "GH_TOKEN": token,
+        }
+        return GhClient(env=env, strict_isolated=True)
     if _gh is None:
         _gh = GhClient()
     return _gh
@@ -1225,24 +1277,39 @@ def post_health(pid: int, conn=Depends(get_conn), gh=Depends(get_gh)):
     return JSONResponse(status_code=_health_status_code(health), content=health)
 
 
-def _inline_comments(gh, repo_full: str, number: int, findings):
+def _inline_comments(
+    gh, repo_full: str, number: int, findings, *, allow_inline: bool = True,
+    operation_marker: str | None = None,
+):
     """diff에 매핑되는 finding만 review 인라인 코멘트로 변환. createReview는 diff 밖
     라인이 하나라도 있으면 전체를 422로 거부하므로 유효 라인만 통과시킨다. diff 조회가
     실패하면 인라인 없이 본문만으로 게시(게시 자체는 막지 않는다)."""
+    if not allow_inline:
+        return []
     try:
         diff = gh.diff(repo_full, number)
     except GitHubCliError:
         return []
     valid = commentable_lines(diff)
-    return [
+    comments = [
         {"path": f.file, "line": f.line, "body": build_inline_comment(f)}
         for f in findings
         if f.line and f.line in valid.get(f.file, set())
     ]
+    if operation_marker:
+        for comment in comments:
+            comment["body"] = f"{comment['body']}\n\n{operation_marker}"
+    return comments
 
 
-def _create_review(gh, repo, pr, run, body: str, findings) -> dict:
-    comments = _inline_comments(gh, repo["full_name"], pr["number"], findings)
+def _create_review(
+    gh, repo, pr, run, body: str, findings, *, allow_inline: bool = True,
+    operation_marker: str | None = None,
+) -> dict:
+    comments = _inline_comments(
+        gh, repo["full_name"], pr["number"], findings,
+        allow_inline=allow_inline, operation_marker=operation_marker,
+    )
     return gh.create_review(
         repo["full_name"], pr["number"], run["head_sha"], body, comments
     )
@@ -1401,7 +1468,10 @@ def post_run(
         lock.release()
 
 
-def _post_run_locked(run_id: int, *, conn, gh, slack):
+def _post_run_locked(
+    run_id: int, *, conn, gh, slack,
+    rehearsal_policy: RehearsalPostingPolicy | None = None,
+):
     run = review_repo.get_run(conn, run_id)
     if run is None:
         raise HTTPException(404, "run not found")
@@ -1416,6 +1486,8 @@ def _post_run_locked(run_id: int, *, conn, gh, slack):
             "PR head가 갱신되어 이 run은 게시할 수 없습니다. 최신 리뷰를 실행하세요.",
         )
     repo = repo_repo.get(conn, pr["repo_id"])
+    if rehearsal_policy is None:
+        rehearsal_policy = _server_rehearsal_policy(repo, pr, run)
     health = _post_health(conn, pr["id"], gh)
     if not health["ok"]:
         return JSONResponse(
@@ -1455,10 +1527,35 @@ def _post_run_locked(run_id: int, *, conn, gh, slack):
             },
         )
 
+    if post_operation_repo.has_legacy_identity(conn, run_id):
+        raise HTTPException(
+            409, "legacy posting operation requires manual reconciliation"
+        )
+    comments_to_post = _comments_to_post(conn, run_id)
+    if not comments_to_post:
+        succeeded = post_operation_repo.succeeded_for_run(conn, run_id)
+        if succeeded:
+            # A successful replay is deliberately a stable no-op, not a historical response.
+            operation_ids = [row["id"] for row in succeeded]
+            if len(operation_ids) == 1:
+                return {"operation_id": operation_ids[0], "replayed": True}
+            return {"operation_ids": operation_ids, "replayed": True}
     posted = []
-    for comment in _comments_to_post(conn, run_id):
+    for comment in comments_to_post:
         _assert_post_fresh(conn, gh, repo, pr, run)
         vendor = comment["vendor"]
+        prev = posted_repo.latest_for_pr_vendor(
+            conn, pr_id=pr["id"], vendor=vendor
+        )
+        reuse = (
+            prev is not None and prev["kind"] == "review"
+            and prev["github_comment_id"]
+        )
+        if rehearsal_policy.active:
+            if reuse and not rehearsal_policy.allow_update:
+                raise HTTPException(409, "rehearsal policy rejects review update")
+            if not reuse and not rehearsal_policy.allow_create:
+                raise HTTPException(409, "rehearsal policy rejects review create")
         try:
             operation = post_operation_repo.prepare(
                 conn,
@@ -1467,6 +1564,10 @@ def _post_run_locked(run_id: int, *, conn, gh, slack):
                 body=comment["body"],
                 all_ids=comment["all_ids"],
                 new_ids=comment["new_ids"],
+                repo_full=repo["full_name"],
+                pr_number=pr["number"],
+                head_sha=run["head_sha"],
+                policy_review_identity=(run["policy_decision_hash"] or "unknown"),
             )
         except post_operation_repo.PostingConflict as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1482,10 +1583,6 @@ def _post_run_locked(run_id: int, *, conn, gh, slack):
                     "operation_id": operation["id"],
                 }},
             )
-        prev = posted_repo.latest_for_pr_vendor(conn, pr_id=pr["id"], vendor=vendor)
-        reuse = (
-            prev is not None and prev["kind"] == "review" and prev["github_comment_id"]
-        )
         try:
             if operation["status"] == "remote_applied":
                 res = {
@@ -1507,12 +1604,26 @@ def _post_run_locked(run_id: int, *, conn, gh, slack):
                     except GitHubCliError as e:
                         if e.http_status != 404:
                             raise
+                        if rehearsal_policy.active and not rehearsal_policy.allow_update_fallback:
+                            post_operation_repo.abort_unapplied(
+                                conn, operation["id"], owner_token=operation_owner
+                            )
+                            raise HTTPException(409, "rehearsal policy rejects update fallback") from e
+                        if rehearsal_policy.active and not rehearsal_policy.allow_create:
+                            post_operation_repo.abort_unapplied(
+                                conn, operation["id"], owner_token=operation_owner
+                            )
+                            raise HTTPException(409, "rehearsal policy rejects review create")
                         res = _create_review(
-                            gh, repo, pr, run, body, comment["findings"]
+                            gh, repo, pr, run, body, comment["findings"],
+                            allow_inline=not rehearsal_policy.active or rehearsal_policy.allow_inline,
+                            operation_marker=(operation["marker"] if rehearsal_policy.active else None),
                         )
                 elif res is None:
                     res = _create_review(
-                        gh, repo, pr, run, body, comment["findings"]
+                        gh, repo, pr, run, body, comment["findings"],
+                        allow_inline=not rehearsal_policy.active or rehearsal_policy.allow_inline,
+                        operation_marker=(operation["marker"] if rehearsal_policy.active else None),
                     )
                 post_operation_repo.mark_remote(
                     conn, operation["id"], review_id=str(res["id"]),
@@ -1560,9 +1671,8 @@ def _post_run_locked(run_id: int, *, conn, gh, slack):
             conn.rollback()
             raise
         posted.append({"vendor": vendor, "url": res["html_url"]})
-    if (
-        posted
-    ):  # GitHub 게시 성공분이 있을 때만 Slack 반응 수집용 요약 게시(best-effort)
+    if posted and (not rehearsal_policy.active or rehearsal_policy.allow_slack):
+        # GitHub 게시 성공분이 있을 때만 Slack 반응 수집용 요약 게시(best-effort).
         _post_to_slack(conn, slack, repo, pr, run_id)
     return {"posted": posted}
 

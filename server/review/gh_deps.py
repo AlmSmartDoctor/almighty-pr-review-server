@@ -11,9 +11,10 @@ from server.review.verify import make_verifier
 from server.review.worktree import prepared_worktree
 
 
-def build_deps(repo, settings, *, pool=None) -> PipelineDeps:
+def build_deps(repo, settings, *, pool=None, gh_factory=GhClient) -> PipelineDeps:
+    # gh_factory injection keeps rehearsal/offline tests from constructing a native client.
     # local_path는 선택값 — 없으면 파이프라인이 gh.clone으로 서비스 전용 영구 clone을 사용.
-    gh = GhClient()
+    gh = gh_factory()
     hp = HarnessProfile.load(repo["harness_name"])
 
     def _prescreen_tuple(diff, model):

@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from server import config
 
@@ -96,7 +97,29 @@ def _gh_has_native_auth() -> bool:
     return _native_auth
 
 
-def _normalized_env(base: dict[str, str] | None = None) -> dict[str, str]:
+_TOKEN_ENV_NAMES = frozenset({
+    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+})
+
+
+def _normalized_env(base: dict[str, str] | None = None, *, strict_isolated: bool = False) -> dict[str, str]:
+    # Rehearsal callers pass a complete isolated environment.  It must not inherit a
+    # token or consult native `gh auth` as a fallback, even when its injected token is bad.
+    if strict_isolated:
+        env = dict(base or {})
+        if not env.get("GH_CONFIG_DIR") or not env.get("GH_TOKEN"):
+            raise RuntimeError("strict isolated gh environment requires GH_CONFIG_DIR and GH_TOKEN")
+        if any(env.get(name) for name in _TOKEN_ENV_NAMES - {"GH_TOKEN"}):
+            raise RuntimeError("strict isolated gh environment rejects ambient tokens")
+        config_dir = Path(env["GH_CONFIG_DIR"])
+        try:
+            mode = config_dir.stat().st_mode & 0o777
+        except OSError as exc:
+            raise RuntimeError("strict isolated GH_CONFIG_DIR is unavailable") from exc
+        if not config_dir.is_dir() or mode != 0o700:
+            raise RuntimeError("strict isolated GH_CONFIG_DIR must be mode 0700")
+        return env
     env = dict(os.environ)
     if base is not None:
         env.update(base)
@@ -144,9 +167,12 @@ class GhClient:
     """gh CLI 얇은 래퍼. runner 주입으로 테스트 가능. write는 리뷰 게시 경로
     (create_review/update_review, 폴백 post_comment/edit_comment) 뿐."""
 
-    def __init__(self, runner=_default_runner, env: dict[str, str] | None = None):
+    def __init__(
+        self, runner=_default_runner, env: dict[str, str] | None = None, *, strict_isolated: bool = False
+    ):
         self._run = runner
         self._env = env
+        self._strict_isolated = strict_isolated
 
     def _call(
         self,
@@ -156,7 +182,7 @@ class GhClient:
         stdin: str | None = None,
         timeout_sec: float | None = None,
     ) -> str:
-        env = _normalized_env(self._env)
+        env = _normalized_env(self._env, strict_isolated=self._strict_isolated)
         kwargs = {"env": env}
         if stdin is not None:
             kwargs["input"] = stdin
@@ -289,6 +315,50 @@ class GhClient:
             "inline_comments": inline,
             "conversation_comments": conversation if isinstance(conversation, list) else [],
         }
+
+    def _list_complete_pages(
+        self, endpoint: str, *, kind: str, max_pages: int = 100
+    ) -> list[dict]:
+        rows = []
+        separator = "&" if "?" in endpoint else "?"
+        for page in range(1, max_pages + 1):
+            out = self._call(
+                ["gh", "api", f"{endpoint}{separator}per_page=100&page={page}"],
+                kind=kind,
+                timeout_sec=10,
+            )
+            batch = json.loads(out)
+            if not isinstance(batch, list):
+                raise GitHubCliError(
+                    exit_code=1, message="invalid paginated GitHub response",
+                    stderr="", command_kind=kind,
+                )
+            rows.extend(batch)
+            if len(batch) < 100:
+                return rows
+        raise GitHubCliError(
+            exit_code=1, message="GitHub pagination cap reached",
+            stderr="", command_kind=kind,
+        )
+
+    def list_pr_reviews_complete(self, repo: str, number: int) -> list[dict]:
+        return self._list_complete_pages(
+            f"/repos/{repo}/pulls/{number}/reviews", kind="list_pr_reviews_complete"
+        )
+
+    def list_pr_review_comments_complete(self, repo: str, number: int) -> list[dict]:
+        return self._list_complete_pages(
+            f"/repos/{repo}/pulls/{number}/comments",
+            kind="list_pr_review_comments_complete",
+        )
+
+    def list_pr_conversation_comments_complete(
+        self, repo: str, number: int
+    ) -> list[dict]:
+        return self._list_complete_pages(
+            f"/repos/{repo}/issues/{number}/comments",
+            kind="list_pr_conversation_comments_complete",
+        )
 
     def list_pr_reviews(self, repo: str, number: int) -> list[dict]:
         """현재 PR의 review 요약을 최대 100개 읽는다. 컨텍스트 수집용 read-only 경로."""

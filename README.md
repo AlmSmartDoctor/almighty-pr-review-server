@@ -32,6 +32,18 @@ ALMIGHTY_E2E=1 ALMIGHTY_E2E_REPO=me/sandbox \
 ```
 특정 PR만 smoke하려면 작은 PR 기준으로 `ALMIGHTY_E2E_PR=2414`처럼 추가한다.
 
+## Sandbox E2E rehearsal (offline tooling)
+
+`scripts/sandbox-e2e.py` is a **fail-closed preflight only**. It does not make GitHub, vendor, Slack, webhook, or Gateway calls. It requires an operator-owned immutable JSON allowlist (`["owner/repo#PR"]` or `{"targets":[...]}`), an exact target/head/vendor/model manifest, a separate credential-attestation file plus its operator-approved canonical SHA-256, the actually injected credential whose fingerprint matches that attestation, and a new DB inside a mode-0700 `almighty-e2e-*` disposable workspace. Its output is sanitized evidence and reports `live: not_run`.
+
+The script creates a new `0700` `GH_CONFIG_DIR`, strips ambient GitHub token variables, and accepts only the supplied credential; a future separately approved executor must use that strict environment. Review/retry reject write-capable credentials. `post-verify` requires explicit `allow_post`. A dedicated server process activates posting only with `ALMIGHTY_REHEARSAL_POST_ENABLED=1`, exact target/head and credential fingerprint settings; create/update/fallback/inline/Slack remain independently default-deny. A one-operation replay returns `{operation_id, replayed: true}`; a multi-vendor replay uses the documented plural `{operation_ids, replayed: true}` form without another mutation.
+
+Offline coverage (no lifespan/background worker and no public listener) includes signed webhook handler replay into a temp DB, duplicate-delivery single queued/unconsumed job, and body-cap coverage. Actual webhook delivery, worker execution, sandbox review/retry, GitHub post, and all external calls remain **not_run** pending their separate approvals and clean-account environment.
+
+```bash
+.venv/bin/pytest -q tests/test_e2e_smoke.py tests/test_e2e_diagnostics.py tests/test_e2e_posting_policy.py
+```
+
 ## 관리 API 보안
 
 기본 개발 서버는 loopback 전용이다. 터널/리버스 프록시로 외부에 노출할 때는 관리 API 토큰을 반드시 설정한다.

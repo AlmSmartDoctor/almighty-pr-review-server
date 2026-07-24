@@ -470,6 +470,8 @@ Claude가 통과해도 M1.2는 reviewed event signature, `tool_calls >= 1` evide
 
 실패 시 해당 vendor는 legacy/unavailable 상태로 남기고 E2E에서 structured telemetry 완료라고 주장하지 않는다.
 
+**Current evidence status (2026-07-23):** Codex `not_run`, Claude `not_run`. 현재 checkout은 inventory상 `.env`, runtime DB/raw/clone roots가 존재하는 일반 개발 계정이며 clean VM/dedicated OS account precondition을 충족하지 않는다. 따라서 vendor/model/call-cost manifest를 승인받더라도 이 환경에서는 probe를 실행하지 않는다. Codex telemetry와 Claude production structured activation은 각각 legacy/unavailable 상태로 유지한다.
+
 ---
 
 ## Milestone 2 — Sandbox GitHub E2E rehearsal
@@ -576,6 +578,8 @@ Slice 1B의 기본 완료 조건은 **offline/in-process** side-effect-free sign
 - actual webhook delivery/new-head enqueue는 Slice 1D dedicated ingress profile 뒤 별도 artifact로만 남긴다.
 - 실제 실행하지 않은 단계는 통과로 표시하지 않는다.
 - sandbox marker 외 원격 변경이 없다.
+
+**Current offline evidence status (2026-07-23):** `scripts/sandbox-e2e.py` preflight/credential/allowlist/temporary-DB/paging/snapshot guards, server-enforced recording post transport/replay policy, and in-process signed webhook replay tests are implemented and pass offline. Exact target/head, hash-pinned separate credential attestation, actual token fingerprint, strict 0700 GitHub config, new private DB, complete pagination, legacy operation reconciliation, single/multi replay schema, inline marker, Slack suppression과 vendor/GitHub-write/worker call count 0을 검증한다. Full Python gate는 824 collected, 1 skipped, 0 failed이며 compileall/diff check가 통과했다. 이 evidence는 live artifact를 만들거나 실행을 승인하지 않는다. Sandbox review, partial retry against an external vendor, GitHub post idempotency against GitHub, and actual webhook delivery remain `not_run`; the latter is still deferred to Slice 1D.
 
 ---
 

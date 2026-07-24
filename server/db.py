@@ -182,6 +182,8 @@ CREATE TABLE IF NOT EXISTS github_post_operation (
   vendor TEXT NOT NULL,
   marker TEXT NOT NULL UNIQUE,
   body TEXT NOT NULL,
+  body_hash TEXT,
+  identity_json TEXT,
   finding_ids TEXT NOT NULL,
   new_finding_ids TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
@@ -348,6 +350,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "finding", "posting_operation_id", "INTEGER")
     _ensure_column(conn, "github_post_operation", "owner_token", "TEXT")
     _ensure_column(conn, "github_post_operation", "locked_at", "TEXT")
+    _ensure_column(conn, "github_post_operation", "body_hash", "TEXT")
+    _ensure_column(conn, "github_post_operation", "identity_json", "TEXT")
     # 레거시 'claude-haiku'는 유효한 CLI 별칭이 아니다(옛 기본값·미사용 죽은 값).
     # 이제 사전 스크리닝이 이 값을 실제로 subprocess에 넘기므로 유효 별칭으로 정규화.
     conn.execute(
