@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS pre_screen (
 CREATE TABLE IF NOT EXISTS review_run (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pr_id INTEGER NOT NULL REFERENCES pull_request(id),
+  repo_id INTEGER REFERENCES repo(id),
   head_sha TEXT NOT NULL, trigger TEXT, effort TEXT,
   merge_enabled INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'queued',           -- queued|running|done|failed|canceled
@@ -227,6 +228,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "repo", "last_poll_error", "TEXT")
     _ensure_column(conn, "pull_request", "created_at", "TEXT")
     _ensure_column(conn, "pull_request", "head_ref", "TEXT")
+    _ensure_column(conn, "review_run", "repo_id", "INTEGER REFERENCES repo(id)")
+    _ensure_column(conn, "review_run", "started_at", "TEXT")
+    conn.execute(
+        """UPDATE review_run SET repo_id=(
+               SELECT repo_id FROM pull_request WHERE id=review_run.pr_id
+           ) WHERE repo_id IS NULL"""
+    )
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_review_run_repo_id_insert
+        AFTER INSERT ON review_run WHEN NEW.repo_id IS NULL
+        BEGIN
+          UPDATE review_run SET repo_id=(
+            SELECT repo_id FROM pull_request WHERE id=NEW.pr_id
+          ) WHERE id=NEW.id;
+        END;
+        """
+    )
     _ensure_column(conn, "pull_request", "body", "TEXT")
     _ensure_column(conn, "pull_request", "base_sha", "TEXT")
     _ensure_column(conn, "pull_request", "is_draft", "INTEGER NOT NULL DEFAULT 0")
@@ -380,6 +399,18 @@ def init_schema(conn: sqlite3.Connection) -> None:
           ON finding(run_id, status, vendor, id);
         CREATE INDEX IF NOT EXISTS idx_pull_request_repo_open
           ON pull_request(repo_id, number) WHERE state='open';
+        -- Bounded operations scans: repo -> PR -> run start bucket and explicit
+        -- legacy NULL bucket continuation without reading finding/transcript bodies.
+        CREATE INDEX IF NOT EXISTS idx_pull_request_repo_id
+          ON pull_request(repo_id, id);
+        CREATE INDEX IF NOT EXISTS idx_review_run_operations
+          ON review_run(pr_id, started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_review_run_operations_repo
+          ON review_run(repo_id, (started_at IS NULL), started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_vendor_result_run_vendor
+          ON vendor_result(run_id, vendor, status);
+        CREATE INDEX IF NOT EXISTS idx_finding_canary_metrics
+          ON finding(run_id, scope_status, status, posting_eligible, duplicate_group_id);
         """
     )
     conn.commit()

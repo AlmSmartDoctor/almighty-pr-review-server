@@ -89,6 +89,31 @@ def test_allowed_origin_receives_cors_headers_for_preflight(monkeypatch):
     assert "PATCH" in response.headers["access-control-allow-methods"]
 
 
+def test_external_mode_requires_direct_or_trusted_proxy_https(monkeypatch):
+    import ipaddress
+
+    monkeypatch.setattr(config, "EXTERNAL_MODE", True)
+    monkeypatch.setattr(
+        config, "TRUSTED_PROXY_CIDRS", (ipaddress.ip_network("127.0.0.0/8"),)
+    )
+    # TestClient's synthetic peer is not in the trusted CIDR, so spoofed XFP fails.
+    insecure = TestClient(app).get(
+        "/api/health", headers={"X-Forwarded-Proto": "https"}
+    )
+    assert insecure.status_code == 400
+    assert TestClient(app, base_url="https://testserver").get(
+        "/api/health"
+    ).status_code == 200
+
+
+def test_webhook_ingress_profile_exposes_only_github_webhook(monkeypatch):
+    monkeypatch.setattr(config, "WEBHOOK_ONLY_INGRESS", True)
+    client = TestClient(app)
+    assert client.get("/api/settings").status_code == 404
+    # Provider secret validation still owns the GitHub response, not admin auth.
+    assert client.post("/api/webhooks/github", content=b"{}").status_code == 503
+
+
 def test_health_and_webhooks_remain_public(monkeypatch):
     monkeypatch.setattr(config, "ADMIN_TOKEN", "a" * 32)
     client = TestClient(app)

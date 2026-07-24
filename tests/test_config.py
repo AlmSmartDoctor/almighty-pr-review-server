@@ -58,6 +58,20 @@ def test_benchmark_expected_identity_requires_complete_explicit_values(monkeypat
         )
 
 
+def test_webhook_ingress_requires_new_0700_temp_workspace(tmp_path):
+    workspace = tmp_path / "almighty-ingress-test"
+    workspace.mkdir(mode=0o700)
+    # pytest tmp roots are under the OS temp root and the target is new.
+    config._validate_webhook_ingress_db(workspace / "replay.db")
+    existing = workspace / "existing.db"
+    existing.write_bytes(b"existing")
+    with pytest.raises(RuntimeError, match="new disposable"):
+        config._validate_webhook_ingress_db(existing)
+    workspace.chmod(0o755)
+    with pytest.raises(RuntimeError, match="0700"):
+        config._validate_webhook_ingress_db(workspace / "other.db")
+
+
 def test_benchmark_report_path_must_be_absolute(monkeypatch):
     monkeypatch.setenv("ALMIGHTY_TEST_REPORT_PATH", "relative/report.json")
     with pytest.raises(RuntimeError, match="absolute local path"):

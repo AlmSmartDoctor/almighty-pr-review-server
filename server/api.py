@@ -158,6 +158,14 @@ async def lifespan(app: FastAPI):
     from server.repos import process_repo
 
     _ensure_schema()
+    if not config.BACKGROUND_LOOPS_ENABLED:
+        # Dedicated webhook ingress is deliberately webhook-only: no poller, worker,
+        # lease, retention, or notification side effects are started.
+        app.state.background_tasks = []
+        app.state.runtime_concurrency_limit = 0
+        app.state.runtime_worker_lanes = 0
+        yield
+        return
     # review job lane은 최대 2개로 병렬화하되 vendor CLI 총동시성은 기존 전역 설정을
     # 공유 RunnerPool로 그대로 지킨다. stale 복구는 lane 시작 전에 단 한 번 수행한다.
     startup = connect(config.DB_PATH)
@@ -271,6 +279,12 @@ def get_conn():
         yield conn
     finally:
         conn.close()
+
+
+# Imported after get_conn so the operations router shares the existing request-scoped
+# connection dependency (and its test override) without creating a second DB path.
+from server.routes.operations import router as operations_router
+app.include_router(operations_router)
 
 
 @app.get("/api/health")

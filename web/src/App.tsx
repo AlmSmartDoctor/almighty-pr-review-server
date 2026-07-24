@@ -4,6 +4,7 @@ import {
   BookOpen,
   GraduationCap,
   LayoutDashboard,
+  MonitorCheck,
   RotateCw,
   ServerCrash,
   Settings,
@@ -30,6 +31,9 @@ const LearnSection = lazy(() =>
 const WikiSection = lazy(() =>
   import("./sections/WikiSection").then((module) => ({ default: module.WikiSection })),
 );
+const OperationsSection = lazy(() =>
+  import("./sections/OperationsSection").then((module) => ({ default: module.OperationsSection })),
+);
 
 type NavItem = {
   key: string;
@@ -40,6 +44,7 @@ type NavItem = {
 
 const SECTIONS: NavItem[] = [
   { key: "reviews", label: "리뷰 대시보드", icon: LayoutDashboard },
+  { key: "operations", label: "운영", icon: MonitorCheck },
   { key: "harness", label: "하네스 편집", icon: SlidersHorizontal },
   { key: "settings", label: "설정", icon: Settings },
   { key: "wiki", label: "LLM Wiki", icon: BookOpen },
@@ -232,6 +237,7 @@ export default function App() {
               <Route path="/" element={<Navigate to="/reviews" replace />} />
               <Route path="/reviews" element={<ReviewSection />} />
               <Route path="/reviews/:prId" element={<ReviewSection />} />
+              <Route path="/operations" element={<OperationsSection />} />
               <Route path="/harness" element={<HarnessSection />} />
               <Route path="/settings" element={<SettingsSection />} />
               <Route path="/wiki" element={<WikiSection />} />

@@ -58,3 +58,26 @@ ALMIGHTY_REVIEW_DEDUPE_KILL_SWITCH=1
 ```
 
 After changing environment switches, restart the server process. Keep human adjudication and monitor false rejection, duplicate precision, recall, wall time, tokens, and tool calls before expanding the canary.
+
+## Sprint 1 operations and evidence (2026-07-24)
+
+`/operations` is a read-only management-authenticated view. Its API uses required repository filters, normalized non-overlapping current/baseline windows, immutable HMAC-bound cursors, a 5,000-run scan ceiling, a 1,000-run aggregate cap, and transcript-free aggregate schemas. It displays requested/effective policy snapshots, per-repository canary overrides, kill switches, startup/restart requirements, telemetry and attempt denominators, adjudication outcomes, benchmark evidence, and rollback warnings. Truncated or insufficient windows are not positive readiness signals.
+
+The dedicated `ALMIGHTY_INGRESS_PROFILE=webhook` profile accepts only the GitHub webhook route, requires a new DB in a mode-0700 `almighty-ingress-*` temporary workspace, and disables background loops and notifications. `ALMIGHTY_EXTERNAL_MODE=1` additionally requires a 32-character admin token and HTTPS origins; direct TLS or `X-Forwarded-Proto: https` from an explicitly trusted proxy CIDR is required. No public listener/proxy probe was run, so actual delivery remains `not_run`.
+
+Offline gates passed with 850 Python tests collected (1 skipped, 0 failed), 111 web tests, production build, `compileall`, `git diff --check`, and the synthetic benchmark smoke command. The synthetic smoke report remained `can_enforce=false` with insufficient-sample and quality/coverage/cost reasons, as designed.
+
+| Evidence | Status | Scope |
+|---|---|---|
+| Codex telemetry success | `not_run` | Clean VM or dedicated OS account and explicit live approval unavailable |
+| Claude telemetry success | `not_run` | Clean VM or dedicated OS account and explicit live approval unavailable |
+| Sandbox review | `not_run` | External vendor/GitHub execution not approved |
+| Partial retry | `not_run` | External vendor execution not approved |
+| GitHub post idempotency | `not_run` | Remote mutation not approved |
+| Signed webhook replay | `passed` | Signed in-process temp-DB replay only; vendor/GitHub-write/worker count remained zero |
+| Actual webhook delivery | `not_run` | Dedicated public ingress/proxy probe not approved or available |
+| Benchmark tooling | `passed` | Strict local schemas, blind runner/scorer, canonical sanitized report and attestation validation |
+| Rollout sample gate | `locked` | Remote/live paired benchmark and two-person adjudication were not run |
+| Canary operations UI | `passed` | Authenticated bounded API, read-only UI, 111 web tests and production build |
+
+Tooling completion does not substitute for live rehearsal or rollout approval. Enforcement remains locked and effective behavior remains `observe`; no push, release, public probe, remote benchmark, external mutation, or rollout unlock was performed.

@@ -1,13 +1,17 @@
+import ipaddress
 import json
 import math
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
-DB_PATH = BASE_DIR / "almighty.db"
+DB_PATH = Path(os.environ.get("ALMIGHTY_DB_PATH", str(BASE_DIR / "almighty.db"))).expanduser()
+if not DB_PATH.is_absolute():
+    raise RuntimeError("ALMIGHTY_DB_PATH must be an absolute local path")
 HARNESS_DIR = BASE_DIR / "harness"
 # 서비스 전용 영구 clone 루트. 리뷰는 사용자의 라이브 체크아웃이 아니라 여기 clone에서
 # worktree를 뜬다(사용자 작업 경로가 실시간으로 바뀌어도 리뷰가 영향받지 않게).
@@ -161,12 +165,69 @@ REHEARSAL_ALLOW_UPDATE_FALLBACK = _env_bool01(
 REHEARSAL_ALLOW_INLINE = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_INLINE")
 REHEARSAL_ALLOW_SLACK = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_SLACK")
 
-# 리뷰 종료 macOS 알림(osascript). 로컬 단일 사용자 도구라 기본 켜짐 — "0"으로 끔.
-NOTIFY_ON_DONE = os.environ.get("ALMIGHTY_NOTIFY", "1") != "0"
-
 # 공개 터널/프록시에서 관리 API를 보호하는 env-only bearer token. 빈 값은 기존
 # loopback-only 개발 동작을 보존한다.
 ADMIN_TOKEN = os.environ.get("ALMIGHTY_ADMIN_TOKEN", "")
+# Operations cursors are integrity protected and never contain paths, claims, or event data.
+# A deployment should set a distinct secret; the local fallback preserves pagination across
+# restarts without making the management token part of a response.
+OPERATIONS_CURSOR_SECRET = os.environ.get(
+    "ALMIGHTY_OPERATIONS_CURSOR_SECRET", ADMIN_TOKEN or f"local:{BASE_DIR}"
+)
+if len(OPERATIONS_CURSOR_SECRET) < 16:
+    raise RuntimeError("ALMIGHTY_OPERATIONS_CURSOR_SECRET must be at least 16 characters")
+def _validate_webhook_ingress_db(path: Path) -> None:
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    candidate = path.resolve()
+    try:
+        relative = candidate.relative_to(temp_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            "webhook ingress DB must be in a private temporary workspace"
+        ) from exc
+    if (
+        len(relative.parts) < 2
+        or not candidate.parent.name.startswith("almighty-ingress-")
+        or path.exists() or path.is_symlink()
+    ):
+        raise RuntimeError(
+            "webhook ingress DB must be a new disposable file"
+        )
+    parent = candidate.parent
+    try:
+        mode = parent.stat().st_mode & 0o777
+    except OSError as exc:
+        raise RuntimeError("webhook ingress private workspace is unavailable") from exc
+    if not parent.is_dir() or mode != 0o700:
+        raise RuntimeError("webhook ingress workspace must be mode 0700")
+
+
+INGRESS_PROFILE = os.environ.get("ALMIGHTY_INGRESS_PROFILE", "default").strip().lower()
+if INGRESS_PROFILE not in {"default", "webhook"}:
+    raise RuntimeError("ALMIGHTY_INGRESS_PROFILE must be default or webhook")
+WEBHOOK_ONLY_INGRESS = INGRESS_PROFILE == "webhook"
+if WEBHOOK_ONLY_INGRESS:
+    # This profile is intentionally not a delivery/listener implementation.  It is a
+    # contained test ingress: ephemeral DB, no loops/notifications, GitHub webhook only.
+    _validate_webhook_ingress_db(DB_PATH)
+NOTIFY_ON_DONE = False if WEBHOOK_ONLY_INGRESS else os.environ.get("ALMIGHTY_NOTIFY", "1") != "0"
+BACKGROUND_LOOPS_ENABLED = not WEBHOOK_ONLY_INGRESS
+EXTERNAL_DELIVERY_STATUS = "not_run"
+EXTERNAL_MODE = _env_bool01("ALMIGHTY_EXTERNAL_MODE")
+try:
+    TRUSTED_PROXY_CIDRS = tuple(
+        ipaddress.ip_network(item.strip(), strict=False)
+        for item in os.environ.get("ALMIGHTY_TRUSTED_PROXY_CIDRS", "").split(",")
+        if item.strip()
+    )
+except ValueError as exc:
+    raise RuntimeError("ALMIGHTY_TRUSTED_PROXY_CIDRS contains invalid CIDR") from exc
+if EXTERNAL_MODE:
+    # This code does not implement a public listener or delivery.  Refuse accidental
+    # public startup without the credential/origin prerequisites; TLS/proxy/public
+    # probe evidence remains explicitly not_run.
+    if len(ADMIN_TOKEN) < 32:
+        raise RuntimeError("ALMIGHTY_EXTERNAL_MODE requires an admin token of at least 32 characters")
 WEBHOOK_MAX_BODY_BYTES = _env_int(
     "ALMIGHTY_WEBHOOK_MAX_BODY_BYTES", 1_048_576, minimum=1
 )
@@ -179,6 +240,8 @@ ADMIN_ALLOWED_ORIGINS = tuple(
     ).split(",")
     if origin.strip()
 )
+if EXTERNAL_MODE and (not ADMIN_ALLOWED_ORIGINS or any(not item.startswith("https://") for item in ADMIN_ALLOWED_ORIGINS)):
+    raise RuntimeError("ALMIGHTY_EXTERNAL_MODE requires HTTPS admin allowed origins")
 
 # gh subprocess 상한 — 무한 대기 시 폴러/워커가 조용히 영구 정지하므로 필수.
 # clone(depth=1)·대형 diff도 감당할 만큼 여유 있게 잡는다.

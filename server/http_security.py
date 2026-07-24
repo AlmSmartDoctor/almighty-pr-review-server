@@ -1,4 +1,5 @@
 import hmac
+import ipaddress
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
@@ -20,6 +21,30 @@ async def protect_management_api(
     """Protect management APIs while keeping provider-authenticated webhooks public."""
     path = request.url.path
     normalized_path = path.rstrip("/") or "/"
+    if config.EXTERNAL_MODE:
+        direct_tls = request.url.scheme == "https"
+        forwarded_tls = False
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        peer = request.client.host if request.client else ""
+        if forwarded == "https" and peer:
+            try:
+                address = ipaddress.ip_address(peer)
+                forwarded_tls = any(
+                    address in network for network in config.TRUSTED_PROXY_CIDRS
+                )
+            except ValueError:
+                forwarded_tls = False
+        if not direct_tls and not forwarded_tls:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "external mode requires trusted HTTPS"},
+            )
+    if config.WEBHOOK_ONLY_INGRESS:
+        # The dedicated ingress profile is not an operations/admin listener.  Keep
+        # only the provider-authenticated GitHub receiver reachable.
+        if normalized_path != "/api/webhooks/github":
+            return JSONResponse(status_code=404, content={"detail": "webhook ingress only"})
+        return await call_next(request)
     if not path.startswith("/api/") or normalized_path in PUBLIC_API_PATHS:
         return await call_next(request)
 
