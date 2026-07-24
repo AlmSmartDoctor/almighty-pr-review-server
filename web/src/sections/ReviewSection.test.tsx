@@ -3,9 +3,18 @@ import type { ComponentProps } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
 import { ReviewSection } from "./ReviewSection";
-import { api } from "../api";
+import { ApiError, api } from "../api";
 
-vi.mock("../api", () => ({
+vi.mock("../api", () => {
+  class MockApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  }
+  return {
+  ApiError: MockApiError,
   api: {
     overview: async () => [],
     runFindings: async () => [],
@@ -36,7 +45,8 @@ vi.mock("../api", () => ({
       ok: true, repositories: 2, open_prs: 5, enqueued_jobs: 1,
     }),
   },
-}));
+  };
+});
 
 const PRS = [
   { id: 1, number: 7, title: "fix null", repo: "acme/api",
@@ -81,6 +91,112 @@ test("review detail shows bounded run diagnostics and retry safety", async () =>
   expect(screen.getByText(/tokens 1,234 · tools 5/)).toBeInTheDocument();
   expect(screen.getByText(/posting 가능 1 · 억제 1/)).toBeInTheDocument();
   expect(screen.getByText(/실패 벤더만 안전하게 재시도 가능: codex/)).toBeInTheDocument();
+});
+
+
+test("overview loads additional bounded pages without duplicates", async () => {
+  const second = { ...PRS[0], id: 2, number: 8, title: "second PR", run_id: null, run_status: null };
+  const loadPrs = vi.fn(async (options?: { cursor?: string | null }) => options?.cursor === "next-pr"
+    ? { items: [second], pagination: { limit: 25, has_more: false, next_cursor: null } }
+    : { items: PRS, pagination: { limit: 25, has_more: true, next_cursor: "next-pr" } });
+  renderReview({ loadPrs });
+  expect(await screen.findByText("fix null")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "PR 더 불러오기" }));
+  expect(await screen.findByText("second PR")).toBeInTheDocument();
+  expect(loadPrs).toHaveBeenCalledWith({ cursor: "next-pr", limit: 25 });
+  expect(screen.getByText("현재 불러온 2개 PR 기준")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "화면 새로고침" }));
+  await waitFor(() => expect(loadPrs.mock.calls.filter(([options]) => options?.cursor === "next-pr").length).toBeGreaterThanOrEqual(2));
+  expect(screen.getByText("second PR")).toBeInTheDocument();
+});
+
+
+test("expired overview cursor rebuilds the window from the first page", async () => {
+  let firstPageCalls = 0;
+  const loadPrs = vi.fn(async (options?: { cursor?: string | null }) => {
+    if (options?.cursor) throw new ApiError(400, "invalid cursor");
+    firstPageCalls += 1;
+    return {
+      items: PRS,
+      pagination: {
+        limit: 25,
+        has_more: firstPageCalls === 1,
+        next_cursor: firstPageCalls === 1 ? "expired" : null,
+      },
+    };
+  });
+  renderReview({ loadPrs });
+  fireEvent.click(await screen.findByRole("button", { name: "PR 더 불러오기" }));
+  await waitFor(() => expect(firstPageCalls).toBeGreaterThanOrEqual(2));
+  expect(screen.getByText("fix null")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "PR 더 불러오기" })).not.toBeInTheDocument();
+});
+
+
+test("direct review route resolves a PR outside the first overview page", async () => {
+  const target = { ...PRS[0], id: 2, number: 8, title: "outside page" };
+  const loadPrs = vi.fn(async (options?: { prId?: number }) => options?.prId === 2
+    ? { items: [target], pagination: { limit: 1, has_more: false, next_cursor: null } }
+    : { items: PRS, pagination: { limit: 25, has_more: false, next_cursor: null } });
+  renderReview({ loadPrs, loadFindings: async () => [] }, "/reviews/2");
+  expect(await screen.findByRole("heading", { name: "outside page" })).toBeInTheDocument();
+  expect(loadPrs).toHaveBeenCalledWith({ prId: 2, limit: 1 });
+});
+
+
+test("run history and findings expose explicit load-more controls", async () => {
+  const oldFinding = { id: 6, file: "b.py", line: 4, severity: "medium", claim: "older", status: "approved", vendor: "codex", posting_eligible: 1 };
+  const loadRuns = vi.fn(async (_prId: number, options?: { cursor?: string | null }) => options?.cursor === "next-run"
+    ? { items: [{ id: 10, head_sha: "old", trigger: "auto", status: "done", error: null, started_at: null, finished_at: null, finding_count: 1 }], pagination: { limit: 25, has_more: false, next_cursor: null } }
+    : { items: [{ id: 11, head_sha: "new", trigger: "auto", status: "done", error: null, started_at: null, finished_at: null, finding_count: 2 }], pagination: { limit: 25, has_more: true, next_cursor: "next-run" } });
+  const loadFindings = vi.fn(async (_runId: number, options?: { cursor?: string | null }) => options?.cursor === "next-finding"
+    ? { items: [oldFinding], pagination: { limit: 50, has_more: false, next_cursor: null }, summary: { total_count: 2, status_counts: { pending: 1, approved: 1 }, postable_count: 1 } }
+    : { items: [{ id: 5, file: "a.py", line: 3, severity: "high", claim: "first", status: "pending", vendor: "claude", posting_eligible: 1 }], pagination: { limit: 50, has_more: true, next_cursor: "next-finding" }, summary: { total_count: 2, status_counts: { pending: 1, approved: 1 }, postable_count: 1 } });
+  renderReview({
+    loadPrs: async () => PRS,
+    loadRuns,
+    loadFindings,
+    loadPreview: async () => ({ comments: [{ vendor: "codex", body: "server approved preview" }] }),
+  }, "/reviews/1");
+  expect(await screen.findByText("server approved preview")).toBeInTheDocument();
+  expect(screen.getByText("로드 1 / 전체 2건")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "승인분 포스팅" })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "findings 더 불러오기" }));
+  expect(await screen.findByText("older")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "이전 run 더 보기" }));
+  await waitFor(() => expect(loadRuns).toHaveBeenCalledWith(1, { cursor: "next-run", limit: 25 }));
+  expect(await screen.findByLabelText("run 이력")).toHaveTextContent("run 10");
+});
+
+
+test("expired run and finding cursors recover from their first pages", async () => {
+  let runFirstCalls = 0;
+  let findingFirstCalls = 0;
+  const loadRuns = vi.fn(async (_prId: number, options?: { cursor?: string | null }) => {
+    if (options?.cursor) throw new ApiError(400, "invalid cursor");
+    runFirstCalls += 1;
+    return {
+      items: [{ id: 11, head_sha: "new", trigger: "auto", status: "done", error: null, started_at: null, finished_at: null, finding_count: 1 }],
+      pagination: { limit: 25, has_more: runFirstCalls === 1, next_cursor: runFirstCalls === 1 ? "expired-run" : null },
+    };
+  });
+  const loadFindings = vi.fn(async (_runId: number, options?: { cursor?: string | null }) => {
+    if (options?.cursor) throw new ApiError(400, "invalid cursor");
+    findingFirstCalls += 1;
+    return {
+      items: [{ id: 5, file: "a.py", line: 3, severity: "high", claim: "first", status: "pending", vendor: "claude" }],
+      pagination: { limit: 50, has_more: findingFirstCalls === 1, next_cursor: findingFirstCalls === 1 ? "expired-finding" : null },
+      summary: { total_count: 1, status_counts: { pending: 1 }, postable_count: 0 },
+    };
+  });
+  renderReview({ loadPrs: async () => PRS, loadRuns, loadFindings }, "/reviews/1");
+  fireEvent.click(await screen.findByRole("button", { name: "findings 더 불러오기" }));
+  await waitFor(() => expect(findingFirstCalls).toBeGreaterThanOrEqual(2));
+  fireEvent.click(await screen.findByRole("button", { name: "이전 run 더 보기" }));
+  await waitFor(() => expect(runFirstCalls).toBeGreaterThanOrEqual(2));
+  expect(screen.queryByRole("button", { name: "findings 더 불러오기" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "이전 run 더 보기" })).not.toBeInTheDocument();
 });
 
 
@@ -796,7 +912,7 @@ test("run history dropdown switches to a past run", async () => {
   fireEvent.change(select, { target: { value: "10" } });
   expect(await screen.findByText(/과거 지적/)).toBeInTheDocument();
   expect(screen.getByText("과거 run 조회 중")).toBeInTheDocument();
-  await waitFor(() => expect(loadFindings).toHaveBeenCalledWith(10));
+  await waitFor(() => expect(loadFindings).toHaveBeenCalledWith(10, { cursor: null, limit: 50 }));
 
   // 최신 run으로 복귀하면 배지가 사라진다
   fireEvent.change(select, { target: { value: "11" } });

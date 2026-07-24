@@ -67,7 +67,7 @@ Run-specific operational information now lives in each review detail page. The d
 
 The dedicated `ALMIGHTY_INGRESS_PROFILE=webhook` profile accepts only the GitHub webhook route, requires a new DB in a mode-0700 `almighty-ingress-*` temporary workspace, and disables background loops and notifications. `ALMIGHTY_EXTERNAL_MODE=1` additionally requires a 32-character admin token and HTTPS origins; direct TLS or `X-Forwarded-Proto: https` from an explicitly trusted proxy CIDR is required. No public listener/proxy probe was run, so actual delivery remains `not_run`.
 
-Offline gates passed with 848 Python tests collected (1 skipped, 0 failed), 111 web tests, production build, `compileall`, `git diff --check`, and the synthetic benchmark smoke command. The synthetic smoke report remained `can_enforce=false` with insufficient-sample and quality/coverage/cost reasons, as designed.
+Offline gates passed with 855 Python tests collected (1 skipped, 0 failed), 116 web tests, production build, `compileall`, `git diff --check`, and the synthetic benchmark smoke command. The synthetic smoke report remained `can_enforce=false` with insufficient-sample and quality/coverage/cost reasons, as designed.
 
 | Evidence | Status | Scope |
 |---|---|---|

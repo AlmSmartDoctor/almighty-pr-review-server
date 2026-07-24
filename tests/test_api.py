@@ -161,7 +161,7 @@ def test_overview_includes_pr_url_and_jira_links(tmp_path, monkeypatch):
         base_ref="main",
         url="https://github.com/acme/api/pull/7",
     )
-    row = client.get("/api/overview").json()[0]
+    row = client.get("/api/overview").json()["items"][0]
     assert row["url"] == "https://github.com/acme/api/pull/7"
     assert {
         "key": "PROJ-42",
@@ -1491,7 +1491,7 @@ def test_pr_run_history(tmp_path):
     review_repo.finish_run(conn, r2, "failed", error="boom")
     conn.commit()
 
-    rows = client.get(f"/api/prs/{pid}/runs").json()
+    rows = client.get(f"/api/prs/{pid}/runs").json()["items"]
     assert [r["id"] for r in rows] == [r2, r1]  # 최신 먼저
     by_id = {r["id"]: r for r in rows}
     assert by_id[r1]["finding_count"] == 1 and by_id[r1]["status"] == "done"

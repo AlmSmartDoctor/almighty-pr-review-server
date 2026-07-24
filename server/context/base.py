@@ -86,6 +86,7 @@ def redact_secrets(text: str) -> str:
         config.GITHUB_WEBHOOK_SECRET,
         config.SLACK_BOT_TOKEN,
         config.SLACK_SIGNING_SECRET,
+        os.environ.get("ALMIGHTY_CURSOR_HMAC_SECRET", ""),
         os.environ.get("GH_TOKEN", ""),
         os.environ.get("GITHUB_TOKEN", ""),
         os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", ""),

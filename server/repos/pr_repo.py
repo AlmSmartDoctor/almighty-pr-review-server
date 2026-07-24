@@ -22,8 +22,10 @@ def upsert(
     conn.execute(
         """INSERT INTO pull_request
            (repo_id, number, title, author, head_sha, base_ref, base_sha, state, url,
-            created_at, head_ref, body, is_draft, first_seen_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))
+            created_at, head_ref, body, is_draft, first_seen_at,
+            overview_sort_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'),
+                   COALESCE(datetime(?), datetime('now')), datetime('now'))
            ON CONFLICT(repo_id, number) DO UPDATE SET
              title=excluded.title, author=excluded.author,
              head_sha=excluded.head_sha, base_ref=excluded.base_ref,
@@ -56,6 +58,7 @@ def upsert(
             head_ref,
             body,
             1 if is_draft else 0,
+            created_at,
         ),
     )
     if commit:

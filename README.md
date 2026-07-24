@@ -64,11 +64,14 @@ ALMIGHTY_WORKER_IDLE_MAX_SEC=30       # idle claim backoff 최대값
 ALMIGHTY_BACKGROUND_SHUTDOWN_GRACE_SEC=10
 ALMIGHTY_BACKGROUND_CLEANUP_TIMEOUT_SEC=20
 ALMIGHTY_WEBHOOK_MAX_BODY_BYTES=1048576
+ALMIGHTY_CURSOR_HMAC_SECRET=<32자 이상 임의 시크릿> # 외부/다중 프로세스 환경 권장
 ALMIGHTY_RETENTION_DAYS=0             # 0=비활성, 양수=오래 닫힌 PR 이력/raw 정리
 ALMIGHTY_DIAGNOSTIC_CLEANUP_ENABLED=0 # 1일 때만 raw/context TTL cleanup 시작
 ALMIGHTY_DIAGNOSTIC_RETENTION_DAYS=7
 ALMIGHTY_CONTEXT_PAYLOAD_RETENTION_DAYS=7
 ```
+
+리뷰 목록 cursor는 서버가 HMAC으로 서명한다. `ALMIGHTY_CURSOR_HMAC_SECRET`가 없으면 관리 토큰을 사용하고, 둘 다 없는 loopback 개발 환경에서는 프로세스별 임시 키를 사용한다. 임시 키를 쓰거나 시크릿을 교체한 뒤 서버를 재시작하면 기존 cursor는 400으로 무효화되며 UI에서 첫 페이지부터 새로고침하면 복구된다.
 
 동시성 설정은 저장 즉시 UI에 반영되지만 실제 CLI pool과 worker lane에는 서버 재시작 후 적용된다. deep health는 background task 종료와 가장 오래된 queued job age를 함께 표시하고, `/api/telemetry`는 bounded 집계만 제공한다. Diagnostic cleanup은 raw 파일과 저장된 context payload를 비가역적으로 지우므로 기본 off이며, 대상·TTL·backup/restore 상태를 확인한 뒤에만 명시적으로 활성화한다.
 

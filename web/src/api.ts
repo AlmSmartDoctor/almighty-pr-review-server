@@ -1,3 +1,13 @@
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 const json = async (r: Response) => {
   const data = await r.json().catch(() => null);
   if (!r.ok) {
@@ -6,7 +16,7 @@ const json = async (r: Response) => {
       (typeof data?.detail === "string" ? data.detail : null) ??
       data?.message ??
       `HTTP ${r.status}`;
-    throw new Error(message);
+    throw new ApiError(r.status, message);
   }
   return data;
 };
@@ -34,6 +44,30 @@ export type HarnessPut = {
   vendor_prompts?: Record<string, string>;
 };
 
+export type Pagination = {
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+};
+export type Page<T> = { items: T[]; pagination: Pagination };
+export type PageRequest = { cursor?: string | null; limit?: number };
+export type FindingPage<T> = Page<T> & {
+  summary: {
+    total_count: number;
+    status_counts: Record<string, number>;
+    postable_count: number;
+  };
+};
+
+const pageQuery = (options: PageRequest & { prId?: number } = {}) => {
+  const query = new URLSearchParams();
+  if (options.cursor) query.set("cursor", options.cursor);
+  if (options.limit) query.set("limit", String(options.limit));
+  if (options.prId) query.set("pr_id", String(options.prId));
+  const value = query.toString();
+  return value ? `?${value}` : "";
+};
+
 export type OperationsDashboardFilters = {
   repo_id?: number | null;
   range: "24h" | "7d" | "30d";
@@ -51,7 +85,8 @@ export const api = {
   repoReadiness: (id: number) => request(`/api/repos/${id}/readiness`).then(json),
   syncRepo: (id: number) => request(`/api/repos/${id}/sync`, { method: "POST" }).then(json),
   syncRepos: () => request("/api/repos/sync", { method: "POST" }).then(json),
-  overview: () => request("/api/overview").then(json),
+  overview: (options: PageRequest & { prId?: number } = {}) =>
+    request(`/api/overview${pageQuery(options)}`).then(json),
   wiki: () => request("/api/wiki").then(json),
   refreshWiki: (repoId: number) => request(`/api/repos/${repoId}/wiki/refresh`, { method: "POST" }).then(json),
   learn: () => request("/api/learn").then(json),
@@ -64,10 +99,12 @@ export const api = {
   harnesses: () => request("/api/harness").then(json).then((r) => r.harnesses as string[]),
   harness: (name: string) => request(`/api/harness/${name}`).then(json),
   putHarness: (name: string, body: HarnessPut) => request(`/api/harness/${name}`, writeJson("PUT", body)).then(json),
-  runFindings: (id: number) => request(`/api/runs/${id}/findings`).then(json),
+  runFindings: (id: number, options: PageRequest = {}) =>
+    request(`/api/runs/${id}/findings${pageQuery(options)}`).then(json),
   runVendorResults: (id: number) => request(`/api/runs/${id}/vendor-results`).then(json),
   runDiagnostics: (id: number) => request(`/api/runs/${id}/diagnostics`).then(json),
-  prRuns: (prId: number) => request(`/api/prs/${prId}/runs`).then(json),
+  prRuns: (prId: number, options: PageRequest = {}) =>
+    request(`/api/prs/${prId}/runs${pageQuery(options)}`).then(json),
   runContext: (id: number) => request(`/api/runs/${id}/context`).then(json),
   runPostPreview: (id: number) => request(`/api/runs/${id}/post-preview`).then(json),
   prPostHealth: (id: number) => request(`/api/prs/${id}/post-health`).then(json),

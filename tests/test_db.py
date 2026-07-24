@@ -148,6 +148,46 @@ def test_init_schema_repairs_non_claude_legacy_prescreen_model(tmp_path):
     ).fetchone()[0] == "haiku"
 
 
+def test_overview_sort_migration_is_stable_and_insert_trigger_fills_value(tmp_path):
+    conn = connect(tmp_path / "overview-sort.db")
+    conn.execute(
+        """CREATE TABLE pull_request (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          repo_id INTEGER NOT NULL,
+          number INTEGER NOT NULL,
+          title TEXT, author TEXT, head_sha TEXT NOT NULL,
+          base_ref TEXT, state TEXT NOT NULL DEFAULT 'open',
+          url TEXT, created_at TEXT, last_reviewed_sha TEXT,
+          first_seen_at TEXT, updated_at TEXT,
+          UNIQUE(repo_id, number)
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO pull_request(
+               repo_id,number,head_sha,state,created_at,first_seen_at
+           ) VALUES (1,1,'head','open','2026-01-02T03:04:05Z','2026-01-03 00:00:00')"""
+    )
+    init_schema(conn)
+    first = conn.execute(
+        "SELECT overview_sort_at FROM pull_request WHERE number=1"
+    ).fetchone()[0]
+    assert first == "2026-01-02 03:04:05"
+    conn.execute(
+        "UPDATE pull_request SET created_at='2030-01-01T00:00:00Z' WHERE number=1"
+    )
+    init_schema(conn)
+    assert conn.execute(
+        "SELECT overview_sort_at FROM pull_request WHERE number=1"
+    ).fetchone()[0] == first
+    conn.execute(
+        """INSERT INTO pull_request(repo_id,number,head_sha,state,first_seen_at)
+           VALUES (1,2,'head','open','2026-04-05 06:07:08')"""
+    )
+    assert conn.execute(
+        "SELECT overview_sort_at FROM pull_request WHERE number=2"
+    ).fetchone()[0] == "2026-04-05 06:07:08"
+
+
 def test_init_schema_migrates_pull_request_created_at(tmp_path):
     conn = connect(tmp_path / "test.db")
     conn.execute(

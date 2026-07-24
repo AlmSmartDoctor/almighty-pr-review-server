@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -26,6 +26,7 @@ from server.repos import (
     feedback_repo,
     finding_repo,
     job_repo,
+    page_repo,
     post_operation_repo,
     posted_repo,
     pr_repo,
@@ -35,6 +36,7 @@ from server.repos import (
     settings_repo,
     wiki_repo,
 )
+from server.pagination import decode_cursor, encode_cursor, page_payload
 from server.review.diff_filter import commentable_lines
 from server.review.finding_policy import (
     policy_snapshot_from_row,
@@ -404,67 +406,55 @@ def list_repos(conn=Depends(get_conn)):
 
 
 @app.get("/api/overview")
-def overview(conn=Depends(get_conn)):
-    rows = conn.execute("""
-      SELECT p.id, p.number, p.title, r.full_name AS repo,
-             p.url, p.head_ref, p.head_sha, p.body,
-             p.author, p.created_at, p.first_seen_at, p.is_draft,
-             (SELECT complexity FROM pre_screen ps
-                WHERE ps.pr_id=p.id AND ps.head_sha=p.head_sha
-                ORDER BY ps.id DESC LIMIT 1) AS prescreen,
-             (SELECT duration_ms FROM pre_screen ps
-                WHERE ps.pr_id=p.id AND ps.head_sha=p.head_sha
-                ORDER BY ps.id DESC LIMIT 1) AS prescreen_duration_ms,
-             (SELECT COUNT(*) FROM finding f
-                WHERE f.run_id=(SELECT id FROM review_run rr
-                  WHERE rr.pr_id=p.id ORDER BY id DESC LIMIT 1)) AS finding_count,
-             (SELECT MIN(CASE f.severity WHEN 'critical' THEN 0 WHEN 'high'
-                THEN 1 WHEN 'medium' THEN 2 ELSE 3 END)
-                FROM finding f
-                WHERE f.run_id=(SELECT id FROM review_run rr
-                  WHERE rr.pr_id=p.id ORDER BY id DESC LIMIT 1)) AS sev_rank,
-             (SELECT id FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_id,
-             (SELECT head_sha FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_head_sha,
-             (SELECT status FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_status,
-             (SELECT started_at FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_started_at,
-             (SELECT finished_at FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_finished_at,
-             (SELECT CASE
-                       WHEN rr.started_at IS NULL THEN NULL
-                       ELSE (strftime('%s', COALESCE(rr.finished_at, datetime('now'))) -
-                             strftime('%s', rr.started_at)) * 1000
-                     END
-                FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_duration_ms,
-             (SELECT error FROM review_run rr WHERE rr.pr_id=p.id
-                ORDER BY id DESC LIMIT 1) AS run_error,
-             (SELECT status FROM review_job j
-                WHERE j.pr_id=p.id AND j.head_sha=p.head_sha
-                ORDER BY id DESC LIMIT 1) AS job_status,
-             (SELECT error FROM review_job j
-                WHERE j.pr_id=p.id AND j.head_sha=p.head_sha
-                ORDER BY id DESC LIMIT 1) AS job_error,
-             (SELECT next_run_at FROM review_job j
-                WHERE j.pr_id=p.id AND j.head_sha=p.head_sha
-                ORDER BY id DESC LIMIT 1) AS job_next_run_at
-      FROM pull_request p JOIN repo r ON r.id=p.repo_id
-      WHERE p.state='open'
-      ORDER BY
-        COALESCE(datetime(p.created_at), datetime(p.first_seen_at)) DESC, p.id DESC
-    """).fetchall()
+def overview(
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=4096),
+    pr_id: int | None = Query(default=None, ge=1),
+    conn=Depends(get_conn),
+):
+    if cursor and pr_id is not None:
+        raise HTTPException(400, "cursor and pr_id cannot be combined")
+    try:
+        decoded = (
+            decode_cursor(cursor, resource="overview", parent=None)
+            if cursor else None
+        )
+    except ValueError as exc:
+        raise HTTPException(400, "invalid cursor") from exc
+    snapshot = (
+        decoded["snapshot"] if decoded
+        else page_repo.overview_snapshot_max(conn, pr_id=pr_id)
+    )
+    after = decoded["position"] if decoded else None
+    if after is not None and (
+        len(after) != 2 or not isinstance(after[0], str)
+        or not isinstance(after[1], int)
+    ):
+        raise HTTPException(400, "invalid cursor")
+    rows = page_repo.overview_page(
+        conn, snapshot_max_id=snapshot, after=after,
+        limit=limit + 1, pr_id=pr_id,
+    )
+    has_more = pr_id is None and len(rows) > limit
+    rows = rows[:limit]
     sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
-    out = []
-    for x in rows:
-        row = dict(x)
-        body = row.pop("body", None)  # jira 키 추출에만 쓰고 응답 본문엔 싣지 않음
+    items = []
+    for source in rows:
+        row = dict(source)
+        body = row.pop("body", None)
         row["severity"] = sev.get(row["sev_rank"], "low")
         row["jira_links"] = _jira_links(row.get("head_ref"), row.get("title"), body)
-        out.append(row)
-    return out
+        items.append(row)
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = encode_cursor(
+            resource="overview", parent=None, snapshot_max_id=snapshot,
+            position=[last["overview_sort_at"], last["id"]],
+        )
+    for item in items:
+        item.pop("overview_sort_at", None)
+    return page_payload(items, limit=limit, next_cursor=next_cursor)
 
 
 def _jira_links(*texts: str | None) -> list[dict]:
@@ -801,25 +791,35 @@ def patch_settings(
 
 
 @app.get("/api/prs/{pid}/runs")
-def pr_runs(pid: int, conn=Depends(get_conn)):
-    """PR의 리뷰 run 이력(최신 먼저) — 재리뷰 후에도 과거 run의 결과를 찾아볼 수 있게."""
+def pr_runs(
+    pid: int,
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=4096),
+    conn=Depends(get_conn),
+):
+    """Bounded review run history, newest first."""
     if pr_repo.get(conn, pid) is None:
         raise HTTPException(404, "pr not found")
-    rows = conn.execute(
-        """SELECT r.id, r.head_sha, r.trigger, r.status, r.error,
-                  r.started_at, r.finished_at,
-                  r.scope_requested_mode, r.scope_effective_mode,
-                  r.scope_policy_reason, r.scope_selection_source,
-                  r.dedupe_requested_mode, r.dedupe_effective_mode,
-                  r.dedupe_policy_reason, r.dedupe_selection_source,
-                  r.policy_cohort_key, r.policy_decision_hash,
-                  r.policy_config_hash, r.benchmark_attestation_hash,
-                  (SELECT COUNT(*) FROM finding f WHERE f.run_id = r.id)
-                    AS finding_count
-           FROM review_run r WHERE r.pr_id=? ORDER BY r.id DESC""",
-        (pid,),
-    ).fetchall()
-    response = []
+    try:
+        decoded = (
+            decode_cursor(cursor, resource="pr-runs", parent=pid)
+            if cursor else None
+        )
+    except ValueError as exc:
+        raise HTTPException(400, "invalid cursor") from exc
+    snapshot = decoded["snapshot"] if decoded else page_repo.runs_snapshot_max(
+        conn, pr_id=pid
+    )
+    position = decoded["position"] if decoded else []
+    if position and (len(position) != 1 or not isinstance(position[0], int)):
+        raise HTTPException(400, "invalid cursor")
+    rows = page_repo.runs_page(
+        conn, pr_id=pid, snapshot_max_id=snapshot,
+        after_id=position[0] if position else None, limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = []
     for row in rows:
         item = dict(row)
         item["policy_snapshot"] = _policy_snapshot_payload(
@@ -834,15 +834,78 @@ def pr_runs(pid: int, conn=Depends(get_conn)):
             "benchmark_attestation_hash",
         ):
             item.pop(key, None)
-        response.append(item)
-    return response
+        items.append(item)
+    next_cursor = None
+    if has_more and items:
+        next_cursor = encode_cursor(
+            resource="pr-runs", parent=pid, snapshot_max_id=snapshot,
+            position=[items[-1]["id"]],
+        )
+    return page_payload(items, limit=limit, next_cursor=next_cursor)
 
 
 @app.get("/api/runs/{run_id}/findings")
-def run_findings(run_id: int, conn=Depends(get_conn)):
+def run_findings(
+    run_id: int,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=4096),
+    conn=Depends(get_conn),
+):
     if review_repo.get_run(conn, run_id) is None:
         raise HTTPException(404, "run not found")
-    return [dict(f) for f in finding_repo.list_for_run(conn, run_id)]
+    try:
+        decoded = (
+            decode_cursor(cursor, resource="run-findings", parent=run_id)
+            if cursor else None
+        )
+    except ValueError as exc:
+        raise HTTPException(400, "invalid cursor") from exc
+    if decoded:
+        snapshot = decoded["snapshot"]
+        summary = decoded["metadata"].get("summary")
+    else:
+        snapshot, summary = page_repo.findings_snapshot(conn, run_id=run_id)
+    position = decoded["position"] if decoded else None
+    if position is not None and (
+        len(position) != 5
+        or not all(isinstance(position[index], (int, float)) for index in (0, 1, 2, 4))
+        or not isinstance(position[3], str)
+    ):
+        raise HTTPException(400, "invalid cursor")
+    if not (
+        isinstance(summary, dict)
+        and set(summary) == {"total_count", "status_counts", "postable_count"}
+        and isinstance(summary["total_count"], int)
+        and summary["total_count"] >= 0
+        and isinstance(summary["postable_count"], int)
+        and 0 <= summary["postable_count"] <= summary["total_count"]
+        and isinstance(summary["status_counts"], dict)
+        and all(
+            isinstance(key, str) and isinstance(value, int) and value >= 0
+            for key, value in summary["status_counts"].items()
+        )
+        and sum(summary["status_counts"].values()) == summary["total_count"]
+    ):
+        raise HTTPException(400, "invalid cursor")
+    rows = page_repo.findings_page(
+        conn, run_id=run_id, snapshot_max_id=snapshot,
+        after=position, limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [dict(row) for row in rows]
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = encode_cursor(
+            resource="run-findings", parent=run_id,
+            snapshot_max_id=snapshot,
+            position=page_repo.finding_position(rows[-1]),
+            metadata={"summary": summary},
+        )
+    return page_payload(
+        items, limit=limit, next_cursor=next_cursor,
+        summary=summary,
+    )
 
 
 @app.get("/api/runs/{run_id}/vendor-results")

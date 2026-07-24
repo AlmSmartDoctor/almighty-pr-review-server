@@ -2,6 +2,7 @@ import ipaddress
 import json
 import math
 import os
+import secrets
 import tempfile
 from pathlib import Path
 
@@ -168,6 +169,14 @@ REHEARSAL_ALLOW_SLACK = _env_bool01("ALMIGHTY_REHEARSAL_ALLOW_SLACK")
 # 공개 터널/프록시에서 관리 API를 보호하는 env-only bearer token. 빈 값은 기존
 # loopback-only 개발 동작을 보존한다.
 ADMIN_TOKEN = os.environ.get("ALMIGHTY_ADMIN_TOKEN", "")
+_CURSOR_SECRET_EXPLICIT = os.environ.get("ALMIGHTY_CURSOR_HMAC_SECRET", "")
+if _CURSOR_SECRET_EXPLICIT and len(_CURSOR_SECRET_EXPLICIT) < 32:
+    raise RuntimeError("ALMIGHTY_CURSOR_HMAC_SECRET must be at least 32 characters")
+PAGINATION_CURSOR_SECRET = (
+    _CURSOR_SECRET_EXPLICIT or ADMIN_TOKEN or secrets.token_urlsafe(32)
+)
+
+
 def _validate_webhook_ingress_db(path: Path) -> None:
     temp_root = Path(tempfile.gettempdir()).resolve()
     candidate = path.resolve()

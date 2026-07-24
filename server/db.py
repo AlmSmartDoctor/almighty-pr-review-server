@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS pull_request (
   title TEXT, author TEXT, head_sha TEXT NOT NULL,
   base_ref TEXT, base_sha TEXT, state TEXT NOT NULL DEFAULT 'open',
   url TEXT, created_at TEXT, last_reviewed_sha TEXT,
-  first_seen_at TEXT, updated_at TEXT,
+  first_seen_at TEXT, overview_sort_at TEXT, updated_at TEXT,
   UNIQUE(repo_id, number)
 );
 CREATE TABLE IF NOT EXISTS pre_screen (
@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS finding (
   posting_eligible INTEGER NOT NULL DEFAULT 1,
   duplicate_group_id INTEGER,
   duplicate_suggested INTEGER NOT NULL DEFAULT 0
+);
+-- Paginated findings use an O(1) authoritative status/posting summary.
+CREATE TABLE IF NOT EXISTS run_finding_summary (
+  run_id INTEGER PRIMARY KEY REFERENCES review_run(id) ON DELETE CASCADE,
+  max_finding_id INTEGER NOT NULL DEFAULT 0,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  pending_count INTEGER NOT NULL DEFAULT 0,
+  approved_count INTEGER NOT NULL DEFAULT 0,
+  dismissed_count INTEGER NOT NULL DEFAULT 0,
+  edited_count INTEGER NOT NULL DEFAULT 0,
+  posted_count INTEGER NOT NULL DEFAULT 0,
+  unknown_count INTEGER NOT NULL DEFAULT 0,
+  postable_count INTEGER NOT NULL DEFAULT 0
 );
 -- 서브프로젝트 C: finding 사람 판단 이력(append-only 감사). set_status가 상태 변경 시 1행 append.
 CREATE TABLE IF NOT EXISTS finding_decision (
@@ -228,6 +241,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "repo", "last_poll_error", "TEXT")
     _ensure_column(conn, "pull_request", "created_at", "TEXT")
     _ensure_column(conn, "pull_request", "head_ref", "TEXT")
+    _ensure_column(conn, "pull_request", "overview_sort_at", "TEXT")
+    conn.execute(
+        """UPDATE pull_request
+           SET overview_sort_at=COALESCE(
+             datetime(created_at), datetime(first_seen_at), datetime('now')
+           )
+           WHERE overview_sort_at IS NULL"""
+    )
     _ensure_column(conn, "review_run", "repo_id", "INTEGER REFERENCES repo(id)")
     _ensure_column(conn, "review_run", "started_at", "TEXT")
     conn.execute(
@@ -242,6 +263,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
         BEGIN
           UPDATE review_run SET repo_id=(
             SELECT repo_id FROM pull_request WHERE id=NEW.pr_id
+          ) WHERE id=NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pull_request_overview_sort_insert
+        AFTER INSERT ON pull_request WHEN NEW.overview_sort_at IS NULL
+        BEGIN
+          UPDATE pull_request SET overview_sort_at=COALESCE(
+            datetime(NEW.created_at), datetime(NEW.first_seen_at), datetime('now')
           ) WHERE id=NEW.id;
         END;
         """
@@ -367,6 +395,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _ensure_column(conn, "review_run", column, "TEXT")
     _ensure_column(conn, "wiki_page", "owner_process_id", "TEXT")
     _ensure_column(conn, "finding", "posting_operation_id", "INTEGER")
+    _ensure_column(
+        conn, "run_finding_summary", "max_finding_id", "INTEGER NOT NULL DEFAULT 0"
+    )
     _ensure_column(conn, "github_post_operation", "owner_token", "TEXT")
     _ensure_column(conn, "github_post_operation", "locked_at", "TEXT")
     _ensure_column(conn, "github_post_operation", "body_hash", "TEXT")
@@ -387,8 +418,99 @@ def init_schema(conn: sqlite3.Connection) -> None:
     ).fetchone()[0]
     if not is_valid_prescreen_model(current):
         conn.execute("UPDATE app_settings SET prescreen_model='haiku' WHERE id=1")
+    conn.execute(
+        """INSERT OR IGNORE INTO run_finding_summary(
+               run_id,max_finding_id,total_count,pending_count,approved_count,
+               dismissed_count,edited_count,posted_count,unknown_count,postable_count
+           )
+           SELECT run_id,MAX(id),COUNT(*),
+                  SUM(status='pending'),SUM(status='approved'),
+                  SUM(status='dismissed'),SUM(status='edited'),
+                  SUM(status='posted'),
+                  SUM(status NOT IN ('pending','approved','dismissed','edited','posted')),
+                  SUM(posting_eligible=1 AND status IN ('approved','edited'))
+           FROM finding GROUP BY run_id"""
+    )
     conn.executescript(
         """
+        CREATE INDEX IF NOT EXISTS idx_finding_run_id
+          ON finding(run_id,id DESC);
+        CREATE TRIGGER IF NOT EXISTS trg_finding_summary_insert
+        AFTER INSERT ON finding
+        BEGIN
+          INSERT INTO run_finding_summary(
+            run_id,max_finding_id,total_count,pending_count,approved_count,
+            dismissed_count,edited_count,posted_count,unknown_count,postable_count
+          ) VALUES (
+            NEW.run_id,NEW.id,1,NEW.status='pending',NEW.status='approved',
+            NEW.status='dismissed',NEW.status='edited',NEW.status='posted',
+            NEW.status NOT IN ('pending','approved','dismissed','edited','posted'),
+            NEW.posting_eligible=1 AND NEW.status IN ('approved','edited')
+          ) ON CONFLICT(run_id) DO UPDATE SET
+            max_finding_id=MAX(max_finding_id,NEW.id),
+            total_count=total_count+1,
+            pending_count=pending_count+(NEW.status='pending'),
+            approved_count=approved_count+(NEW.status='approved'),
+            dismissed_count=dismissed_count+(NEW.status='dismissed'),
+            edited_count=edited_count+(NEW.status='edited'),
+            posted_count=posted_count+(NEW.status='posted'),
+            unknown_count=unknown_count+(NEW.status NOT IN ('pending','approved','dismissed','edited','posted')),
+            postable_count=postable_count+(NEW.posting_eligible=1 AND NEW.status IN ('approved','edited'));
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_finding_summary_delete
+        AFTER DELETE ON finding
+        BEGIN
+          UPDATE run_finding_summary SET
+            max_finding_id=CASE WHEN max_finding_id=OLD.id THEN COALESCE(
+              (SELECT id FROM finding INDEXED BY idx_finding_run_id
+               WHERE run_id=OLD.run_id ORDER BY id DESC LIMIT 1),0
+            ) ELSE max_finding_id END,
+            total_count=MAX(0,total_count-1),
+            pending_count=MAX(0,pending_count-(OLD.status='pending')),
+            approved_count=MAX(0,approved_count-(OLD.status='approved')),
+            dismissed_count=MAX(0,dismissed_count-(OLD.status='dismissed')),
+            edited_count=MAX(0,edited_count-(OLD.status='edited')),
+            posted_count=MAX(0,posted_count-(OLD.status='posted')),
+            unknown_count=MAX(0,unknown_count-(OLD.status NOT IN ('pending','approved','dismissed','edited','posted'))),
+            postable_count=MAX(0,postable_count-(OLD.posting_eligible=1 AND OLD.status IN ('approved','edited')))
+          WHERE run_id=OLD.run_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_finding_summary_update
+        AFTER UPDATE OF status,posting_eligible,run_id ON finding
+        BEGIN
+          UPDATE run_finding_summary SET
+            max_finding_id=CASE WHEN OLD.run_id!=NEW.run_id AND max_finding_id=OLD.id THEN COALESCE(
+              (SELECT id FROM finding INDEXED BY idx_finding_run_id
+               WHERE run_id=OLD.run_id ORDER BY id DESC LIMIT 1),0
+            ) ELSE max_finding_id END,
+            total_count=MAX(0,total_count-1),
+            pending_count=MAX(0,pending_count-(OLD.status='pending')),
+            approved_count=MAX(0,approved_count-(OLD.status='approved')),
+            dismissed_count=MAX(0,dismissed_count-(OLD.status='dismissed')),
+            edited_count=MAX(0,edited_count-(OLD.status='edited')),
+            posted_count=MAX(0,posted_count-(OLD.status='posted')),
+            unknown_count=MAX(0,unknown_count-(OLD.status NOT IN ('pending','approved','dismissed','edited','posted'))),
+            postable_count=MAX(0,postable_count-(OLD.posting_eligible=1 AND OLD.status IN ('approved','edited')))
+          WHERE run_id=OLD.run_id;
+          INSERT INTO run_finding_summary(
+            run_id,max_finding_id,total_count,pending_count,approved_count,
+            dismissed_count,edited_count,posted_count,unknown_count,postable_count
+          ) VALUES (
+            NEW.run_id,NEW.id,1,NEW.status='pending',NEW.status='approved',
+            NEW.status='dismissed',NEW.status='edited',NEW.status='posted',
+            NEW.status NOT IN ('pending','approved','dismissed','edited','posted'),
+            NEW.posting_eligible=1 AND NEW.status IN ('approved','edited')
+          ) ON CONFLICT(run_id) DO UPDATE SET
+            max_finding_id=MAX(max_finding_id,NEW.id),
+            total_count=total_count+1,
+            pending_count=pending_count+(NEW.status='pending'),
+            approved_count=approved_count+(NEW.status='approved'),
+            dismissed_count=dismissed_count+(NEW.status='dismissed'),
+            edited_count=edited_count+(NEW.status='edited'),
+            posted_count=posted_count+(NEW.status='posted'),
+            unknown_count=unknown_count+(NEW.status NOT IN ('pending','approved','dismissed','edited','posted')),
+            postable_count=postable_count+(NEW.posting_eligible=1 AND NEW.status IN ('approved','edited'));
+        END;
         CREATE INDEX IF NOT EXISTS idx_review_job_claim
           ON review_job(status, next_run_at, priority DESC, id);
         CREATE INDEX IF NOT EXISTS idx_review_run_pr_status
@@ -399,11 +521,15 @@ def init_schema(conn: sqlite3.Connection) -> None:
           ON finding(run_id, status, vendor, id);
         CREATE INDEX IF NOT EXISTS idx_pull_request_repo_open
           ON pull_request(repo_id, number) WHERE state='open';
+        CREATE INDEX IF NOT EXISTS idx_pull_request_overview_page
+          ON pull_request(overview_sort_at DESC, id DESC) WHERE state='open';
         -- Bounded operations dashboard scans by repository or across all repositories.
         CREATE INDEX IF NOT EXISTS idx_pull_request_repo_id
           ON pull_request(repo_id, id);
         CREATE INDEX IF NOT EXISTS idx_review_run_operations
           ON review_run(pr_id, started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_review_run_page
+          ON review_run(pr_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_review_run_dashboard_repo
           ON review_run(repo_id, started_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_review_run_dashboard_global
@@ -412,6 +538,15 @@ def init_schema(conn: sqlite3.Connection) -> None:
           ON vendor_result(run_id, vendor, status);
         CREATE INDEX IF NOT EXISTS idx_finding_canary_metrics
           ON finding(run_id, scope_status, status, posting_eligible, duplicate_group_id);
+        CREATE INDEX IF NOT EXISTS idx_finding_run_page_v2
+          ON finding(
+            run_id,
+            CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                 WHEN 'medium' THEN 2 ELSE 3 END,
+            CASE consensus WHEN 'consensus' THEN 0 ELSE 1 END,
+            -COALESCE(confidence, -1),
+            COALESCE(file, ''), id
+          );
         """
     )
     conn.commit()

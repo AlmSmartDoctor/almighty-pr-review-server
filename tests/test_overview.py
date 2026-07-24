@@ -47,7 +47,7 @@ def test_overview_lists_open_pr_with_top_severity(tmp_path):
         confidence=0.8,
     )
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     assert len(rows) == 1
     row = rows[0]
     assert row["title"] == "Add feature"
@@ -108,7 +108,7 @@ def test_overview_severity_is_worst_across_findings(tmp_path):
         confidence=0.8,
     )
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     assert len(rows) == 1
     assert rows[0]["severity"] == "critical"
 
@@ -136,7 +136,7 @@ def test_overview_no_findings_defaults_low(tmp_path):
         conn, pr_id=pid, head_sha="s", trigger="manual", effort="medium"
     )
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     assert len(rows) == 1
     assert rows[0]["severity"] == "low"
     assert rows[0]["run_id"] == run_id
@@ -186,7 +186,7 @@ def test_overview_prescreen_matches_current_pr_head(tmp_path):
         conn, pr_id=pid, head_sha="new", trigger="manual", effort="medium"
     )
 
-    row = client.get("/api/overview").json()[0]
+    row = client.get("/api/overview").json()["items"][0]
 
     assert row["run_id"] == latest_run
     assert row["run_status"] == "running"
@@ -234,7 +234,7 @@ def test_overview_finding_summary_uses_latest_run_only(tmp_path):
     )
     review_repo.finish_run(conn, latest_run, "done")
 
-    row = client.get("/api/overview").json()[0]
+    row = client.get("/api/overview").json()["items"][0]
 
     assert row["run_id"] == latest_run
     assert row["finding_count"] == 0
@@ -269,7 +269,7 @@ def test_overview_exposes_latest_run_status_and_error(tmp_path):
     )
     review_repo.finish_run(conn, run_id, "canceled", error="diff too large")
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     assert rows[0]["run_id"] == run_id
     assert rows[0]["run_status"] == "canceled"
     assert rows[0]["run_error"] == "diff too large"
@@ -303,7 +303,7 @@ def test_overview_exposes_latest_job_status_for_prerun_failures(tmp_path):
     )
     conn.commit()
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     assert rows[0]["job_status"] == "failed"
     assert rows[0]["job_error"] == "clone 실패"
     assert rows[0]["run_id"] is None  # run은 없음 — job만이 실패를 안다
@@ -343,7 +343,7 @@ def test_overview_uses_job_for_current_head_when_pr_returns_to_old_sha(tmp_path)
     )
     job_repo.enqueue_manual(conn, pr_id=pid, head_sha="old")
 
-    row = client.get("/api/overview").json()[0]
+    row = client.get("/api/overview").json()["items"][0]
     assert row["job_status"] == "queued"
     assert row["job_error"] is None
 
@@ -373,7 +373,7 @@ def test_overview_orders_by_created_at_desc_and_exposes_draft(tmp_path):
         **common,
     )
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     assert [r["number"] for r in rows] == [
         2,
         3,
@@ -405,12 +405,15 @@ def test_overview_sort_normalizes_mixed_timestamp_formats(tmp_path):
         conn, number=2, title="webhook 12시", created_at=None, **common
     )
     conn.execute(
-        "UPDATE pull_request SET first_seen_at='2026-07-08 12:00:00' WHERE id=?",
+        """UPDATE pull_request
+           SET first_seen_at='2026-07-08 12:00:00',
+               overview_sort_at='2026-07-08 12:00:00'
+           WHERE id=?""",
         (pid2,),
     )
     conn.commit()
 
-    rows = client.get("/api/overview").json()
+    rows = client.get("/api/overview").json()["items"]
     # 문자열 비교였다면 'T'(84)>' '(32)로 PR1이 위 → 순수 문자열 정렬은 [1,2](버그).
     # datetime() 정규화로 실제 시각순 → 12시 webhook PR이 위.
     assert [r["number"] for r in rows] == [2, 1]

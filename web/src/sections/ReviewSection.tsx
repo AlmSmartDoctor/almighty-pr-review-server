@@ -3,7 +3,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Check, ExternalLink, Pencil, RotateCw, Send, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { api } from "../api";
+import { ApiError, api, type FindingPage, type Page, type PageRequest } from "../api";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -142,11 +142,40 @@ const FINDING_STATUS_LABEL: Record<string, string> = {
 
 const POLL_MS = 2500;  // 상세 페이지 실시간 폴링 주기
 const LIST_POLL_MS = 10_000;  // 리스트 화면 자동 갱신 주기(리뷰 완료를 놓치지 않게)
+const OVERVIEW_PAGE_LIMIT = 25;
+const RUN_PAGE_LIMIT = 25;
+const FINDING_PAGE_LIMIT = 50;
 
 const sevVariant = (s: string): BadgeVariant =>
   (["critical", "high", "medium", "low"].includes(s) ? (s as BadgeVariant) : "neutral");
 const vendorVariant = (v: string): BadgeVariant =>
   v === "claude" ? "claude" : v === "codex" ? "codex" : "neutral";
+
+type PageLike<T> = Page<T> | T[];
+type FindingsPageLike = FindingPage<Finding> | Finding[];
+
+const normalizePage = <T,>(value: PageLike<T>, limit: number): Page<T> =>
+  Array.isArray(value)
+    ? { items: value, pagination: { limit, has_more: false, next_cursor: null } }
+    : value;
+
+const normalizeFindingsPage = (value: FindingsPageLike, limit: number): FindingPage<Finding> => {
+  if (!Array.isArray(value)) return value;
+  const statusCounts: Record<string, number> = {};
+  let postable = 0;
+  for (const finding of value) {
+    statusCounts[finding.status] = (statusCounts[finding.status] ?? 0) + 1;
+    if (finding.posting_eligible !== false && ["approved", "edited"].includes(finding.status)) postable += 1;
+  }
+  return {
+    items: value,
+    pagination: { limit, has_more: false, next_cursor: null },
+    summary: { total_count: value.length, status_counts: statusCounts, postable_count: postable },
+  };
+};
+
+const dedupeById = <T extends { id: number }>(items: T[]) =>
+  Array.from(new Map(items.map((item) => [item.id, item])).values());
 
 type ReviewStatusFilter = "unreviewed" | "inProgress" | "completed";
 
@@ -157,14 +186,14 @@ const STATUS_FILTERS: { key: ReviewStatusFilter; label: string }[] = [
 ];
 
 export function ReviewSection(props: {
-  loadPrs?: () => Promise<Pr[]>;
-  loadFindings?: (runId: number) => Promise<Finding[]>;
+  loadPrs?: (options?: PageRequest & { prId?: number }) => Promise<PageLike<Pr>>;
+  loadFindings?: (runId: number, options?: PageRequest) => Promise<FindingsPageLike>;
   loadVendors?: (runId: number) => Promise<VendorResult[]>;
   loadDiagnostics?: (runId: number) => Promise<RunDiagnostic>;
   loadContext?: (runId: number) => Promise<RunContext>;
   loadPreview?: (runId: number) => Promise<PostPreview>;
   loadPostHealth?: (prId: number) => Promise<PostHealth>;
-  loadRuns?: (prId: number) => Promise<RunSummary[]>;
+  loadRuns?: (prId: number, options?: PageRequest) => Promise<PageLike<RunSummary>>;
   syncRepos?: () => Promise<{
     ok: boolean;
     repositories: number;
@@ -189,27 +218,94 @@ export function ReviewSection(props: {
   const [triggeringId, setTriggeringId] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [overviewNextCursor, setOverviewNextCursor] = useState<string | null>(null);
+  const [loadingMorePrs, setLoadingMorePrs] = useState(false);
+  const [directPr, setDirectPr] = useState<Pr | null>(null);
+  const [directPrLoaded, setDirectPrLoaded] = useState(false);
+  const overviewPageCount = useRef(1);
+  const directPrRequestSeq = useRef(0);
   const requestSequence = useRef(0);
   const appliedRequestSequence = useRef(0);
   const mounted = useRef(true);
 
+  const loadOverviewWindow = async (pageCount: number) => {
+    let cursor: string | null = null;
+    let nextCursor: string | null = null;
+    let pagesLoaded = 0;
+    const items: Pr[] = [];
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      const page: Page<Pr> = normalizePage<Pr>(
+        await loadPrs({ cursor, limit: OVERVIEW_PAGE_LIMIT }),
+        OVERVIEW_PAGE_LIMIT,
+      );
+      items.push(...page.items);
+      pagesLoaded += 1;
+      nextCursor = page.pagination.next_cursor;
+      if (!page.pagination.has_more || !nextCursor) break;
+      cursor = nextCursor;
+    }
+    return { items: dedupeById(items), nextCursor, pagesLoaded };
+  };
+
   const refresh = () => {
     const sequence = ++requestSequence.current;
-    return loadPrs()
-      .then((rows) => {
+    return loadOverviewWindow(overviewPageCount.current)
+      .then(async (window) => {
+        let targeted: Pr | null = null;
+        if (prId && !window.items.some((item) => item.id === Number(prId))) {
+          const page: Page<Pr> = normalizePage<Pr>(
+            await loadPrs({ prId: Number(prId), limit: 1 }),
+            1,
+          );
+          targeted = page.items[0] ?? null;
+        }
         if (!mounted.current || sequence < appliedRequestSequence.current) return;
         appliedRequestSequence.current = sequence;
-        setPrs(rows);
+        overviewPageCount.current = Math.max(1, window.pagesLoaded);
+        setPrs(window.items);
+        setOverviewNextCursor(window.nextCursor);
+        setDirectPr(targeted);
+        setDirectPrLoaded(true);
         setError("");
       })
       .catch(() => {
         if (mounted.current && sequence >= appliedRequestSequence.current) {
           setError("오버뷰를 불러오지 못했습니다.");
+          setDirectPrLoaded(true);
         }
       })
       .finally(() => {
         if (mounted.current) setLoaded(true);
       });
+  };
+
+  const loadMorePrs = () => {
+    if (!overviewNextCursor || loadingMorePrs) return;
+    const cursor = overviewNextCursor;
+    const sequence = ++requestSequence.current;
+    setLoadingMorePrs(true);
+    loadPrs({ cursor, limit: OVERVIEW_PAGE_LIMIT })
+      .then((value) => normalizePage<Pr>(value, OVERVIEW_PAGE_LIMIT))
+      .then((page) => {
+        if (!mounted.current || sequence < appliedRequestSequence.current) return;
+        appliedRequestSequence.current = sequence;
+        setPrs((current) => dedupeById([...current, ...page.items]));
+        setOverviewNextCursor(page.pagination.next_cursor);
+        overviewPageCount.current += 1;
+      })
+      .catch((cause) => {
+        if (mounted.current && sequence >= appliedRequestSequence.current) {
+          if (cause instanceof ApiError && cause.status === 400) {
+            overviewPageCount.current = 1;
+            setOverviewNextCursor(null);
+            setError("목록 cursor가 만료되어 첫 페이지부터 다시 불러옵니다.");
+            void refresh();
+          } else {
+            setError("PR을 더 불러오지 못했습니다.");
+          }
+        }
+      })
+      .finally(() => { if (mounted.current) setLoadingMorePrs(false); });
   };
 
   useEffect(() => {
@@ -222,6 +318,33 @@ export function ReviewSection(props: {
     };
   }, []);
 
+  useEffect(() => {
+    if (!prId) {
+      setDirectPr(null);
+      setDirectPrLoaded(true);
+      return;
+    }
+    const target = Number(prId);
+    if (prs.some((item) => item.id === target) || directPr?.id === target) {
+      setDirectPrLoaded(true);
+      return;
+    }
+    const sequence = ++directPrRequestSeq.current;
+    setDirectPrLoaded(false);
+    loadPrs({ prId: target, limit: 1 })
+      .then((value) => normalizePage<Pr>(value, 1))
+      .then((page) => {
+        if (sequence !== directPrRequestSeq.current) return;
+        setDirectPr(page.items[0] ?? null);
+        setDirectPrLoaded(true);
+      })
+      .catch(() => {
+        if (sequence !== directPrRequestSeq.current) return;
+        setDirectPr(null);
+        setDirectPrLoaded(true);
+      });
+  }, [prId, prs, directPr, loadPrs]);
+
   const repos = ["전체", ...Array.from(new Set(prs.map((p) => p.repo)))];
   const repoScoped = tab === "전체" ? prs : prs.filter((p) => p.repo === tab);
   const statusCounts = useMemo(() => ({
@@ -232,7 +355,10 @@ export function ReviewSection(props: {
   const shown = statusFilter
     ? repoScoped.filter((p) => reviewStatus(p) === statusFilter)
     : repoScoped;
-  const detail = prId ? prs.find((p) => p.id === Number(prId)) ?? null : null;
+  const detail = prId
+    ? prs.find((p) => p.id === Number(prId))
+      ?? (directPr?.id === Number(prId) ? directPr : null)
+    : null;
 
   const syncAllRepos = () => {
     setSyncing(true);
@@ -285,7 +411,7 @@ export function ReviewSection(props: {
     );
   }
 
-  if (prId && prs.length > 0 && !detail) {
+  if (prId && directPrLoaded && !detail) {
     return (
       <div>
         <BackButton onClick={() => navigate("/reviews")} />
@@ -350,6 +476,7 @@ export function ReviewSection(props: {
           );
         })}
       </div>
+      <p className="mb-3 text-xs text-muted-foreground">현재 불러온 {prs.length}개 PR 기준</p>
 
       {error && <StatusLine tone="error" className="mb-3">{error}</StatusLine>}
       {actionMessage && (
@@ -411,6 +538,13 @@ export function ReviewSection(props: {
               </div>
             </article>
           ))}
+        </div>
+      )}
+      {overviewNextCursor && (
+        <div className="mt-4 flex justify-center">
+          <Button variant="outline" onClick={loadMorePrs} disabled={loadingMorePrs}>
+            {loadingMorePrs ? "PR 불러오는 중" : "PR 더 불러오기"}
+          </Button>
         </div>
       )}
       </section>
@@ -569,13 +703,13 @@ function DiagnosticPanel({ diagnostic, loaded }: { diagnostic: RunDiagnostic | n
 
 function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPreview, loadPostHealth, loadRuns, onRefresh, onBack }: {
   pr: Pr;
-  load: (id: number) => Promise<Finding[]>;
+  load: (id: number, options?: PageRequest) => Promise<FindingsPageLike>;
   loadVendors?: (id: number) => Promise<VendorResult[]>;
   loadDiagnostics?: (id: number) => Promise<RunDiagnostic>;
   loadContext?: (id: number) => Promise<RunContext>;
   loadPreview?: (id: number) => Promise<PostPreview>;
   loadPostHealth?: (id: number) => Promise<PostHealth>;
-  loadRuns?: (prId: number) => Promise<RunSummary[]>;
+  loadRuns?: (prId: number, options?: PageRequest) => Promise<PageLike<RunSummary>>;
   onRefresh: () => Promise<void>;
   onBack: () => void;
 }) {
@@ -586,6 +720,10 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
   const loadHealth = loadPostHealth ?? api.prPostHealth;
   const [findings, setFindings] = useState<Finding[]>([]);
   const [findingsRunId, setFindingsRunId] = useState<number | null>(null);
+  const [findingSummary, setFindingSummary] = useState<FindingPage<Finding>["summary"] | null>(null);
+  const [findingNextCursor, setFindingNextCursor] = useState<string | null>(null);
+  const [loadingMoreFindings, setLoadingMoreFindings] = useState(false);
+  const findingPageCount = useRef(1);
   const [vendors, setVendors] = useState<VendorResult[]>([]);
   const [vendorsRunId, setVendorsRunId] = useState<number | null>(null);
   const [diagnostic, setDiagnostic] = useState<RunDiagnostic | null>(null);
@@ -613,6 +751,11 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
   // undefined = 대기 안 함(sentinel). null도 유효값(리뷰 이력 없던 PR).
   const [awaitingBase, setAwaitingBase] = useState<number | null | undefined>(undefined);
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [runNextCursor, setRunNextCursor] = useState<string | null>(null);
+  const [loadingMoreRuns, setLoadingMoreRuns] = useState(false);
+  const runPageCount = useRef(1);
+  const runPageRequestSeq = useRef(0);
+  const runsPrIdRef = useRef<number | null>(null);
   // null = 최신 run 따라감(새 run이 생기면 자동 전환). 숫자 = 과거 run 고정 조회.
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
   const runId = selectedRun ?? pr.run_id;
@@ -638,19 +781,75 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
     if (!targetRunId) {
       setFindings([]);
       setFindingsRunId(null);
+      setFindingSummary(null);
+      setFindingNextCursor(null);
       return Promise.resolve();
     }
-    return load(targetRunId)
-      .then((loaded) => {
+    return (async () => {
+      let cursor: string | null = null;
+      let nextCursor: string | null = null;
+      let summary: FindingPage<Finding>["summary"] | null = null;
+      let pagesLoaded = 0;
+      const items: Finding[] = [];
+      for (let index = 0; index < findingPageCount.current; index += 1) {
+        const page = normalizeFindingsPage(
+          await load(targetRunId, { cursor, limit: FINDING_PAGE_LIMIT }),
+          FINDING_PAGE_LIMIT,
+        );
+        items.push(...page.items);
+        summary = page.summary;
+        pagesLoaded += 1;
+        nextCursor = page.pagination.next_cursor;
+        if (!page.pagination.has_more || !nextCursor) break;
+        cursor = nextCursor;
+      }
+      if (
+        runIdRef.current !== targetRunId
+        || requestSeq < findingsAppliedSeq.current
+        || savingFindingIdsRef.current.size > 0
+      ) return;
+      findingsAppliedSeq.current = requestSeq;
+      findingPageCount.current = Math.max(1, pagesLoaded);
+      setFindings(dedupeById(items));
+      setFindingsRunId(targetRunId);
+      setFindingSummary(summary);
+      setFindingNextCursor(nextCursor);
+    })().catch(() => {
+      if (runIdRef.current === targetRunId && requestSeq >= findingsAppliedSeq.current) {
+        setMessage("findings를 불러오지 못했습니다.");
+      }
+    });
+  };
+
+  const loadMoreFindings = () => {
+    const targetRunId = runId;
+    const cursor = findingNextCursor;
+    if (!targetRunId || !cursor || loadingMoreFindings) return;
+    const requestSeq = ++findingsRequestSeq.current;
+    setLoadingMoreFindings(true);
+    load(targetRunId, { cursor, limit: FINDING_PAGE_LIMIT })
+      .then((value) => normalizeFindingsPage(value, FINDING_PAGE_LIMIT))
+      .then((page) => {
         if (runIdRef.current !== targetRunId || requestSeq < findingsAppliedSeq.current) return;
         findingsAppliedSeq.current = requestSeq;
-        setFindings(loaded);
-        setFindingsRunId(targetRunId);
+        setFindings((current) => dedupeById([...current, ...page.items]));
+        setFindingSummary(page.summary);
+        setFindingNextCursor(page.pagination.next_cursor);
+        findingPageCount.current += 1;
       })
-      .catch(() => {
-        if (runIdRef.current === targetRunId && requestSeq >= findingsAppliedSeq.current) {
-          setMessage("findings를 불러오지 못했습니다.");
+      .catch((cause) => {
+        if (runIdRef.current !== targetRunId) return;
+        if (cause instanceof ApiError && cause.status === 400) {
+          findingPageCount.current = 1;
+          setFindingNextCursor(null);
+          setMessage("findings cursor가 만료되어 첫 페이지부터 다시 불러옵니다.");
+          void reloadFindings();
+        } else {
+          setMessage("findings를 더 불러오지 못했습니다.");
         }
+      })
+      .finally(() => {
+        if (runIdRef.current === targetRunId) setLoadingMoreFindings(false);
       });
   };
   const reloadVendors = () => {
@@ -706,6 +905,9 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
 
   useEffect(() => {
     if (!runId) return;
+    findingPageCount.current = 1;
+    setFindingNextCursor(null);
+    setFindingSummary(null);
     reloadFindings();
     reloadVendors();
     reloadDiagnostics();
@@ -721,10 +923,73 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
       }));
   }, [runId]);
 
+  const runLoader = loadRuns ?? api.prRuns;
+  const reloadRuns = () => {
+    const targetPrId = pr.id;
+    const requestSeq = ++runPageRequestSeq.current;
+    return (async () => {
+      let cursor: string | null = null;
+      let nextCursor: string | null = null;
+      let pagesLoaded = 0;
+      const items: RunSummary[] = [];
+      for (let index = 0; index < runPageCount.current; index += 1) {
+        const page: Page<RunSummary> = normalizePage<RunSummary>(
+          await runLoader(targetPrId, { cursor, limit: RUN_PAGE_LIMIT }),
+          RUN_PAGE_LIMIT,
+        );
+        items.push(...page.items);
+        pagesLoaded += 1;
+        nextCursor = page.pagination.next_cursor;
+        if (!page.pagination.has_more || !nextCursor) break;
+        cursor = nextCursor;
+      }
+      if (pr.id !== targetPrId || requestSeq !== runPageRequestSeq.current) return;
+      runPageCount.current = Math.max(1, pagesLoaded);
+      setRuns(dedupeById(items));
+      setRunNextCursor(nextCursor);
+    })().catch(() => {
+      if (pr.id === targetPrId && requestSeq === runPageRequestSeq.current) {
+        setRuns([]);
+        setRunNextCursor(null);
+      }
+    });
+  };
+
+  const loadMoreRuns = () => {
+    const cursor = runNextCursor;
+    const targetPrId = pr.id;
+    if (!cursor || loadingMoreRuns) return;
+    const requestSeq = ++runPageRequestSeq.current;
+    setLoadingMoreRuns(true);
+    runLoader(targetPrId, { cursor, limit: RUN_PAGE_LIMIT })
+      .then((value) => normalizePage<RunSummary>(value, RUN_PAGE_LIMIT))
+      .then((page) => {
+        if (pr.id !== targetPrId || requestSeq !== runPageRequestSeq.current) return;
+        setRuns((current) => dedupeById([...current, ...page.items]));
+        setRunNextCursor(page.pagination.next_cursor);
+        runPageCount.current += 1;
+      })
+      .catch((cause) => {
+        if (pr.id !== targetPrId) return;
+        if (cause instanceof ApiError && cause.status === 400) {
+          runPageCount.current = 1;
+          setRunNextCursor(null);
+          setMessage("run cursor가 만료되어 첫 페이지부터 다시 불러옵니다.");
+          void reloadRuns();
+        } else {
+          setMessage("run 이력을 더 불러오지 못했습니다.");
+        }
+      })
+      .finally(() => { if (pr.id === targetPrId) setLoadingMoreRuns(false); });
+  };
+
   useEffect(() => {
-    // run 이력: 최신 run이 바뀌면(재리뷰 완료 등) 목록을 갱신하고 최신 따라가기로 복귀.
+    if (runsPrIdRef.current !== pr.id) {
+      runsPrIdRef.current = pr.id;
+      runPageCount.current = 1;
+    }
     setSelectedRun(null);
-    (loadRuns ?? api.prRuns)(pr.id).then(setRuns).catch(() => setRuns([]));
+    void reloadRuns();
   }, [pr.id, pr.run_id]);
 
   // 리뷰 진행 중(큐 대기/실행 중)이거나 트리거 직후 새 run을 기다리는 동안 폴링해
@@ -786,12 +1051,22 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
 
   const failed = currentVendors.filter((v) => ["failed", "partial", "timeout"].includes(v.status));
   const approved = currentFindings.filter((f) => f.status === "approved" || f.status === "edited");
+  const findingStatusCounts = findingSummary?.status_counts ?? {};
+  const approvedCount = findingSummary
+    ? (findingStatusCounts.approved ?? 0) + (findingStatusCounts.edited ?? 0)
+    : approved.length;
+  const dismissedCount = findingSummary
+    ? findingStatusCounts.dismissed ?? 0
+    : currentFindings.filter((finding) => finding.status === "dismissed").length;
+  const totalFindingCount = findingSummary?.total_count ?? currentFindings.length;
+  const postableCount = findingSummary?.postable_count
+    ?? approved.filter((finding) => finding.posting_eligible !== false).length;
   const runStoppedWithoutFindings =
     findingsLoaded
     && ["canceled", "failed"].includes(displayedRunStatus ?? "")
-    && currentFindings.length === 0;
+    && totalFindingCount === 0;
 
-  const reloadPreview = (hasApproved = approved.length > 0) => {
+  const reloadPreview = (hasApproved = postableCount > 0) => {
     const requestSeq = ++previewRequestSeq.current;
     const targetRunId = runId;
     if (!targetRunId || !hasApproved) {
@@ -813,7 +1088,7 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
       });
   };
 
-  useEffect(() => { reloadPreview(); }, [runId, findings, findingsRunId]);
+  useEffect(() => { reloadPreview(); }, [runId, findingsRunId, postableCount]);
 
   const setStatus = (id: number, status: string, edited_text?: string) => {
     if (savingFindingIdsRef.current.has(id)) return;
@@ -826,14 +1101,38 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
         ? { ...finding, status, edited_text: edited_text ?? finding.edited_text }
         : finding
     ));
-    const hasApprovedAfterSave = nextFindings.some(
-      (finding) => finding.status === "approved" || finding.status === "edited",
-    );
+    const previousSummary = findingSummary;
+    let nextSummary = findingSummary;
+    if (findingSummary && prev) {
+      const statusCounts = { ...findingSummary.status_counts };
+      statusCounts[prev.status] = Math.max(0, (statusCounts[prev.status] ?? 0) - 1);
+      statusCounts[status] = (statusCounts[status] ?? 0) + 1;
+      const eligible = prev.posting_eligible !== false && prev.posting_eligible !== 0;
+      const wasPostable = eligible && ["approved", "edited"].includes(prev.status);
+      const isPostable = eligible && ["approved", "edited"].includes(status);
+      nextSummary = {
+        ...findingSummary,
+        status_counts: statusCounts,
+        postable_count: findingSummary.postable_count + Number(isPostable) - Number(wasPostable),
+      };
+    }
+    const hasApprovedAfterSave = (nextSummary?.postable_count ?? 0) > 0
+      || nextFindings.some((finding) =>
+        ["approved", "edited"].includes(finding.status)
+        && finding.posting_eligible !== false && finding.posting_eligible !== 0
+      );
     setFindings(nextFindings);
+    setFindingSummary(nextSummary);
     api.patchFinding(id, edited_text === undefined ? { status } : { status, edited_text })
+      .then(() => {
+        savingFindingIdsRef.current.delete(id);
+        setSavingFindingIds(new Set(savingFindingIdsRef.current));
+        return reloadFindings();
+      })
       .then(() => reloadPreview(hasApprovedAfterSave))
       .catch(() => {
         if (prev) setFindings((fs) => fs.map((f) => (f.id === id ? prev : f)));
+        setFindingSummary(previousSummary);
         setMessage("상태 저장에 실패했습니다.");
       })
       .finally(() => {
@@ -843,7 +1142,7 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
   };
 
   const post = () => {
-    if (!runId || approved.length === 0 || postingRef.current) return;
+    if (!runId || postableCount === 0 || postingRef.current) return;
     postingRef.current = true;
     setPosting(true);
     setMessage("");
@@ -960,6 +1259,11 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
             ))}
           </NativeSelect>
         )}
+        {runNextCursor && (
+          <Button variant="outline" size="sm" onClick={loadMoreRuns} disabled={loadingMoreRuns}>
+            {loadingMoreRuns ? "run 불러오는 중" : "이전 run 더 보기"}
+          </Button>
+        )}
         {viewingPast && <Badge variant="warn">과거 run 조회 중</Badge>}
         {currentRunStale && <Badge variant="warn">현재 head 이전 run</Badge>}
         <Button variant="outline" size="sm" onClick={triggerReview} disabled={triggering}>수동 리뷰</Button>
@@ -1041,8 +1345,8 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
                 ))}
                 <Trace
                   title="트리아지"
-                  desc={`${approved.length} 승인 · ${currentFindings.filter((f) => f.status === "dismissed").length} 기각 · ${currentFindings.length} 전체`}
-                  done={approved.length > 0}
+                  desc={`${approvedCount} 승인 · ${dismissedCount} 기각 · ${totalFindingCount} 전체`}
+                  done={approvedCount > 0}
                   last
                 />
               </ol>
@@ -1088,7 +1392,7 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
           <Card>
             <CardHeader>
               <CardTitle>Findings 트리아지</CardTitle>
-              <StatusLine inline>{currentFindings.length}건</StatusLine>
+              <StatusLine inline>로드 {currentFindings.length} / 전체 {totalFindingCount}건</StatusLine>
             </CardHeader>
             <CardContent>
               {!findingsLoaded ? (
@@ -1106,6 +1410,11 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
                       saving={savingFindingIds.has(f.id)}
                     />
                   ))}
+                  {findingNextCursor && (
+                    <Button variant="outline" onClick={loadMoreFindings} disabled={loadingMoreFindings}>
+                      {loadingMoreFindings ? "findings 불러오는 중" : "findings 더 불러오기"}
+                    </Button>
+                  )}
                 </div>
               )}
             </CardContent>
@@ -1116,7 +1425,7 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
           <Card>
             <CardHeader>
               <CardTitle>구조화 코멘트 프리뷰</CardTitle>
-              <StatusLine inline>승인 {approved.length}건</StatusLine>
+              <StatusLine inline>게시 가능 {postableCount}건</StatusLine>
             </CardHeader>
             <CardContent>
               <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#1c2230] px-4 py-3.5 font-mono text-[12px] leading-relaxed text-[#d7deea]">
@@ -1126,7 +1435,7 @@ function Detail({ pr, load, loadVendors, loadDiagnostics, loadContext, loadPrevi
                 <StatusLine tone="error" className="mt-2">{postHealth.message}</StatusLine>
               )}
               <div className="mt-3 flex items-center gap-3">
-                <Button onClick={post} disabled={posting || savingFindingIds.size > 0 || approved.length === 0 || !postHealth?.ok || viewingPast || currentRunStale}>
+                <Button onClick={post} disabled={posting || savingFindingIds.size > 0 || postableCount === 0 || !postHealth?.ok || viewingPast || currentRunStale}>
                   <Send /> 승인분 포스팅
                 </Button>
                 {viewingPast && <StatusLine inline>과거 run은 게시할 수 없습니다.</StatusLine>}
